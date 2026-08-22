@@ -1,0 +1,108 @@
+PODS:
+  - Flutter (1.0.0)
+  - HydraAsync (2.0.6)
+  - path_provider_foundation (0.0.1):
+    - Flutter
+    - FlutterMacOS
+  - RTCRoomEngine/Professional (3.6.5):
+    - TXIMSDK_Plus_iOS_XCFramework (>= 8.4.6676)
+    - TXLiteAVSDK_Professional (>= 12.8.0.19666)
+  - SDWebImage (5.21.7):
+    - SDWebImage/Core (= 5.21.7)
+  - SDWebImage/Core (5.21.7)
+  - shared_preferences_foundation (0.0.1):
+    - Flutter
+    - FlutterMacOS
+  - SnapKit (5.7.1)
+  - tencent_calls_uikit (0.0.1):
+    - Flutter
+    - RTCRoomEngine/Professional (~> 3.6.5)
+    - SnapKit
+    - TUICore (>= 8.7.7201)
+  - tencent_cloud_chat_sdk (8.0.0):
+    - Flutter
+    - HydraAsync
+    - TXIMSDK_Plus_iOS_XCFramework (~> 8.9.7511)
+  - tencent_cloud_uikit_core (0.0.1):
+    - Flutter
+  - tencent_rtc_sdk (0.0.1):
+    - Flutter
+    - TXCustomBeautyProcesserPlugin (= 1.0.2)
+    - TXLiteAVSDK_Professional (~> 12.9.20085)
+  - TUICore (8.9.7511):
+    - SDWebImage
+    - TUICore/ImSDK_Plus (= 8.9.7511)
+  - TUICore/Base (8.9.7511):
+    - SDWebImage
+  - TUICore/ImSDK_Plus (8.9.7511):
+    - SDWebImage
+    - TUICore/Base
+    - TXIMSDK_Plus_iOS_XCFramework
+  - TXCustomBeautyProcesserPlugin (1.0.2)
+  - TXIMSDK_Plus_iOS_XCFramework (8.9.7511)
+  - TXLiteAVSDK_Professional (12.9.20085):
+    - TXLiteAVSDK_Professional/Professional (= 12.9.20085)
+  - TXLiteAVSDK_Professional/Professional (12.9.20085)
+  - url_launcher_ios (0.0.1):
+    - Flutter
+
+DEPENDENCIES:
+  - Flutter (from `Flutter`)
+  - path_provider_foundation (from `.symlinks/plugins/path_provider_foundation/darwin`)
+  - shared_preferences_foundation (from `.symlinks/plugins/shared_preferences_foundation/darwin`)
+  - tencent_calls_uikit (from `.symlinks/plugins/tencent_calls_uikit/ios`)
+  - tencent_cloud_chat_sdk (from `.symlinks/plugins/tencent_cloud_chat_sdk/ios`)
+  - tencent_cloud_uikit_core (from `.symlinks/plugins/tencent_cloud_uikit_core/ios`)
+  - tencent_rtc_sdk (from `.symlinks/plugins/tencent_rtc_sdk/ios`)
+  - url_launcher_ios (from `.symlinks/plugins/url_launcher_ios/ios`)
+
+SPEC REPOS:
+  trunk:
+    - HydraAsync
+    - RTCRoomEngine
+    - SDWebImage
+    - SnapKit
+    - TUICore
+    - TXCustomBeautyProcesserPlugin
+    - TXIMSDK_Plus_iOS_XCFramework
+    - TXLiteAVSDK_Professional
+
+EXTERNAL SOURCES:
+  Flutter:
+    :path: Flutter
+  path_provider_foundation:
+    :path: ".symlinks/plugins/path_provider_foundation/darwin"
+  shared_preferences_foundation:
+    :path: ".symlinks/plugins/shared_preferences_foundation/darwin"
+  tencent_calls_uikit:
+    :path: ".symlinks/plugins/tencent_calls_uikit/ios"
+  tencent_cloud_chat_sdk:
+    :path: ".symlinks/plugins/tencent_cloud_chat_sdk/ios"
+  tencent_cloud_uikit_core:
+    :path: ".symlinks/plugins/tencent_cloud_uikit_core/ios"
+  tencent_rtc_sdk:
+    :path: ".symlinks/plugins/tencent_rtc_sdk/ios"
+  url_launcher_ios:
+    :path: ".symlinks/plugins/url_launcher_ios/ios"
+
+SPEC CHECKSUMS:
+  Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
+  HydraAsync: 8d589bd725b0224f899afafc9a396327405f8063
+  path_provider_foundation: 2b6b4c569c0fb62ec74538f866245ac84301af46
+  RTCRoomEngine: 22fa7a22782566296a868feb54b8b3510fe63d25
+  SDWebImage: e9fc87c1aab89a8ab1bbd74eba378c6f53be8abf
+  shared_preferences_foundation: fcdcbc04712aee1108ac7fda236f363274528f78
+  SnapKit: d612e99e678a2d3b95bf60b0705ed0a35c03484a
+  tencent_calls_uikit: 3d1f3e306d71676718257973d146de2fa55a9821
+  tencent_cloud_chat_sdk: e22828dcb293c2ace821f0a5bfc506b6369c81d6
+  tencent_cloud_uikit_core: c0140985a33df7b3948d2ebe0a0d7eeb780447f2
+  tencent_rtc_sdk: 746a3a90a8994d836df8432b36e2d2bae8355224
+  TUICore: 7360e867205b38f72974e42d094fbb06ea68fe1e
+  TXCustomBeautyProcesserPlugin: 099393b941cb40eda12b3a80bf6c0319957b1cfd
+  TXIMSDK_Plus_iOS_XCFramework: 10893791aa5c27b2b689ae3547878d10aeea9b7b
+  TXLiteAVSDK_Professional: 8cf38407bed4271f03389eecba30fbb64017ff49
+  url_launcher_ios: 5334b05cef931de560670eeae103fd3e431ac3fe
+
+PODFILE CHECKSUM: cc1f88378b4bfcf93a6ce00d2c587857c6008d3b
+
+COCOAPODS: 1.16.2

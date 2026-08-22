@@ -1,0 +1,52 @@
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
+import 'package:tencent_cloud_chat_demo/src/conversation.dart'
+    show ConversationListScope;
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
+import 'package:tencent_cloud_chat_uikit/ui/controller/tim_uikit_conversation_controller.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/screen_utils.dart';
+import 'package:tencent_cloud_chat_demo/src/multi_platform_widget/search_entry/search_entry_narrow.dart';
+import 'package:tencent_cloud_chat_demo/src/multi_platform_widget/search_entry/search_entry_wide.dart';
+
+class SearchEntry extends StatefulWidget {
+  final TIMUIKitConversationController conversationController;
+  final PlusType? plusType;
+  final VoidCallback? onClickSearch;
+  final ValueChanged<V2TimConversation>? directToChat;
+  final ConversationListScope listScope;
+
+  const SearchEntry({
+    Key? key,
+    required this.conversationController,
+    this.plusType,
+    this.onClickSearch,
+    this.directToChat,
+    this.listScope = ConversationListScope.c2c,
+  }) : super(key: key);
+
+  @override
+  State<SearchEntry> createState() => _SearchEntryState();
+}
+
+class _SearchEntryState extends State<SearchEntry> {
+  @override
+  Widget build(BuildContext context) {
+    return TUIKitScreenUtils.getDeviceWidget(
+      context: context,
+      defaultWidget: SearchEntryNarrow(
+        conversationController: widget.conversationController,
+      ),
+      desktopWidget: SearchEntryWide(
+        onClickSearch: widget.onClickSearch,
+        directToChat: widget.directToChat,
+        conversationController: widget.conversationController,
+        plusType: widget.plusType,
+        listScope: widget.listScope,
+      ),
+      mobileWidget: SearchEntryNarrow(
+        conversationController: widget.conversationController,
+      ),
+    );
+  }
+}

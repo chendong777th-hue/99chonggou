@@ -1,0 +1,286 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:tencent_cloud_chat_demo/src/utils/conversation_preview_history_sync.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
+
+/// Serializes chat history recovery and post-open retry work per conversation.
+class ChatHistoryRecoveryCoordinator {
+  ChatHistoryRecoveryCoordinator._();
+
+  static final ChatHistoryRecoveryCoordinator instance =
+      ChatHistoryRecoveryCoordinator._();
+
+  static const Duration _skipRecoveryWindow = Duration(seconds: 30);
+  static const Duration _foregroundRequestCoalesceWindow = Duration(seconds: 2);
+  static const Duration _defaultPostOpenRetryDelay =
+      Duration(milliseconds: 800);
+
+  static const int priorityInitial = 0;
+  static const int priorityUser = 1;
+  static const int priorityForeground = 2;
+  static const int priorityBackground = 3;
+
+  final Map<String, _ConversationRecoveryState> _states =
+      <String, _ConversationRecoveryState>{};
+  final Map<String, Future<void>> _exclusiveTasks = <String, Future<void>>{};
+  final Map<String, int> _activePriorityByKey = <String, int>{};
+
+  void beginInitialLoad(String conversationKey) {
+    final key = conversationKey.trim();
+    if (key.isEmpty) {
+      return;
+    }
+    final state = _states.putIfAbsent(key, _ConversationRecoveryState.new);
+    state.initialLoadInFlight = true;
+    state.initialLoadComplete = false;
+  }
+
+  void markInitialLoadComplete(String conversationKey) {
+    final key = conversationKey.trim();
+    if (key.isEmpty) {
+      return;
+    }
+    final state = _states.putIfAbsent(key, _ConversationRecoveryState.new);
+    state.initialLoadInFlight = false;
+    state.initialLoadComplete = true;
+    for (final completer in state.initialLoadWaiters) {
+      if (!completer.isCompleted) {
+        completer.complete();
+      }
+    }
+    state.initialLoadWaiters.clear();
+  }
+
+  Future<void> waitForInitialLoadComplete(String conversationKey) async {
+    final key = conversationKey.trim();
+    if (key.isEmpty) {
+      return;
+    }
+    final state = _states.putIfAbsent(key, _ConversationRecoveryState.new);
+    if (state.initialLoadComplete || !state.initialLoadInFlight) {
+      return;
+    }
+    final completer = Completer<void>();
+    state.initialLoadWaiters.add(completer);
+    return completer.future;
+  }
+
+  void recordSuccessfulRecovery(String conversationKey) {
+    final key = conversationKey.trim();
+    if (key.isEmpty) {
+      return;
+    }
+    final state = _states.putIfAbsent(key, _ConversationRecoveryState.new);
+    state.lastSuccessfulRecoveryAt = DateTime.now();
+  }
+
+  bool shouldSkipForegroundRecovery({
+    required String conversationKey,
+    required bool hasVisibleMessages,
+    required bool previewAhead,
+    required String reason,
+    bool hasDeferredIncoming = false,
+  }) {
+    if (!hasVisibleMessages) {
+      return false;
+    }
+    final normalizedReason = reason.trim();
+    final key = conversationKey.trim();
+    if (key.isEmpty) {
+      return false;
+    }
+    if (hasDeferredIncoming) {
+      return false;
+    }
+    final last = _states[key]?.lastSuccessfulRecoveryAt;
+    if (last == null ||
+        DateTime.now().difference(last) >= _skipRecoveryWindow) {
+      return false;
+    }
+    if (normalizedReason ==
+        ConversationPreviewHistorySync.previewAheadOnOpenReason) {
+      return true;
+    }
+    if (previewAhead) {
+      return false;
+    }
+    if (normalizedReason == 'im_reconnected' ||
+        normalizedReason == 'web_im_reconnected') {
+      // 真实断线重连后的补拉不可跳过。
+      return false;
+    }
+    if (normalizedReason != 'sync_server_finish' &&
+        normalizedReason != 'connect_success' &&
+        normalizedReason != 'app_resumed') {
+      return false;
+    }
+    return true;
+  }
+
+  /// 合并同一次亮屏产生的 app_resumed / connect_success / im_reconnected。
+  ///
+  /// 这些信号来自不同监听器，可能在数百毫秒内同时到达；只允许第一个
+  /// 请求进入 ChatHistoryRefreshBus，避免同一会话串行补拉两三遍。
+  bool shouldCoalesceForegroundRequest({
+    required String conversationKey,
+    required String reason,
+  }) {
+    final key = conversationKey.trim();
+    if (key.isEmpty) {
+      return true;
+    }
+    final normalizedReason = reason.trim();
+    if (normalizedReason != 'app_resumed' &&
+        normalizedReason != 'connect_success' &&
+        normalizedReason != 'im_reconnected') {
+      return false;
+    }
+    final state = _states.putIfAbsent(key, _ConversationRecoveryState.new);
+    final now = DateTime.now();
+    final last = state.lastForegroundRequestAt;
+    if (last != null &&
+        now.difference(last) < _foregroundRequestCoalesceWindow) {
+      return true;
+    }
+    state.lastForegroundRequestAt = now;
+    return false;
+  }
+
+  /// Lower [priority] values are more important. Drop incoming work when a
+  /// higher-priority task is already active for the same conversation.
+  bool shouldDropForPriority({
+    required String conversationKey,
+    required int priority,
+  }) {
+    final key = conversationKey.trim();
+    if (key.isEmpty) {
+      return true;
+    }
+    final active = _activePriorityByKey[key];
+    if (active == null) {
+      return false;
+    }
+    return priority > active;
+  }
+
+  Future<void> runExclusive({
+    required String conversationKey,
+    required String reason,
+    required int priority,
+    required Future<void> Function() task,
+  }) async {
+    final key = conversationKey.trim();
+    if (key.isEmpty) {
+      return;
+    }
+
+    if (shouldDropForPriority(conversationKey: key, priority: priority)) {
+      return;
+    }
+
+    if (priority > priorityInitial) {
+      await waitForInitialLoadComplete(key);
+      if (shouldDropForPriority(conversationKey: key, priority: priority)) {
+        return;
+      }
+    }
+
+    while (true) {
+      final previous = _exclusiveTasks[key];
+      if (previous != null) {
+        if (shouldDropForPriority(conversationKey: key, priority: priority)) {
+          return;
+        }
+        await previous;
+        if (shouldDropForPriority(conversationKey: key, priority: priority)) {
+          return;
+        }
+        continue;
+      }
+
+      _activePriorityByKey[key] = priority;
+      late final Future<void> current;
+      current = task().whenComplete(() {
+        if (identical(_exclusiveTasks[key], current)) {
+          _exclusiveTasks.remove(key);
+        }
+        if (_activePriorityByKey[key] == priority) {
+          _activePriorityByKey.remove(key);
+        }
+      });
+      _exclusiveTasks[key] = current;
+      await current;
+      return;
+    }
+  }
+
+  void schedulePostOpenRetry({
+    required String conversationKey,
+    required String conversationID,
+    required ConvType conversationType,
+    Duration delay = _defaultPostOpenRetryDelay,
+    required Future<void> Function({
+      required String conversationID,
+      ConvType? conversationType,
+    }) retry,
+  }) {
+    final key = conversationKey.trim();
+    final id = conversationID.trim();
+    if (key.isEmpty || id.isEmpty) {
+      return;
+    }
+    final state = _states.putIfAbsent(key, _ConversationRecoveryState.new);
+    if (state.postOpenRetryScheduled) {
+      return;
+    }
+    state.postOpenRetryScheduled = true;
+    unawaited(() async {
+      try {
+        await waitForInitialLoadComplete(key);
+        if (shouldDropForPriority(
+          conversationKey: key,
+          priority: priorityBackground,
+        )) {
+          return;
+        }
+        if (delay > Duration.zero) {
+          await Future<void>.delayed(delay);
+        }
+        if (shouldDropForPriority(
+          conversationKey: key,
+          priority: priorityBackground,
+        )) {
+          return;
+        }
+        await runExclusive(
+          conversationKey: key,
+          reason: 'post_open_retry',
+          priority: priorityBackground,
+          task: () => retry(
+            conversationID: id,
+            conversationType: conversationType,
+          ),
+        );
+      } finally {
+        state.postOpenRetryScheduled = false;
+      }
+    }());
+  }
+
+  @visibleForTesting
+  void resetForTest() {
+    _states.clear();
+    _exclusiveTasks.clear();
+    _activePriorityByKey.clear();
+  }
+}
+
+class _ConversationRecoveryState {
+  bool initialLoadInFlight = false;
+  bool initialLoadComplete = false;
+  bool postOpenRetryScheduled = false;
+  DateTime? lastSuccessfulRecoveryAt;
+  DateTime? lastForegroundRequestAt;
+  final List<Completer<void>> initialLoadWaiters = <Completer<void>>[];
+}

@@ -1,0 +1,101 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
+import 'package:tencent_cloud_chat_demo/src/services/chat_history_refresh_bus.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
+import 'package:tencent_cloud_chat_demo/src/services/external_chat_entry_service.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
+import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
+
+/// Sends messages created outside an opened chat page.
+///
+/// Do not call the raw SDK sendMessage directly for user-visible share/forward
+/// entries. Raw SDK sending can succeed without inserting the outgoing message
+/// into UIKit's local message list, which makes the sender-side bubble disappear
+/// until a later full history reload.
+class ChatExternalMessageSender {
+  ChatExternalMessageSender._();
+
+  static String conversationId({
+    required String receiverUserId,
+    required String groupId,
+  }) {
+    final receiver = receiverUserId.trim();
+    final group = groupId.trim();
+    return ExternalChatEntryService.instance.resolveConversationId(
+          userID: receiver,
+          groupID: group,
+        ) ??
+        '';
+  }
+
+  static Future<bool> sendCreatedMessage({
+    required V2TimMessage? messageInfo,
+    required String receiverUserId,
+    required String groupId,
+    String reason = 'external_message_sent',
+    bool isExcludedFromUnreadCount = false,
+  }) async {
+    var receiver = receiverUserId.trim();
+    var group = groupId.trim();
+    if (receiver.toLowerCase().startsWith('c2c_') && receiver.length > 4) {
+      receiver = receiver.substring(4);
+    }
+    if (group.toLowerCase().startsWith('group_') && group.length > 6) {
+      group = group.substring(6);
+    }
+    if (messageInfo == null || (receiver.isEmpty && group.isEmpty)) {
+      return false;
+    }
+
+    final isGroup = group.isNotEmpty;
+    final convType = isGroup ? ConvType.group : ConvType.c2c;
+    final convId = isGroup ? group : receiver;
+    final fullConversationId = conversationId(
+      receiverUserId: receiver,
+      groupId: group,
+    );
+
+    try {
+      final sendRes = await serviceLocator<TUIChatGlobalModel>()
+          .sendMessageFromController(
+        messageInfo: messageInfo,
+        convType: convType,
+        convID: convId,
+        isExcludedFromUnreadCount: isExcludedFromUnreadCount,
+      );
+      final ok = sendRes?.code == 0;
+      if (ok) {
+        ConversationRefreshBus.instance.requestRefresh(
+          reason: reason,
+          conversationId:
+              fullConversationId.isNotEmpty ? fullConversationId : null,
+        );
+        if (fullConversationId.isNotEmpty &&
+            !ChatHistoryRefreshBus.skipsHistoryReload(reason)) {
+          ChatHistoryRefreshBus.instance.requestRefresh(
+            conversationId: fullConversationId,
+            reason: reason,
+          );
+          // 与聊天页 messageDidSend 对齐：己方外发不走通知侧乐观 patch，需本地写预览。
+          final sent = sendRes?.data ?? messageInfo;
+          unawaited(
+            ConversationSyncService.instance
+                .patchConversationLastMessage(
+                  conversationID: fullConversationId,
+                  message: sent,
+                )
+                .catchError((_) {}),
+          );
+        }
+      }
+      return ok;
+    } catch (e) {
+      debugPrint('send external message failed: $e');
+      return false;
+    }
+  }
+}

@@ -1,0 +1,44 @@
+name: flutter_zxing
+description: A barcode scanner and generator natively in Flutter with Dart FFI based on ZXing.
+version: 1.1.2
+repository: https://github.com/khoren93/flutter_zxing
+
+environment:
+  sdk: ">=2.19.0 <3.0.0"
+  flutter: ">=3.3.0"
+
+dependencies:
+  camera: ">=0.9.7 <0.11.0"
+  ffi: ^2.0.0
+  flutter:
+    sdk: flutter
+  image: ^4.0.0
+  image_picker: ^0.8.0
+  melos: ^3.0.0
+
+dev_dependencies:
+  ffigen: ^7.0.0 # flutter pub run ffigen --config ffigen.yaml
+  flutter_lints: ^2.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        ffiPlugin: true
+      ios:
+        ffiPlugin: true
+      linux:
+        ffiPlugin: true
+      macos:
+        ffiPlugin: true
+      windows:
+        ffiPlugin: true
+
+# Publish to pub.dev
+# flutter pub publish --dry-run
+# flutter pub publish
+
+# Update zxing-cpp submodule
+# git submodule update --remote

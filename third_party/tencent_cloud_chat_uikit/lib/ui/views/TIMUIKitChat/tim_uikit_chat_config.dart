@@ -1,0 +1,403 @@
+import 'package:flutter/material.dart';
+import 'package:tencent_cloud_chat_sdk/enum/offlinePushInfo.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
+import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_inbound_scroll_follow.dart';
+
+import 'TIMUIKitTextField/tim_uikit_text_field_layout/wide.dart';
+
+enum GroupReceptAllowType { work, public, meeting, community }
+
+enum GroupReceiptAllowType { work, public, meeting, community }
+
+enum UrlPreviewType { none, onlyHyperlink, previewCardAndHyperlink }
+
+/// 新消息入场动画风格（单条滑入 + 列表上推）。
+enum MessageEnterAnimationStyle {
+  /// 约 520ms、[Curves.easeOutCubic]，偏微信。
+  wechat,
+
+  /// 约 400ms、[Curves.easeOutBack]，偏 Telegram。
+  telegram,
+}
+
+class TimeDividerConfig {
+  /// Defines the interval of adding a time divider among the two messages.
+  /// [Unit]: second.
+  /// [Default]: 300.
+  final int? timeInterval;
+
+  /// Defines the parser of a specific timestamp,
+  /// transform it into a semantic time description.
+  final String Function(int timeStamp)? timestampParser;
+
+  TimeDividerConfig({this.timeInterval, this.timestampParser});
+}
+
+/// StickerPanelConfig is a configuration class for the sticker panel component.
+/// It allows customization of specific features such as display options for the
+/// message area, sticker packages, unicode emoji lists, and custom sticker packages.
+class StickerPanelConfig {
+  /// Determines whether to use the QQ Sticker Package.
+  /// Default value: true
+  final bool useQQStickerPackage;
+
+  /// Determines whether to use the Tencent Cloud Chat Sticker Package.
+  /// Default value: true
+  final bool useTencentCloudChatStickerPackage;
+
+  /// Determines whether to compatible with the Tencent Cloud Chat Sticker Package 3.x version.
+  /// Default value : false
+  final bool useTencentCloudChatStickerPackageOldKeys;
+
+  /// A list of unicode emoji, represented as integers.
+  /// Default value: a list of common Unicode Emojis.
+  /// To exclude Unicode Emoji from the display, pass an empty list.
+  final List<int> unicodeEmojiList;
+
+  /// A list of CustomStickerPackage instances, where each instance represents a sticker package.
+  /// Default value: an empty list.
+  final List<CustomStickerPackage> customStickerPackages;
+
+  StickerPanelConfig({
+    this.useQQStickerPackage = true,
+    this.useTencentCloudChatStickerPackage = true,
+    this.useTencentCloudChatStickerPackageOldKeys = false,
+    this.unicodeEmojiList = TUIKitStickerConstData.defaultUnicodeEmojiList,
+    this.customStickerPackages = const [],
+  });
+}
+
+class TIMUIKitChatConfig {
+  /// A StickerPanelConfig instance to configure the sticker panel's behavior and appearance.
+  /// This includes options such as display settings, usage of specific sticker packages,
+  /// unicode emoji lists, and custom sticker packages.
+  final StickerPanelConfig? stickerPanelConfig;
+
+  /// Customize the time divider among the two messages.
+  final TimeDividerConfig? timeDividerConfig;
+
+  /// Control if allowed to show reading status.
+  /// [Default]: true.
+  final bool isShowReadingStatus;
+
+  /// Control if allowed to show reading status for group.
+  /// [Default]: true.
+  /// [Deprecated: ] Please use [isShowReadingStatus] instead.
+  final bool isShowGroupReadingStatus;
+
+  /// Control if allowed to report reading status for group.
+  /// [Default]: true.
+  /// [Deprecated: ] Please use [isShowReadingStatus] instead.
+  final bool isReportGroupReadingStatus;
+
+  /// Control if allowed to show the message operation menu after long pressing message.
+  /// [Default]: true.
+  final bool isAllowLongPressMessage;
+
+  /// Control if allowed to callback after clicking the avatar.
+  /// [Default]: true.
+  final bool isAllowClickAvatar;
+
+  /// Control if allowed to show emoji face message panel.
+  /// [Default]: true.
+  final bool isAllowEmojiPanel;
+
+  /// Control if allowed to show more plus panel.
+  /// [Default]: true.
+  final bool isAllowShowMorePanel;
+
+  /// Control if allowed to send voice sound message.
+  /// [Default]: true.
+  final bool isAllowSoundMessage;
+
+  /// Control if allowed to at when reply automatically.
+  /// [Default]: true.
+  final bool isAtWhenReply;
+
+  /// Control if allowed to at when reply automatically.
+  /// [Default]: true.
+  final bool Function(V2TimMessage message)? isAtWhenReplyDynamic;
+
+  /// The main switch of the group read receipt.
+  /// [Deprecated: ] Please use [isShowReadingStatus] instead.
+  final bool isShowGroupMessageReadReceipt;
+
+  /// [Deprecated: ] not support.
+  final List<GroupReceptAllowType>? groupReadReceiptPermisionList;
+
+  /// Control which group can send message read receipt.
+  /// [Deprecated: ] not support.
+  final List<GroupReceiptAllowType>? groupReadReceiptPermissionList;
+
+  /// Control if show self name in group chat.
+  /// [Default]: false.
+  final bool isShowSelfNameInGroup;
+
+  /// Control if others name in group chat.
+  /// [Default]: true.
+  final bool isShowOthersNameInGroup;
+
+  /// Configuration for offline push.
+  /// If this field is specified, `notificationTitle`, `notificationOPPOChannelID`, `notificationIOSSound`, `notificationAndroidSound`, `notificationBody` and `notificationExt` will not work.
+  final OfflinePushInfo? Function(
+      V2TimMessage message, String convID, ConvType convType)? offlinePushInfo;
+
+  /// The title shows in push notification
+  final String notificationTitle;
+
+  /// The channel ID for OPPO in push notification.
+  final String notificationOPPOChannelID;
+
+  /// The notification sound in iOS devices.
+  /// When `iOSSound` = `kIOSOfflinePushNoSound`, the sound will not play when message received. When `iOSSound` = `kIOSOfflinePushDefaultSound`, the system sound is played when message received. If you want to customize `iOSSound`, you need to link the voice file into the Xcode project, and then set the voice file name (with a suffix) to iOSSound.
+  final String notificationIOSSound;
+
+  /// The notification sound in Android devices.
+  final String notificationAndroidSound;
+
+  ///Used to set the line height of text messages
+  final double textHeight;
+
+  /// The body content shows in push notification.
+  /// Returning `null` means using default body in this case.
+  final String? Function(
+      V2TimMessage message, String convID, ConvType convType)? notificationBody;
+
+  /// External information (String) for notification message, recommend used for jumping to target conversation with JSON format,
+  /// Returning `null` means using default ext in this case.
+  final String? Function(
+      V2TimMessage message, String convID, ConvType convType)? notificationExt;
+
+  /// The type of URL preview level, none preview, only hyperlink in text, or shows a preview card for website.
+  /// [Default]: UrlPreviewType.onlyHyperlink.
+  final UrlPreviewType urlPreviewType;
+
+  /// Whether to display the sending status of c2c messages
+  /// [Default]: true.
+  final bool showC2cMessageEditStatus;
+
+  /// Control if take emoji stickers as message reaction.
+  /// [Default]: true.
+  final bool isUseMessageReaction;
+
+  /// Determine how long a message is allowed to be recalled after it is sent.
+  /// You must modify the configuration on control dashboard synchronized at: https://console.cloud.tencent.com/im/login-message.
+  /// [Unit]: second.
+  /// [Default]: 120.
+  final int upperRecallTime;
+
+  /// Custom preview for face/sticker messages inside reply quote area.
+  /// Return null to use the default [TIMUIKitFaceElem] preview.
+  final Widget? Function(V2TimMessage message)? faceReplyPreviewBuilder;
+
+  /// The prefix of face sticker URI.
+  final String Function(String data)? faceURIPrefix;
+
+  /// The suffix of face sticker URI.
+  final String Function(String data)? faceURISuffix;
+
+  /// Controls whether text and replied messages can be displayed with Markdown formatting.
+  /// Also, when enabled, `isEnableTextSelection` will not works.
+  /// [Default]: false.
+  final bool isSupportMarkdownForTextMessage;
+
+  /// The callback after user clicking the URL link in text messages.
+  /// The default action is opening the link with the default browser of system.
+  final void Function(String url)? onTapLink;
+
+  /// The callback after user tapping `@userId` or `@groupId` in text messages.
+  /// [id] is the raw ID without the leading `@`.
+  final void Function(String id)? onTapChatIdMention;
+
+  /// Whether shows avatar on history message list.
+  /// [Default]: true.
+  final bool isShowAvatar;
+
+  /// This list contains additional operation items that are displayed on the hover bar
+  /// of a message on desktop (macOS, Windows, and desktop version of Web). These items
+  /// are in addition to the default ones and do not affect them.
+  final List<MessageHoverControlItem>? additionalDesktopMessageHoverBarItem;
+
+  /// This list contains additional items that are displayed
+  /// on the message sending area  control bar on desktop (macOS, Windows, and desktop version of Web).
+  /// Use `desktopControlBarConfig` to configure whether or not to show the default control items.
+  final List<DesktopControlBarItem>? additionalDesktopControlBarItems;
+
+  /// This configuration is used for the control bar
+  /// on desktop (macOS, Windows, and desktop version of Web).
+  /// Use `desktopControlBarConfig` to add additional items to the desktop message sending area control bar, in addition to the default ones.
+  final DesktopControlBarConfig? desktopControlBarConfig;
+
+  /// Controls whether users are allowed to mention another user in the group by long-pressing on their avatar.
+  /// [Default]: true.
+  final bool isAllowLongPressAvatarToAt;
+
+  /// Controls whether auto report message read status when new messages come.
+  /// [Default]: true.
+  final bool isAutoReportRead;
+
+  /// Controls whether enable text selection.
+  /// [Default]: true on Desktop while false on Mobile.
+  final bool? isEnableTextSelection;
+
+  /// Controls whether enable the control bar shows when hovering a message on Desktop.
+  /// [Default]: true.
+  final bool isUseMessageHoverBarOnDesktop;
+
+  /// Define the lines in the text message input field on Desktop.
+  final int desktopMessageInputFieldLines;
+
+  /// Specifies whether to use the draft feature on the Web, as the Chat SDK does not support this functionality.
+  /// If enabled, draft data will be stored in TUIKit's memory.
+  /// Note that the draft text will be lost upon refreshing the website.
+  /// [Default]: true.
+  final bool isUseDraftOnWeb;
+
+  /// Whether to persist conversation draft through IM SDK.
+  /// When false, the host app should manage drafts locally.
+  /// [Default]: true.
+  final bool isUseDraft;
+
+  /// Determines whether a group administrator is allowed to recall any
+  /// message from any group member. If this capability is enabled,
+  /// recalled messages will not be interoperable with Native clients
+  /// and will only take effect on other Flutter clients.
+  ///
+  /// [Default]: false
+  final bool isGroupAdminRecallEnabled;
+
+  /// Defines the height of the sticker panel on desktop platforms.
+  /// If the height of the sticker list exceeds this container height,
+  /// the sticker list will automatically become scrollable.
+  ///
+  /// [Default]: 400
+  final double desktopStickerPanelHeight;
+
+  /// Determine whether the normal members can @All in a group chat.
+  /// If enabled, normal members can @All in a group chat.
+  /// If disabled, only the group owner or administrators can @All.
+  ///
+  /// [Default]: false
+  final bool isMemberCanAtAll;
+
+  /// 新消息入场动画风格。
+  /// [Default]: [MessageEnterAnimationStyle.wechat]
+  final MessageEnterAnimationStyle messageEnterAnimationStyle;
+
+  /// 连发消息时入场动画节流窗口（毫秒），窗口内仅最后一条播完整动画。
+  /// [Default]: 400
+  final int messageEnterAnimationThrottleMs;
+
+  /// 插入新消息时是否为旧消息播放列表上推过渡。
+  /// [Default]: true
+  final bool messageEnterAnimationListPushEnabled;
+
+  /// 跳过入场动画的消息（如钱包卡片，避免 Opacity 叠层残影）。
+  final bool Function(V2TimMessage message)?
+      skipMessageEnterAnimationForMessage;
+
+  /// 连收多条时是否按块上屏（微信风格，底部可见时）。
+  /// [Default]: true
+  final bool inboundChunkRevealEnabled;
+
+  /// 分块上屏间隔（毫秒）。约 1 帧，与系统刷新对齐。
+  /// [Default]: 30
+  final int inboundChunkRevealIntervalMs;
+
+  /// 单块最多上屏条数。积压越多会自动加大块大小（不超过此值）。
+  /// [Default]: 24
+  final int inboundChunkRevealMaxChunk;
+
+  @Deprecated('Use inboundChunkRevealEnabled')
+  bool get inboundPacedRevealEnabled => inboundChunkRevealEnabled;
+
+  @Deprecated('Use inboundChunkRevealIntervalMs')
+  int get inboundPacedRevealIntervalMs => inboundChunkRevealIntervalMs;
+
+  /// 分块上屏时是否用 Scroll Follow 钉底/平滑跟滚（只动滚动，不动气泡）。
+  /// [Default]: true
+  final bool inboundScrollFollowEnabled;
+
+  /// [Default]: [InboundScrollFollowMode.smooth]
+  final InboundScrollFollowMode inboundScrollFollowMode;
+
+  /// smooth 模式滚动插值时长（毫秒）。
+  /// [Default]: 100
+  final int inboundScrollFollowDurationMs;
+
+  /// 发送文字时是否启用输入框 → 气泡浮层过渡。
+  /// [Default]: true
+  final bool sendFlyOverlayEnabled;
+
+  /// 键盘弹起/收起时是否平滑过渡列表底部 inset。
+  /// [Default]: true
+  final bool keyboardInsetAnimationEnabled;
+
+  const TIMUIKitChatConfig(
+      {this.onTapLink,
+      this.onTapChatIdMention,
+      this.timeDividerConfig,
+      this.desktopStickerPanelHeight = 400,
+      this.stickerPanelConfig,
+      this.isGroupAdminRecallEnabled = false,
+      this.isAutoReportRead = true,
+      this.faceReplyPreviewBuilder,
+      this.faceURIPrefix,
+      this.faceURISuffix,
+      this.textHeight = 1.2,
+      this.desktopMessageInputFieldLines = 6,
+      this.isAtWhenReply = true,
+      this.notificationAndroidSound = "",
+      this.isUseMessageHoverBarOnDesktop = true,
+      this.isSupportMarkdownForTextMessage = false,
+      this.notificationExt,
+      this.isUseMessageReaction = true,
+      this.isShowAvatar = true,
+      this.isShowSelfNameInGroup = false,
+      this.isAtWhenReplyDynamic,
+      this.offlinePushInfo,
+      @Deprecated("Please use [isShowReadingStatus] instead")
+      this.isShowGroupMessageReadReceipt = true,
+      this.upperRecallTime = 120,
+      this.isShowOthersNameInGroup = true,
+      this.urlPreviewType = UrlPreviewType.onlyHyperlink,
+      this.notificationBody,
+      this.notificationOPPOChannelID = "",
+      this.notificationTitle = "",
+      this.notificationIOSSound = "",
+      this.isAllowSoundMessage = true,
+      @Deprecated("not support") this.groupReadReceiptPermisionList,
+      @Deprecated("not support") this.groupReadReceiptPermissionList,
+      this.isAllowEmojiPanel = true,
+      this.isAllowShowMorePanel = true,
+      this.isShowReadingStatus = true,
+      this.desktopControlBarConfig,
+      this.isAllowLongPressMessage = true,
+      this.isUseDraftOnWeb = true,
+      this.isUseDraft = true,
+      this.isAllowClickAvatar = true,
+      this.isEnableTextSelection,
+      this.additionalDesktopMessageHoverBarItem,
+      this.isShowGroupReadingStatus = true,
+      @Deprecated("Please use [isShowReadingStatus] instead")
+      this.isReportGroupReadingStatus = true,
+      this.showC2cMessageEditStatus = true,
+      this.additionalDesktopControlBarItems,
+      this.isAllowLongPressAvatarToAt = true,
+      this.isMemberCanAtAll = false,
+      this.messageEnterAnimationStyle = MessageEnterAnimationStyle.wechat,
+      this.messageEnterAnimationThrottleMs = 400,
+      this.messageEnterAnimationListPushEnabled = false,
+      this.skipMessageEnterAnimationForMessage,
+      this.inboundChunkRevealEnabled = true,
+      this.inboundChunkRevealIntervalMs = 30,
+      this.inboundChunkRevealMaxChunk = 24,
+      this.inboundScrollFollowEnabled = true,
+      this.inboundScrollFollowMode = InboundScrollFollowMode.smooth,
+      this.inboundScrollFollowDurationMs = 100,
+      this.sendFlyOverlayEnabled = false,
+      this.keyboardInsetAnimationEnabled = false});
+}

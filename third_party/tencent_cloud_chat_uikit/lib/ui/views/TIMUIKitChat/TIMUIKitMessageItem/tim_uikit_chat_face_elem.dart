@@ -1,0 +1,104 @@
+import 'package:flutter/material.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/screen_utils.dart';
+import 'package:tencent_cloud_chat_uikit/base_widgets/tim_ui_kit_base.dart';
+import 'package:tencent_cloud_chat_uikit/base_widgets/tim_ui_kit_state.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/separate_models/tui_chat_separate_view_model.dart';
+import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKitMessageItem/TIMUIKitMessageReaction/tim_uikit_message_reaction_wrapper.dart';
+
+class TIMUIKitFaceElem extends StatefulWidget {
+  final String path;
+  final bool isShowJump;
+  final VoidCallback? clearJump;
+  final V2TimMessage message;
+  final bool? isShowMessageReaction;
+  final TUIChatSeparateViewModel model;
+
+  const TIMUIKitFaceElem(
+      {Key? key,
+      required this.path,
+      required this.isShowJump,
+      this.clearJump,
+      required this.message,
+      this.isShowMessageReaction,
+      required this.model})
+      : super(key: key);
+
+  @override
+  State<StatefulWidget> createState() => _TIMUIKitTextElemState();
+}
+
+class _TIMUIKitTextElemState extends TIMUIKitState<TIMUIKitFaceElem> {
+  bool isFromNetwork() {
+    return widget.path.startsWith('http');
+  }
+
+  createPathFromNative(String path) {
+    String prefix = "";
+    String suffix = "";
+    if (widget.model.chatConfig.faceURIPrefix != null) {
+      prefix = widget.model.chatConfig.faceURIPrefix!(path);
+    }
+    if (widget.model.chatConfig.faceURISuffix != null) {
+      suffix = widget.model.chatConfig.faceURISuffix!(path);
+    }
+    return "$prefix$path$suffix";
+  }
+
+  Widget _faceLoadErrorPlaceholder() {
+    return const SizedBox(
+      width: 56,
+      height: 56,
+      child: Center(
+        child: Icon(Icons.emoji_emotions_outlined, size: 32, color: Colors.black26),
+      ),
+    );
+  }
+
+  @override
+  Widget tuiBuild(BuildContext context, TUIKitBuildValue value) {
+    final isDesktopScreen = TUIKitScreenUtils.getFormFactor(context) == DeviceType.Desktop;
+    final maxWidth = MediaQuery.of(context).size.width * (isDesktopScreen ? 0.1 : 0.3);
+    final maxHeight = maxWidth * 1.25;
+    final cacheWidth = (maxWidth * MediaQuery.devicePixelRatioOf(context)).round();
+    final cacheHeight = (maxHeight * MediaQuery.devicePixelRatioOf(context)).round();
+    return TIMUIKitMessageReactionWrapper(
+        chatModel: widget.model,
+        isShowJump: widget.isShowJump,
+        isFromSelf: widget.message.isSelf ?? true,
+        clearJump: widget.clearJump,
+        message: widget.message,
+        isShowMessageReaction: widget.isShowMessageReaction ?? true,
+        child: Container(
+          padding: const EdgeInsets.all(10),
+          child: SizedBox(
+            width: maxWidth,
+            height: maxHeight,
+            child: isFromNetwork()
+                ? Image.network(
+                    widget.path,
+                    width: maxWidth,
+                    height: maxHeight,
+                    fit: BoxFit.contain,
+                    gaplessPlayback: true,
+                    cacheWidth: cacheWidth,
+                    cacheHeight: cacheHeight,
+                    filterQuality: FilterQuality.low,
+                    errorBuilder: (_, __, ___) => _faceLoadErrorPlaceholder(),
+                  )
+                : Image.asset(
+                    createPathFromNative(widget.path),
+                    width: maxWidth,
+                    height: maxHeight,
+                    fit: BoxFit.contain,
+                    gaplessPlayback: true,
+                    cacheWidth: cacheWidth,
+                    cacheHeight: cacheHeight,
+                    filterQuality: FilterQuality.low,
+                    errorBuilder: (_, __, ___) => _faceLoadErrorPlaceholder(),
+                  ),
+          ),
+        ));
+  }
+}

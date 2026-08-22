@@ -1,0 +1,113 @@
+group 'com.tencent.chat.tencent_cloud_chat_sdk'
+version '1.0'
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath 'com.android.tools.build:gradle:7.3.0'
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+        // 本地测试 aar 包的时候使用，这里使用 aar 包的本地绝对路径
+//         flatDir {
+//             dirs '/Users/xxx/Documents/Git/imsdk/imsdk/src/platform/flutter/tencent_cloud_chat_sdk/android/imsdk'
+//         }
+    }
+}
+
+apply plugin: 'com.android.library'
+
+android {
+    if (project.android.hasProperty("namespace")) {
+        namespace 'com.tencent.chat.tencent_cloud_chat_sdk'
+    }
+
+    compileSdkVersion 34
+
+    // 借助 gradle 自动执行 cmake 脚本时使用
+    // externalNativeBuild {
+    //     cmake {
+    //         path "../src/CMakeLists.txt"
+
+    //         // The default CMake version for the Android Gradle Plugin is 3.10.2.
+    //         // https://developer.android.com/studio/projects/install-ndk#vanilla_cmake
+    //         //
+    //         // The Flutter tooling requires that developers have CMake 3.10 or later
+    //         // installed. You should not increase this version, as doing so will cause
+    //         // the plugin to fail to compile for some customers of the plugin.
+    //         // version "3.10.2"
+    //     }
+    // }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    
+    // 本地单独测试 so 包的时候使用
+    // 注意: 因为 aar 包中有 so 包，最后链接的时候使用的是 aar 包中的 so
+    // 单独替换本地 so 包的时候，可以在 android/src/main/jniLibs 目录下放置不同架构的 so 包，默认会使用该目录下的 so 包
+    // 同时，为了避免和 aar 包中的 so 冲突，可以用下边的处理从 aar 包中排除掉 so 包
+    // packagingOptions {
+    //     exclude 'jni/armeabi-v7a/libImSDK.so'
+    //     exclude 'jni/arm64-v8a/libImSDK.so'
+    //     exclude 'jni/x86/libImSDK.so'
+    //     exclude 'jni/x86_64/libImSDK.so'
+    // }
+
+    defaultConfig {
+        minSdkVersion 19
+        consumerProguardFiles 'consumer-proguard-rules.txt'
+        multiDexEnabled true
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        // 借助 gradle 自动执行 cmake 脚本时使用
+        // externalNativeBuild {
+        //     cmake {
+        //         arguments '-DANDROID_STL=c++_static'
+        //         abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+        //     }
+        // }
+    }
+
+    configurations {
+        unpackAar
+    }
+
+    dependencies {
+        api 'com.tencent.imsdk:imsdk-plus:8.9.7545'
+        testImplementation 'junit:junit:4.13.2'
+        testImplementation 'org.mockito:mockito-core:5.0.0'
+
+        // 本地测试 aar 包的时候使用下边的依赖，注释掉上边 imsdk-plus 相关的依赖
+        // implementation(name: 'imsdk-plus-8.4.6760', ext: 'aar')
+    }
+    lintOptions {
+        disable 'InvalidPackage'
+    }
+
+    testOptions {
+        unitTests.all {
+            testLogging {
+               events "passed", "skipped", "failed", "standardOut", "standardError"
+               outputs.upToDateWhen {false}
+               showStandardStreams = true
+            }
+        }
+    }
+    packagingOptions{
+        pickFirst '**/libc++_shared.so'
+        doNotStrip "*/armeabi/libYTCommon.so"
+        doNotStrip "*/armeabi-v7a/libYTCommon.so"
+        doNotStrip "*/x86/libYTCommon.so"
+        doNotStrip "*/arm64-v8a/libYTCommon.so"
+    }
+}

@@ -1,0 +1,79 @@
+// ignore_for_file: file_names
+
+import 'package:extended_text_field/extended_text_field.dart';
+import 'package:flutter/material.dart';
+import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKitTextField/special_text/chat_id_mention_text.dart';
+import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKitTextField/special_text/http_text.dart';
+import 'package:tim_ui_kit_sticker_plugin/utils/tim_custom_face_data.dart';
+
+import 'emoji_text.dart';
+
+class DefaultSpecialTextSpanBuilder extends SpecialTextSpanBuilder {
+  DefaultSpecialTextSpanBuilder({
+    this.isUseQQPackage = false,
+    this.isUseTencentCloudChatPackage = false,
+    this.isUseTencentCloudChatPackageOldKeys = false,
+    this.customEmojiStickerList = const [],
+    this.showAtBackground = false,
+    this.checkHttpLink = true,
+    this.checkChatIdMention = false,
+    this.onTapChatIdMention,
+  });
+
+  /// whether show background for @somebody
+  final bool showAtBackground;
+
+  final bool isUseQQPackage;
+
+  final bool isUseTencentCloudChatPackage;
+
+  final bool isUseTencentCloudChatPackageOldKeys;
+
+  final bool checkHttpLink;
+
+  final bool checkChatIdMention;
+
+  final void Function(String id)? onTapChatIdMention;
+
+  final List<CustomEmojiFaceData> customEmojiStickerList;
+
+  @override
+  SpecialText? createSpecialText(String flag,
+      {TextStyle? textStyle, SpecialTextGestureTapCallback? onTap, int? index}) {
+    if (flag == '') {
+      return null;
+    }
+
+    ///index is end index of start flag, so text start index should be index-(flag.length-1)
+    if (isStart(flag, EmojiText.flag)) {
+      return EmojiText(textStyle,
+          isUseTencentCloudChatPackage: isUseTencentCloudChatPackage,
+          isUseTencentCloudChatPackageOldKeys: isUseTencentCloudChatPackageOldKeys,
+          isUseQQPackage: isUseQQPackage,
+          start: index! - (EmojiText.flag.length - 1),
+          customEmojiStickerList: customEmojiStickerList);
+    } else if (isStart(flag, HttpText.flag) && checkHttpLink) {
+      return HttpText(textStyle, onTap, start: index! - (HttpText.flag.length - 1));
+    } else if (isStart(flag, ChatIdMentionText.flag) && checkChatIdMention) {
+      final mentionTap = onTapChatIdMention;
+      return ChatIdMentionText(
+        textStyle,
+        mentionTap == null
+            ? null
+            : (dynamic parameter) {
+                final raw = parameter?.toString() ?? '';
+                final id = raw.contains(ChatIdMentionText.flag)
+                    ? ChatIdMentionText.parseRawId(
+                        raw.replaceAll(ChatIdMentionText.flag, ''),
+                      )
+                    : ChatIdMentionText.parseRawId(raw);
+                if (id.isNotEmpty) {
+                  mentionTap(id);
+                }
+              },
+        start: index! - (ChatIdMentionText.flag.length - 1),
+      );
+    }
+    return null;
+  }
+}

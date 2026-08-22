@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="keep_alive_notification_title">99chat</string>
+    <string name="keep_alive_notification_text">正在后台保持消息连接</string>
+    <string name="keep_alive_notification_channel_name">消息连接</string>
+    <string name="keep_alive_notification_channel_desc">保持消息推送连接，关闭后可能无法及时收到消息</string>
+    <string name="chat_notification_channel_name">消息通知</string>
+    <string name="chat_notification_channel_desc">新消息提醒</string>
+</resources>

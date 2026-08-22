@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+    <base href="$FLUTTER_BASE_HREF" />
+
+    <meta charset="UTF-8" />
+    <meta content="IE=Edge" http-equiv="X-UA-Compatible" />
+    <meta
+      name="description"
+      content="Showcase the TUIKit and SDK of Tencent Cloud Chat on Flutter. 99Chat Flutter SDK 及 TUIKit 组件库体验。"
+    />
+    <meta
+      name="keywords"
+      content="Chat SDK, Tencent Cloud Chat, 99Chat, Flutter Chat, Flutter IM, Chat API, 腾讯云即时通信IM"
+    />
+
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="99Chat" />
+    <link rel="apple-touch-icon" href="favicon.ico" />
+    <!-- 主字体已内置 NotoSansSC；gstatic 仅作缺字回退，不 preconnect 避免抢带宽 -->
+    <title>99Chat</title>
+    <link rel="manifest" href="manifest.json" />
+    <link rel="icon" href="favicon.ico" type="image/x-icon" />
+    <link rel="shortcut icon" href="favicon.ico" type="image/x-icon" />
+    <meta
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+      name="viewport"
+    />
+    <style>
+      /* Web 不展示启动图：Flutter 加载前仅保留与 App 接近的纯色底 */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #ffffff;
+      }
+      @media (prefers-color-scheme: dark) {
+        html,
+        body {
+          background: #121212;
+        }
+      }
+    </style>
+  </head>
+
+  <body oncontextmenu="return false">
+    <script>
+      document.oncontextmenu = function (event) {
+        if (window.event) {
+          event = window.event;
+        }
+        try {
+          var the = event.srcElement;
+          if (
+            !(
+              (the.tagName == "INPUT" && the.type.toLowerCase() == "text") ||
+              the.tagName == "TEXTAREA"
+            )
+          ) {
+            return false;
+          }
+          return true;
+        } catch (e) {
+          return false;
+        }
+      };
+    </script>
+    <!-- TIM SDK 改由 Dart [TimWebScriptLoader] 在 initIMSDK 前按需注入，避免阻塞 Flutter 首包 -->
+    <script src="flutter_bootstrap.js" async></script>
+  </body>
+</html>
