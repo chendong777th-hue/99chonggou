@@ -184,6 +184,7 @@ class TIMUIKitTextFieldLayoutWide extends StatefulWidget {
   final List<CustomStickerPackage> stickerPackageList;
 
   final String? forbiddenText;
+  final bool isComposingText;
 
   const TIMUIKitTextFieldLayoutWide(
       {Key? key,
@@ -221,7 +222,8 @@ class TIMUIKitTextFieldLayoutWide extends StatefulWidget {
       required this.theme,
       required this.chatConfig,
       required this.stickerPackageList,
-      this.forbiddenText})
+      this.forbiddenText,
+      this.isComposingText = false})
       : super(key: key);
 
   @override
@@ -1097,6 +1099,15 @@ class _TIMUIKitTextFieldLayoutWideState
     }, const Duration(seconds: 1));
 
     final debounceFunc = _debounce((value) {
+      final composing = widget.textEditingController.value.composing;
+      if (widget.textEditingController.text != value) {
+        print('[ChatInputDiag] wide=on_changed_skip_stale');
+        return;
+      }
+      if (composing.isValid && composing.start < composing.end) {
+        print('[ChatInputDiag] wide=on_changed_skip_composing');
+        return;
+      }
       if (widget.onChanged != null) {
         widget.onChanged!(value);
       }
@@ -1209,19 +1220,18 @@ class _TIMUIKitTextFieldLayoutWideState
                                 hintText: widget.hintText ?? '',
                               ),
                               controller: widget.textEditingController,
-                              specialTextSpanBuilder: PlatformUtils().isWeb
+                              specialTextSpanBuilder: widget.isComposingText
+                                  ? null
+                                  : PlatformUtils().isWeb
                                   ? null
                                   : DefaultSpecialTextSpanBuilder(
-                                      isUseTencentCloudChatPackage: widget
-                                              .model
-                                              .chatConfig
-                                              .stickerPanelConfig
-                                              ?.useTencentCloudChatStickerPackage ??
+                                      isUseTencentCloudChatPackage: widget.model.chatConfig
+                                              .stickerPanelConfig?.useTencentCloudChatStickerPackage ??
                                           true,
                                       customEmojiStickerList:
                                           widget.customEmojiStickerList,
-                                      showAtBackground: true,
-                                    )),
+                                      showAtBackground: true),
+                              ),
                         ),
                       ),
                       const SizedBox(width: 8),

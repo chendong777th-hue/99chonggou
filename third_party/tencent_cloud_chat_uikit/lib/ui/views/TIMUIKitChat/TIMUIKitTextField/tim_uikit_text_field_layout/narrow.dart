@@ -117,6 +117,7 @@ class TIMUIKitTextFieldLayoutNarrow extends StatefulWidget {
 
   /// 禁言等不可发言时的提示文案；非空时隐藏输入框与功能按钮。
   final String? forbiddenText;
+  final bool isComposingText;
 
   const TIMUIKitTextFieldLayoutNarrow(
       {Key? key,
@@ -154,7 +155,8 @@ class TIMUIKitTextFieldLayoutNarrow extends StatefulWidget {
       required this.customEmojiStickerList,
       this.controller,
       required this.stickerPackageList,
-      this.forbiddenText})
+      this.forbiddenText,
+      this.isComposingText = false})
       : super(key: key);
 
   @override
@@ -826,6 +828,15 @@ class TIMUIKitTextFieldLayoutNarrowState
           'focus=${widget.focusNode.hasFocus} composing='
           '${widget.textEditingController.value.composing.start},'
           '${widget.textEditingController.value.composing.end}');
+      final composing = widget.textEditingController.value.composing;
+      if (widget.textEditingController.text != value) {
+        print('[ChatInputDiag] narrow=on_changed_skip_stale');
+        return;
+      }
+      if (composing.isValid && composing.start < composing.end) {
+        print('[ChatInputDiag] narrow=on_changed_skip_composing');
+        return;
+      }
       _syncSendButtonFromController();
       if (widget.onChanged != null) {
         widget.onChanged!(value);
@@ -978,33 +989,24 @@ class TIMUIKitTextFieldLayoutNarrowState
                                       isDense: true,
                                       hintText: widget.hintText ?? ''),
                                   controller: widget.textEditingController,
-                                  specialTextSpanBuilder: PlatformUtils().isWeb
+                                  specialTextSpanBuilder: widget.isComposingText
+                                      ? null
+                                      : PlatformUtils().isWeb
                                       ? null
                                       : DefaultSpecialTextSpanBuilder(
-                                          isUseQQPackage: widget
-                                                  .model
-                                                  .chatConfig
-                                                  .stickerPanelConfig
-                                                  ?.useQQStickerPackage ??
+                                          isUseQQPackage: widget.model.chatConfig
+                                                  .stickerPanelConfig?.useQQStickerPackage ??
                                               true,
-                                          isUseTencentCloudChatPackage: widget
-                                                  .model
-                                                  .chatConfig
-                                                  .stickerPanelConfig
-                                                  ?.useTencentCloudChatStickerPackage ??
+                                          isUseTencentCloudChatPackage: widget.model.chatConfig
+                                                  .stickerPanelConfig?.useTencentCloudChatStickerPackage ??
                                               true,
-                                          isUseTencentCloudChatPackageOldKeys:
-                                              widget
-                                                      .model
-                                                      .chatConfig
-                                                      .stickerPanelConfig
-                                                      ?.useTencentCloudChatStickerPackageOldKeys ??
-                                                  false,
+                                          isUseTencentCloudChatPackageOldKeys: widget.model.chatConfig
+                                                  .stickerPanelConfig?.useTencentCloudChatStickerPackageOldKeys ??
+                                              false,
                                           customEmojiStickerList:
                                               widget.customEmojiStickerList,
                                           showAtBackground: true,
-                                          checkHttpLink: false,
-                                        ),
+                                          checkHttpLink: false),
                                 ),
                         ),
                         const SizedBox(

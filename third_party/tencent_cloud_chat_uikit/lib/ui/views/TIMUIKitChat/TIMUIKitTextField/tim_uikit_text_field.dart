@@ -1088,7 +1088,12 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
     }
     languageType = 'zh';
     textEditingController.addListener(() {
-      _isComposingText = textEditingController.value.composing.start != -1;
+      final nextComposing = textEditingController.value.composing.start != -1;
+      if (_isComposingText != nextComposing && mounted) {
+        setState(() => _isComposingText = nextComposing);
+      } else {
+        _isComposingText = nextComposing;
+      }
       _inputDiag('controller_value', extra: 'isComposing=$_isComposingText');
     });
     focusNode.addListener(() => _inputDiag('focus_changed'));
@@ -1290,6 +1295,7 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
                 defaultWidget: TIMUIKitTextFieldLayoutNarrow(
                     key: _narrowTextFieldKey,
                     forbiddenText: forbiddenText,
+                    isComposingText: _isComposingText,
                     stickerPackageList: stickerPackageList,
                     onEmojiSubmitted: _onEmojiSubmitted,
                     onCustomEmojiFaceSubmitted: _onCustomEmojiFaceSubmitted,
@@ -1327,6 +1333,7 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
                     customEmojiStickerList: widget.customEmojiStickerList),
                 desktopWidget: TIMUIKitTextFieldLayoutWide(
                     forbiddenText: forbiddenText,
+                    isComposingText: _isComposingText,
                     stickerPackageList: stickerPackageList,
                     chatConfig: widget.chatConfig ?? widget.model.chatConfig,
                     theme: theme,
