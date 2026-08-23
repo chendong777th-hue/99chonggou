@@ -91,6 +91,7 @@ Future<void> _warmWebBundledFonts() async {
       rootBundle.load('assets/fonts/NotoSansSC-Regular.ttf'),
       rootBundle.load('assets/fonts/NotoSansSC-SemiBold.ttf'),
       rootBundle.load('assets/fonts/NotoSansSC-Bold.ttf'),
+      rootBundle.load('assets/fonts/NotoSansSC-Variable.ttf'),
     ]);
   } catch (_) {
     // 字体资源缺失时不阻塞启动。

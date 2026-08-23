@@ -355,6 +355,8 @@ class _ChatState extends State<Chat> {
   final V2TIMManager sdkInstance = TIMUIKitCore.getSDKInstance();
   String? conversationName;
   int? _groupMemberCount;
+  int _groupMemberCountGeneration = 0;
+  DateTime? _lastGroupMetadataRefreshAt;
   SangongAdminRound? _sangongAdminRound;
   StreamSubscription<SangongAdminRealtimeState>? _sangongRealtimeSub;
   final WalletCardSendService _walletCardSendSvc = WalletCardSendService();
@@ -5014,7 +5016,12 @@ class _ChatState extends State<Chat> {
     final prevShowName = _conversation.showName ?? '';
 
     if (record != null) {
-      _groupMemberCount = record.memberCount;
+      // Local data is a first-paint fallback only. Once a value is already
+      // present, do not re-apply the stale SQLite snapshot and make the header
+      // jump while the authoritative request is in flight.
+      if (_groupMemberCount == null && record.memberCount > 0) {
+        _groupMemberCount = record.memberCount;
+      }
       final groupName = record.groupName.trim();
       final currentShowName = (_conversation.showName ?? '').trim();
       final shouldApplyName = groupName.isNotEmpty &&
@@ -5068,7 +5075,9 @@ class _ChatState extends State<Chat> {
         )) {
       return;
     }
-    _groupSide.groupNoticeBanner = notice;
+      if (_groupSide.groupNoticeBanner.isEmpty) {
+        _groupSide.groupNoticeBanner = notice;
+      }
 
     final headerChanged = _groupMemberCount != prevCount ||
         (_conversation.faceUrl ?? '') != prevFace ||
@@ -5130,6 +5139,12 @@ class _ChatState extends State<Chat> {
     if (groupID.isEmpty) {
       return;
     }
+    final now = DateTime.now();
+    final last = _lastGroupMetadataRefreshAt;
+    if (last != null && now.difference(last) < const Duration(seconds: 60)) {
+      return;
+    }
+    _lastGroupMetadataRefreshAt = now;
     final conversationId = _resolvedConversationID();
     final loadKey = '${ContactSocialCacheStore.safeLoginUserId()}|$groupID';
     final existing = _groupMemberCountLoads[loadKey];
@@ -5155,6 +5170,7 @@ class _ChatState extends State<Chat> {
     required String groupID,
     required String conversationId,
   }) async {
+    final generation = _groupMemberCountGeneration;
     var count = GroupDisplayResolver.resolveMemberCount(
       groupId: groupID,
       groupList: serviceLocator<TUIFriendShipViewModel>().groupList,
@@ -5164,7 +5180,9 @@ class _ChatState extends State<Chat> {
       await GroupMembershipSyncService.instance.refreshGroupDetail(groupID);
       count = await GroupInfoResolver.instance.memberCount(groupID);
     }
-    if (!_isCurrentConversation(conversationId) || count == null) {
+    if (!_isCurrentConversation(conversationId) ||
+        generation != _groupMemberCountGeneration ||
+        count == null) {
       return;
     }
     _applyGroupMemberCountIfChanged(count);
@@ -7775,6 +7793,13 @@ class _ChatState extends State<Chat> {
   }
 
   Future<bool> _mergePreviewMessageIfMissing() async {
+    // Conversation previews are summaries, not authoritative chat messages.
+    // Official Tencent IM conversations must wait for SDK history; otherwise a
+    // preview stub can appear as a fake/duplicate bubble.
+    final historyModel = _chatController.model;
+    if (historyModel?.usesOfficialSdkHistory == true) {
+      return false;
+    }
     final preview = await _fetchConversationPreviewLastMessage();
     if (preview == null) {
       return false;
@@ -7849,6 +7874,20 @@ class _ChatState extends State<Chat> {
     required String current,
     required String beforeSignature,
   }) async {
+    final historyModel = _chatController.model;
+    if (historyModel?.usesOfficialSdkHistory == true) {
+      // Normal IM conversations must not fall through to legacy/local/archive
+      // recovery. The SDK cloud history path is authoritative.
+      await historyModel!.loadChatRecord(
+        count: 20,
+        lastMsgID: _latestRealVisibleMessageId().isEmpty
+            ? null
+            : _latestRealVisibleMessageId(),
+        direction: LoadDirection.latest,
+        forceReloadNewest: true,
+      );
+      return true;
+    }
     final latestAnchorId = _latestVisibleMessageId();
     if (latestAnchorId.isNotEmpty) {
       await model.loadChatRecord(
@@ -9716,6 +9755,8 @@ class _ChatState extends State<Chat> {
       widget.selectedConversation,
     );
     if (oldConversationID != newConversationID) {
+      _groupMemberCountGeneration++;
+      _lastGroupMetadataRefreshAt = null;
       _clearExternalEntryState(oldConversationID);
       _openLifecycle.cancelPendingMuteFetch();
       _openLifecycle.scheduledVisibleSdkUnreadClean = false;

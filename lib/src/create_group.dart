@@ -611,6 +611,9 @@ class _CreateGroup extends State<CreateGroup> {
     );
     await ConversationListNotifier.instance.applyConversationsFromStore(
       upserted: merged,
+      // 新建群不一定满足“已加载窗口内热会话”的准入条件；创建成功后
+      // 必须强制插入群聊列表，否则本地库已有记录但当前 UI 窗口仍看不到。
+      forceAdmitIds: <String>{conversationID},
     );
     ConversationRefreshBus.instance.requestRefresh(
       reason: 'group_created',

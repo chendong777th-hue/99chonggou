@@ -186,8 +186,10 @@ class TIMUIKitTextFieldLayoutNarrowState
         oldWidget.conversationID != widget.conversationID ||
             oldWidget.conversationType != widget.conversationType;
     if (conversationChanged) {
+      _panelDiag('conversation_changed_before_reset');
       widget.focusNode.unfocus();
       _panel.resetAll();
+      _panelDiag('conversation_changed_after_reset');
       bottomPadding = null;
       widget.controller?.updateInputPanelOpen(false);
     }
@@ -216,6 +218,12 @@ class TIMUIKitTextFieldLayoutNarrowState
   bool get isAnyPanelOpen =>
       _panel.isAnyPanelOpen(hasFocus: widget.focusNode.hasFocus);
 
+  void _panelDiag(String event) {
+    print('[ChatInputDiag] panel=$event conv=${widget.conversationID} '
+        'more=$showMore emoji=$showEmojiPanel voice=$showSendSoundText '
+        'keyboard=$showKeyboard focus=${widget.focusNode.hasFocus}');
+  }
+
   void _syncInputPanelOpenState() {
     widget.controller?.updateInputPanelOpen(isAnyPanelOpen);
   }
@@ -226,6 +234,7 @@ class TIMUIKitTextFieldLayoutNarrowState
         return;
       }
       setState(update);
+      _panelDiag('state_changed');
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           _syncInputPanelOpenState();
@@ -278,6 +287,7 @@ class TIMUIKitTextFieldLayoutNarrowState
   @override
   void initState() {
     super.initState();
+    _panelDiag('init');
     widget.controller?.attachNarrowState(this);
     WidgetsBinding.instance.addObserver(this);
     widget.textEditingController.addListener(_syncSendButtonFromController);
@@ -545,7 +555,8 @@ class TIMUIKitTextFieldLayoutNarrowState
           child: MorePanel(
               morePanelConfig: widget.morePanelConfig,
               conversationID: widget.conversationID,
-              conversationType: widget.conversationType),
+              conversationType: widget.conversationType,
+              onImageSent: widget.goDownBottom),
         ),
       );
     }

@@ -5,7 +5,10 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_friend_info.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_friend_info.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 import 'package:tencent_cloud_chat_sdk/tencent_im_sdk_plugin.dart';
+import 'package:tencent_cloud_chat_sdk/enum/message_elem_type.dart';
 import 'package:tencent_cloud_chat_uikit/base_widgets/tim_callback.dart';
 import 'package:tencent_cloud_chat_uikit/base_widgets/tim_ui_kit_state.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/separate_models/tui_chat_separate_view_model.dart';
@@ -54,7 +57,23 @@ class _ForwardMessageScreenState extends TIMUIKitState<ForwardMessageScreen> {
   List<String> _getAbstractList() {
     return widget.model.getSelectedMessageList().map((e) {
       final sender = (e.nickName != null && e.nickName!.isNotEmpty) ? e.nickName : e.sender;
-      return "$sender: ${model.abstractMessageBuilder != null ? model.abstractMessageBuilder!(e) : MessageUtils.getAbstractMessageAsync(e, [])}";
+      var abstract = model.abstractMessageBuilder != null
+          ? model.abstractMessageBuilder!(e)
+          : MessageUtils.getAbstractMessageAsync(e, []);
+      if (abstract.trim().isEmpty) {
+        if (e.elemType == MessageElemType.V2TIM_ELEM_TYPE_IMAGE) {
+          abstract = TIM_t('[图片]');
+        } else if (e.elemType == MessageElemType.V2TIM_ELEM_TYPE_VIDEO) {
+          abstract = TIM_t('[视频]');
+        } else if (e.elemType == MessageElemType.V2TIM_ELEM_TYPE_FILE) {
+          abstract = TIM_t('[文件]');
+        } else if (e.elemType == MessageElemType.V2TIM_ELEM_TYPE_SOUND) {
+          abstract = TIM_t('[语音]');
+        } else {
+          abstract = TIM_t('[消息]');
+        }
+      }
+      return "$sender: $abstract";
     }).toList();
   }
 

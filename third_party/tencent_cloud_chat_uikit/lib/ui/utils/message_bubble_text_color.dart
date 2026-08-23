@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:tencent_cloud_chat_uikit/theme/tui_theme.dart';
 
@@ -6,14 +5,20 @@ import 'package:tencent_cloud_chat_uikit/theme/tui_theme.dart';
 class MessageBubbleTextColor {
   MessageBubbleTextColor._();
 
-  /// Web 内置简中字体（与宿主 app pubspec 中 NotoSansSC 一致）。
+  /// 聊天正文统一使用支持 wght 轴的中文可变字体。
+  static const String variableCjkFontFamily = 'NotoSansSCVariable';
+
+  /// Web 旧组件仍使用的简中字体族。
   static const String webCjkFontFamily = 'NotoSansSC';
 
-  /// 聊天气泡正文（收发双方）默认字重，略重于系统 normal。
-  static const FontWeight messageBodyFontWeight = FontWeight.w500;
+  /// 聊天气泡正文（收发双方）精确字重。
+  static const double messageBodyFontVariationWeight = 450;
 
-  /// 消息正文：15.5 / w500 / height 1.20。
-  static const double messageBodyFontSize = 15.5;
+  /// 兼容仍直接读取该常量的旧组件；正文实际以 fontVariations 为准。
+  static const FontWeight messageBodyFontWeight = FontWeight.w400;
+
+  /// 消息正文：16 / wght 450 / height 1.20。
+  static const double messageBodyFontSize = 16;
 
   /// 与气泡正文默认行高一致。
   static const double messageBodyLineHeight = 1.20;
@@ -67,8 +72,7 @@ class MessageBubbleTextColor {
     );
   }
 
-  /// iOS/Android：不设 [fontFamily]，由系统字体栈自动选择 CJK + Color Emoji。
-  /// Web：必须显式 [NotoSansSC]；否则 [inherit: false] 会落到无 CJK 的系统字体，中文不可见。
+  /// 聊天正文使用可变中文字体，保证 iOS/Android/Web 均能解析 wght=450。
 
   /// 气泡正文基础样式（字号、字体、行高），不含颜色与字重。
   static TextStyle messageBodyBaseStyle({
@@ -80,7 +84,10 @@ class MessageBubbleTextColor {
       inherit: false,
       textBaseline: TextBaseline.alphabetic,
       height: lineHeight,
-      fontFamily: kIsWeb ? webCjkFontFamily : null,
+      fontFamily: variableCjkFontFamily,
+      fontVariations: const [
+        FontVariation('wght', messageBodyFontVariationWeight),
+      ],
     );
   }
 
@@ -95,7 +102,10 @@ class MessageBubbleTextColor {
       lineHeight: lineHeight ?? messageBodyLineHeight,
     ).copyWith(
       color: color,
-      fontWeight: messageBodyFontWeight,
+      fontWeight: null,
+      fontVariations: const [
+        FontVariation('wght', messageBodyFontVariationWeight),
+      ],
       inherit: false,
     );
   }
@@ -111,6 +121,7 @@ class MessageBubbleTextColor {
     ).copyWith(
       color: color,
       fontWeight: FontWeight.w400,
+      fontVariations: const [FontVariation('wght', 400)],
       inherit: false,
     );
   }
@@ -156,20 +167,26 @@ class MessageBubbleTextColor {
       lineHeight: lineHeight ?? fontStyle?.height,
     ).copyWith(
       color: bodyColor,
-      fontWeight: _resolveBodyFontWeight(fontStyle?.fontWeight),
+      fontWeight: null,
+      fontVariations: [
+        FontVariation(
+          'wght',
+          _resolveBodyFontVariationWeight(fontStyle?.fontWeight),
+        ),
+      ],
     );
   }
 
-  static FontWeight _resolveBodyFontWeight(FontWeight? existing) {
+  static double _resolveBodyFontVariationWeight(FontWeight? existing) {
     if (existing == null ||
         existing == FontWeight.w400 ||
         existing == FontWeight.normal) {
-      return messageBodyFontWeight;
+      return messageBodyFontVariationWeight;
     }
-    if (existing.value < messageBodyFontWeight.value) {
-      return messageBodyFontWeight;
+    if (existing.value < messageBodyFontVariationWeight) {
+      return messageBodyFontVariationWeight;
     }
-    return existing;
+    return existing.value.toDouble();
   }
 
   static Color secondaryText({

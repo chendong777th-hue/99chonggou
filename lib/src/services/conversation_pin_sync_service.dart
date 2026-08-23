@@ -92,6 +92,24 @@ class ConversationPinSyncService {
   Set<String> get pinnedConversationIds =>
       Set<String>.unmodifiable(_pinnedConversationIds);
 
+  /// Removes a conversation that no longer exists (for example after leaving
+  /// or dissolving a group) from every local pin projection.
+  Future<void> removeDeletedConversation(String conversationID) async {
+    final id = conversationID.trim();
+    if (id.isEmpty) return;
+    final hadMatch = _pinnedConversationIds.any(
+      (pinned) => MessageConversationId.sameConversation(pinned, id),
+    );
+    if (!hadMatch) return;
+    _pinnedConversationIds.removeWhere(
+      (pinned) => MessageConversationId.sameConversation(pinned, id),
+    );
+    await ConversationLocalStore.instance.replaceAllPinnedFlags(
+      pinnedConversationIds: _pinnedConversationIds,
+    );
+    await _persistCache();
+  }
+
   int get setUpdatedAtMs => _setUpdatedAtMs;
 
   bool isPinnedConversationId(String? conversationID) {

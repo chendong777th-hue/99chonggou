@@ -67,6 +67,11 @@ class OutgoingVisibleProbe {
     V2TimMessage? message,
     Map<String, Object?> extras = const <String, Object?>{},
   }) {
+    // This probe is strictly for local diagnosis; never emit message metadata
+    // (including text and conversation identifiers) from release builds.
+    if (kReleaseMode) {
+      return;
+    }
     final conv = conversationID?.trim() ?? lastConvID ?? '';
     if (!matches(conv) &&
         !matchesMessage(message) &&
@@ -99,6 +104,9 @@ class OutgoingVisibleProbe {
     required List<V2TimMessage> messages,
     bool? isFinished,
   }) {
+    if (kReleaseMode) {
+      return;
+    }
     final conv = (userID ?? groupID ?? '').trim();
     if (!matches(conv) && !messages.any(matchesMessage)) {
       return;

@@ -222,6 +222,9 @@ flutter:
           weight: 600
         - asset: assets/fonts/NotoSansSC-Bold.ttf
           weight: 700
+    - family: NotoSansSCVariable
+      fonts:
+        - asset: assets/fonts/NotoSansSC-Variable.ttf
 flutter_intl:
   enabled: true
 

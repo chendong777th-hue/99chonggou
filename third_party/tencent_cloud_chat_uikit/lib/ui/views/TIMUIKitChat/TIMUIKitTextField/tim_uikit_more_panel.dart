@@ -322,12 +322,14 @@ class MorePanel extends StatefulWidget {
   final ConvType conversationType;
 
   final MorePanelConfig? morePanelConfig;
+  final VoidCallback? onImageSent;
 
   const MorePanel(
       {required this.conversationID,
       required this.conversationType,
       Key? key,
-      this.morePanelConfig})
+      this.morePanelConfig,
+      this.onImageSent})
       : super(key: key);
 
   @override
@@ -423,6 +425,7 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
       convID: convID,
       convType: convType,
     );
+    widget.onImageSent?.call();
     if (mounted) {
       unawaited(MessageUtils.handleMessageError(sendFuture, context));
     } else {

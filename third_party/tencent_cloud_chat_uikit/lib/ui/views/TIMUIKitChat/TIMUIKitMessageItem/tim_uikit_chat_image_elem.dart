@@ -1612,11 +1612,10 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
             _hasBubbleFrameReady()) {
           return child;
         }
-        return SizedBox(
-          width: displaySize.width,
-          height: displaySize.height,
-          child: _imageTransitionPlaceholder(theme),
-        );
+        // 预览/聊天记录页的图片可能已在解码但尚未回调首帧；继续覆盖
+        // 灰色占位会把真实缩略图遮住，表现为整张气泡发灰。直接保留
+        // Image child，让已解码的内容立即可见，失败仍由 errorBuilder 处理。
+        return child;
       };
     }
 
@@ -2572,9 +2571,12 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
   Widget tuiBuild(BuildContext context, TUIKitBuildValue value) {
     final convId = widget.chatModel.conversationID;
     final msgKey = ChatUiStateStore.messageKeyOf(widget.message);
-    final rowRevision = context.select<ChatUiStateStore, int>(
-      (store) => store.rowRevision(convId, msgKey),
-    );
+    // 合并转发/聊天记录预览页可能不在主聊天 Provider 树下；此时不能让
+    // 图片气泡因为 ProviderNotFound 直接退化成整块灰色占位。
+    final uiStateStore =
+        Provider.of<ChatUiStateStore?>(context, listen: true) ??
+        serviceLocator<ChatUiStateStore>();
+    final rowRevision = uiStateStore.rowRevision(convId, msgKey);
     _onRowRevisionUpdate(rowRevision);
 
     final theme = value.theme;

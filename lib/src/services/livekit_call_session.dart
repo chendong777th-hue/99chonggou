@@ -11,6 +11,7 @@ import 'package:tencent_cloud_chat_demo/src/services/livekit_call_ringtone.dart'
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_telemetry_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_types.dart';
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_ui_log.dart';
+import 'package:tencent_cloud_chat_demo/src/services/voice_output_route_service.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/call_user_id.dart';
 import 'package:tencent_cloud_chat_demo/utils/toast.dart';
 import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
@@ -52,6 +53,8 @@ class LiveKitCallSession extends ChangeNotifier {
   bool _micEnabled = true;
   bool _camEnabled = false;
   bool _speakerOn = true;
+  bool _voiceAudioSessionConfigured = false;
+  int _lastVoiceRouteApplyMs = 0;
   CameraPosition _cameraPosition = CameraPosition.front;
   bool _switchingCamera = false;
   List<String>? _cachedCameraIds;
@@ -662,10 +665,37 @@ class LiveKitCallSession extends ChangeNotifier {
       return;
     }
     try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      // Track/recovery events can arrive in bursts. Reapplying the native
+      // route for every event tears down and recreates iOS's audio graph,
+      // which causes intermittent two-way silence even when both tracks are
+      // already subscribed. Keep the first apply and suppress only the
+      // duplicate burst; a later CallKit handoff can still reapply it.
+      if (now - _lastVoiceRouteApplyMs < 800) {
+        liveKitCallUiLog(
+          '_ensureCallAudioRoute coalesced speakerOn=$_speakerOn '
+          'role=$_role ${describeCallAudioState(_room)}',
+        );
+        return;
+      }
+      _lastVoiceRouteApplyMs = now;
       liveKitCallUiLog(
         '_ensureCallAudioRoute apply speakerOn=$_speakerOn '
         'video=$isVideo role=$_role ${describeCallAudioState(_room)}',
       );
+      // 回铃音使用 media/playback 会话，CallKit 接听又可能暂时持有
+      // playAndRecord。音轨已经就绪后必须在这里完成一次确定性的交接，
+      // 否则会出现「TrackSubscribed/started=1 但双方都无声」的偶发状态。
+      if (!_voiceAudioSessionConfigured) {
+        await VoiceOutputRouteService.applyCurrentRoute(
+          configureSession: true,
+          forRecording: true,
+          activate: true,
+        );
+        _voiceAudioSessionConfigured = true;
+      } else {
+        await VoiceOutputRouteService.applyCurrentRoute(activate: true);
+      }
       await Hardware.instance.setSpeakerphoneOn(
         _speakerOn,
         forceSpeakerOutput: _speakerOn,
@@ -1257,6 +1287,8 @@ class LiveKitCallSession extends ChangeNotifier {
     _micEnabled = true;
     _camEnabled = false;
     _speakerOn = false;
+    _voiceAudioSessionConfigured = false;
+    _lastVoiceRouteApplyMs = 0;
     _cameraPosition = CameraPosition.front;
     _switchingCamera = false;
     _cachedCameraIds = null;

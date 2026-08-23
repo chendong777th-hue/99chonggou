@@ -5077,6 +5077,13 @@ class _TIMUIKitHistoryMessageListState
   }
 
   void _scrollToBottomTarget(double target, TUIChatGlobalModel globalModel) {
+    // 用户手指优先：异步媒体布局、发送回调或旧的 post-frame pin 可能在
+    // 手势已经开始后才到达。此时再 jump/animate 会抢夺 ScrollPosition，
+    // 表现为列表卡住、拖动方向反转或松手后又被拉回底部。调用方大多有
+    // 自己的保护，但这里是所有贴底路径的最后一道闸门。
+    if (globalModel.isChatListUserScrolling || _userScrollGestureActive) {
+      return;
+    }
     // Open / just-revealed: always jump. Smooth follow is for live inbound only.
     if (!_historyOpenRevealPainted ||
         _isInitialRouteSettleWindow ||

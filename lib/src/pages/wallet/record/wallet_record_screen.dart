@@ -1114,11 +1114,13 @@ class _RecordCard extends StatelessWidget {
   }
 
   Color _amountColor(WalletPageColors cs) {
-    if (item.income) return cs.blue;
+    // 深色主题下沿用深蓝色会与卡片背景对比不足，金额看起来像消失。
+    // 使用高亮蓝，保证收入/支出金额在两种主题下都有足够对比度。
+    if (item.income) return cs.dark ? const Color(0xFF63B3FF) : cs.blue;
     if (item.type == WalletRecordType.redPacket) {
       return cs.warningText;
     }
-    return cs.blue;
+    return cs.dark ? const Color(0xFF63B3FF) : cs.blue;
   }
 
   Color _statusColor(WalletPageColors cs) {

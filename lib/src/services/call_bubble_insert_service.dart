@@ -52,9 +52,16 @@ class CallBubbleInsertService {
         existing: List<V2TimMessage>.from(existing),
         fetched: <V2TimMessage>[bubble],
       );
+      // 本地终态和云端 lk_call/hangup 可能在同一帧分别到达。先按
+      // callId/inviteId 做通话专用归一化，再写回列表，避免两条气泡先后
+      // 闪现，等待异步 dedupe 才收敛。
+      final normalized = CallBubbleDedupe.normalizeCallHistoryMessages(
+        merged,
+        preserveTipIdentity: true,
+      );
       globalModel.setMessageList(
         key,
-        merged,
+        normalized,
         needResetNewMessageCount: false,
       );
       inserted = true;

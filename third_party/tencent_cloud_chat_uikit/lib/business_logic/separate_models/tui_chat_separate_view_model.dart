@@ -5547,6 +5547,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     String? localCustomData,
     bool? isEditStatusMessage = false,
     bool? isExcludedFromContentModeration,
+    bool preserveTargetGroupID = false,
   }) async {
     final target = _resolveSendTarget(
       convID: convID,
@@ -5603,12 +5604,13 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
         }
       }
     }
-    if (convType == ConvType.group && _groupType == null) {
+    if (convType == ConvType.group && _groupType == null && !preserveTargetGroupID) {
       await loadGroupInfo(groupID);
     }
     // SelfHosted 拉到的真源 groupID（如 @TGS#_mc…）优先于会话里错误加成的 ID。
     final infoGroupId = _groupInfo?.groupID?.trim() ?? '';
     if (convType == ConvType.group &&
+        !preserveTargetGroupID &&
         infoGroupId.isNotEmpty &&
         infoGroupId != groupID &&
         (_looksLikeCommunityGroupId(infoGroupId) ||
@@ -6632,6 +6634,9 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     for (var conversation in conversationList) {
       final convID = _forwardConversationId(conversation);
       final targetConvType = _forwardConversationType(conversation);
+      print('[ForwardDiag] source=${conversationID} targetRaw=${conversation.conversationID} '
+          'targetGroup=${conversation.groupID} targetUser=${conversation.userID} '
+          'target=$convID type=$targetConvType');
       if (convID.isEmpty || targetConvType == ConvType.none) {
         continue;
       }
@@ -6683,6 +6688,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
             convID,
             targetConvType,
           ),
+          preserveTargetGroupID: true,
         );
       }
     }
@@ -6753,6 +6759,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
           messageInfo: messageInfoWithSender,
           offlinePushInfo: tools.buildMessagePushInfo(
               messageInfoWithSender, convID, targetConvType),
+          preserveTargetGroupID: true,
         );
         final sentMessage = lastResult?.data;
         globalModel.cacheLocalMergerMessageList(

@@ -11,9 +11,11 @@ import 'package:tencent_cloud_chat_uikit/base_widgets/tim_ui_kit_state.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/common_utils.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/message.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/screen_utils.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_message_preview_image_resolver.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKItMessageList/tim_uikit_chat_history_message_list_item.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/separate_models/tui_chat_separate_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/chat_ui_state_store.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKitMessageItem/main.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKitMessageItem/tim_uikit_chat_face_elem.dart';
@@ -28,7 +30,10 @@ import 'package:tencent_cloud_chat_uikit/theme/tui_theme_view_model.dart';
 Widget wrapMergerMessageScreenWithProviders(MergerMessageScreen screen) {
   return ChangeNotifierProvider<TUIChatGlobalModel>.value(
     value: serviceLocator<TUIChatGlobalModel>(),
-    child: screen,
+    child: ChangeNotifierProvider<ChatUiStateStore>.value(
+      value: serviceLocator<ChatUiStateStore>(),
+      child: screen,
+    ),
   );
 }
 
@@ -78,8 +83,17 @@ class MergerMessageScreenState extends TIMUIKitState<MergerMessageScreen> {
     if (!mounted) {
       return;
     }
+    final resolvedMessages = mergerMessageList ?? <V2TimMessage>[];
+    // 合并消息里的图片通常只有 msgID，没有可直接渲染的 URL/localUrl；
+    // 与普通聊天气泡一致，先补齐原图/缩略图资源再展示，避免灰色封面。
+    for (final message in resolvedMessages) {
+      if (message.imageElem != null) {
+        await ChatMessagePreviewImageResolver.refreshOriginal(message);
+      }
+    }
+    if (!mounted) return;
     setState(() {
-      messageList = mergerMessageList ?? [];
+      messageList = resolvedMessages;
       _loadFailed = mergerMessageList == null;
     });
   }

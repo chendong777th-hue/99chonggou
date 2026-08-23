@@ -6020,7 +6020,23 @@ class ConversationLocalStore {
       if (GroupDisplayResolver.looksLikeGroupIdLabel(showName, groupId: id)) {
         return;
       }
-      DisplayNameStore.instance.setGroup(id, showName, notify: false);
+      // A conversation snapshot may lag behind the authoritative group
+      // record after login/reconnect. Keep an existing local/self-hosted name
+      // from being overwritten by that stale showName. Explicit group-info
+      // change events still write through directly.
+      final existing = DisplayNameStore.instance.groupWhere(
+        id,
+        (storedId, queryId) =>
+            ChatIdFormat.groupEquivalenceToken(storedId) ==
+            ChatIdFormat.groupEquivalenceToken(queryId),
+      );
+      if (existing == null || existing.trim().isEmpty) {
+        DisplayNameStore.instance.setGroup(id, showName, notify: false);
+        final canonical = ChatIdFormat.canonicalGroupStorageId(id);
+        if (canonical.isNotEmpty && canonical != id) {
+          DisplayNameStore.instance.setGroup(canonical, showName, notify: false);
+        }
+      }
       return;
     }
     final userId = conversation.userID?.trim() ?? '';

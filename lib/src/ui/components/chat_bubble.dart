@@ -21,7 +21,8 @@ class ChatBubble extends StatelessWidget {
     final bgColor = isMine ? AppTokens.brand500 : AppTokens.surface;
     final textColor = isMine ? Colors.white : AppTokens.ink800;
     final timeColor = isMine ? Colors.white.withOpacity(0.7) : AppTokens.ink300;
-    final alignment = isMine ? CrossAxisAlignment.end : CrossAxisAlignment.start;
+    final alignment =
+        isMine ? CrossAxisAlignment.end : CrossAxisAlignment.start;
 
     return Column(
       crossAxisAlignment: alignment,
@@ -40,7 +41,8 @@ class ChatBubble extends StatelessWidget {
               bottomRight: Radius.circular(isMine ? 4 : 18),
             ),
             boxShadow: isMine ? null : AppTokens.shadowSm,
-            border: isMine ? null : Border.all(color: AppTokens.divider, width: 1),
+            border:
+                isMine ? null : Border.all(color: AppTokens.divider, width: 1),
           ),
           child: Text(
             text,
@@ -49,7 +51,13 @@ class ChatBubble extends StatelessWidget {
               lineHeight: 1.45,
             ).copyWith(
               color: textColor,
-              fontWeight: MessageBubbleTextColor.messageBodyFontWeight,
+              fontWeight: null,
+              fontVariations: const [
+                FontVariation(
+                  'wght',
+                  MessageBubbleTextColor.messageBodyFontVariationWeight,
+                ),
+              ],
             ),
           ),
         ),

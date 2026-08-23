@@ -347,7 +347,13 @@ class ChatMessageHeightCache {
         fontSize: textBodyFontSize,
         lineHeight: textBodyLineHeight,
       ).copyWith(
-        fontWeight: MessageBubbleTextColor.messageBodyFontWeight,
+        fontWeight: null,
+        fontVariations: const [
+          FontVariation(
+            'wght',
+            MessageBubbleTextColor.messageBodyFontVariationWeight,
+          ),
+        ],
       );
       final painter = TextPainter(
         text: TextSpan(text: raw, style: style),

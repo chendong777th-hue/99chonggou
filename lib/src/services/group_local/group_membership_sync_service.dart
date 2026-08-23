@@ -19,6 +19,7 @@ import 'package:tencent_cloud_chat_demo/src/services/group_governance_trace.dart
 import 'package:tencent_cloud_chat_demo/src/services/conversation_history_warm_scheduler.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_flags.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_local_perf_flags.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_tip_custom_sender.dart';
@@ -2920,6 +2921,12 @@ class GroupMembershipSyncService {
         extras: <String, Object?>{'error': e.toString()},
       );
     }
+    // The pin projection is stored separately from the conversation row. It
+    // must be removed for every destructive group-removal path (leave,
+    // dismiss, kick), otherwise a later list sync can resurrect the pin.
+    await ConversationPinSyncService.instance.removeDeletedConversation(
+      conversationId,
+    );
     ConversationRefreshBus.instance.requestRefresh(
       reason: 'group_self_removed',
       conversationId: conversationId,
