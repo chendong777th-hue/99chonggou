@@ -104,7 +104,7 @@ class HistoryPaginationLoadRunner {
       // 上拉/带锚点分页必须保留请求发起时用户正在阅读的窗口。须走别名合并
       // （c2c_ / 裸 id），否则 baseline 为空会把整表 replace 成 SDK 短批次。
       final inMemoryAtRequest = _aliasAwareInMemoryList(model);
-      final paginationBaseline = isPaginatedLoad
+      final previousPaginationBaseline = isPaginatedLoad
           ? List<V2TimMessage>.of(inMemoryAtRequest)
           : const <V2TimMessage>[];
       if (isPaginatedLoad) {
@@ -115,7 +115,7 @@ class HistoryPaginationLoadRunner {
             'direction': direction.name,
             'lastMsgID': lastMsgID,
             'lastMsgSeq': lastMsgSeq,
-            'baselineCount': paginationBaseline.length,
+            'baselineCount': previousPaginationBaseline.length,
             'aliasMergedCount': inMemoryAtRequest.length,
             'position': model.globalModel
                 .getMessageListPosition(model.conversationID)
@@ -369,8 +369,8 @@ class HistoryPaginationLoadRunner {
 
         // Rebase on the newest in-memory list after the SDK request completes.
         final mergeBase = _aliasAwareInMemoryList(model);
-        if (mergeBase.isEmpty && paginationBaseline.isNotEmpty) {
-          mergeBase.addAll(paginationBaseline);
+        if (mergeBase.isEmpty && previousPaginationBaseline.isNotEmpty) {
+          mergeBase.addAll(previousPaginationBaseline);
         }
 
         // 根据加载方向拼接消息列表
@@ -454,9 +454,9 @@ class HistoryPaginationLoadRunner {
         // once more so messages received during that callback are not erased by
         // the replace-style atomic commit below.
         final afterLifecycleBase = _aliasAwareInMemoryList(model);
-        final stableCommitBase = paginationBaseline.isNotEmpty
+        final stableCommitBase = previousPaginationBaseline.isNotEmpty
             ? _mergeHistoryPage(
-                existing: paginationBaseline,
+                existing: previousPaginationBaseline,
                 fetched: afterLifecycleBase,
               )
             : afterLifecycleBase;
@@ -471,7 +471,7 @@ class HistoryPaginationLoadRunner {
             stage: 'pre_commit_merge',
             extras: <String, Object?>{
               'direction': direction.name,
-              'baselineCount': paginationBaseline.length,
+              'baselineCount': previousPaginationBaseline.length,
               'afterLifecycleAliasCount': afterLifecycleBase.length,
               'stableCommitBaseCount': commitBaseCount,
               'dedupedCount': dedupedMsgList.length,
@@ -540,9 +540,9 @@ class HistoryPaginationLoadRunner {
         // Archive fetch/callbacks are asynchronous too. Perform the final
         // compare-and-merge immediately before committing the list.
         final latestBeforeCommit = _aliasAwareInMemoryList(model);
-        final stableLatestBeforeCommit = paginationBaseline.isNotEmpty
+        final stableLatestBeforeCommit = previousPaginationBaseline.isNotEmpty
             ? _mergeHistoryPage(
-                existing: paginationBaseline,
+                existing: previousPaginationBaseline,
                 fetched: latestBeforeCommit,
               )
             : latestBeforeCommit;
@@ -557,7 +557,7 @@ class HistoryPaginationLoadRunner {
             stage: 'final_before_set_list',
             extras: <String, Object?>{
               'direction': direction.name,
-              'baselineCount': paginationBaseline.length,
+              'baselineCount': previousPaginationBaseline.length,
               'latestAliasCount': latestBeforeCommit.length,
               'stableLatestCount': stableLatestBeforeCommit.length,
               'finalCount': finalList.length,
@@ -567,16 +567,16 @@ class HistoryPaginationLoadRunner {
             },
           );
         }
-        if (paginationBaseline.isNotEmpty &&
-            finalList.length < paginationBaseline.length) {
+        if (previousPaginationBaseline.isNotEmpty &&
+            finalList.length < previousPaginationBaseline.length) {
           _logPreviousPaginationStage(
             model.conversationID,
             stage: 'commit_rejected_shrink',
             extras: <String, Object?>{
               'direction': direction.name,
-              'baselineCount': paginationBaseline.length,
+              'baselineCount': previousPaginationBaseline.length,
               'finalCount': finalList.length,
-              'lost': paginationBaseline.length - finalList.length,
+              'lost': previousPaginationBaseline.length - finalList.length,
               'lastMsgID': lastMsgID,
               'lastMsgSeq': lastMsgSeq,
             },
@@ -652,11 +652,17 @@ class HistoryPaginationLoadRunner {
         // 首屏整表写入前合并拉取期间 upsert 进内存的新消息，避免竞态覆盖。
         final existingInMemory = _aliasAwareInMemoryList(model);
         // 强制回最新窗：丢弃旧窗，直接用最新一页，避免与裁残窗口 merge。
-        final mergedList = forceReloadNewest
-            ? model._dedupeMessages(receivedList)
-            : (existingInMemory.isNotEmpty
-                ? _combineMessageList(existingInMemory, receivedList)
-                : model._dedupeMessages(receivedList));
+        final mergedList = ChatMainThreadPerf.measure(
+          ChatMainThreadPerf.historyMergeMs,
+          () => forceReloadNewest
+              ? model._dedupeMessages(receivedList)
+              : (existingInMemory.isNotEmpty
+                  ? _combineMessageList(existingInMemory, receivedList)
+                  : model._dedupeMessages(receivedList)),
+          count: receivedList.length,
+          source: direction.name,
+          conversationType: model.conversationType?.name ?? 'none',
+        );
 
         model.globalModel.setMessageList(
           model.conversationID,

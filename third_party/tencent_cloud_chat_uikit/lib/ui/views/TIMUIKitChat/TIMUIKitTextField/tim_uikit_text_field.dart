@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:collection/collection.dart';
 import 'package:diff_match_patch/diff_match_patch.dart';
 import 'package:flutter/material.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_main_thread_perf.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:scroll_to_index/scroll_to_index.dart';
@@ -177,7 +178,9 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
         .replaceAll('\n', '\\n')
         .replaceAll('\r', '\\r')
         .replaceAll('\t', '\\t');
-    final codes = clipped.runes.map((r) => 'U+${r.toRadixString(16).toUpperCase().padLeft(4, '0')}').join(',');
+    final codes = clipped.runes
+        .map((r) => 'U+${r.toRadixString(16).toUpperCase().padLeft(4, '0')}')
+        .join(',');
     return 'text="$escaped" codes=[$codes]';
   }
 
@@ -566,6 +569,16 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
   }
 
   void _applyKeyboardScrollSync() {
+    ChatMainThreadPerf.measure(
+      ChatMainThreadPerf.keyboardLayoutMs,
+      _applyKeyboardScrollSyncImpl,
+      source: 'settle',
+      conversationType:
+          widget.conversationID.startsWith('group_') ? 'group' : 'c2c',
+    );
+  }
+
+  void _applyKeyboardScrollSyncImpl() {
     if (_shouldSkipBottomScrollForShortHistory()) {
       return;
     }

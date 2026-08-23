@@ -50,6 +50,7 @@ import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 import 'package:tencent_cloud_chat_uikit/ui/constants/history_message_constant.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/error_message_converter.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_history_trace.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_main_thread_perf.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/outgoing_visible_probe.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/history_pagination_anchor.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_jitter_diag.dart';
@@ -6154,31 +6155,39 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     final mergedInput = replace || isDeleteMsg || previous.isEmpty
         ? incomingForMerge
         : <V2TimMessage>[...incomingForMerge, ...previous];
-    var sorted = sortMessagesNewestFirst(dedupeMessages(mergedInput));
-    // 正常列表首遍已经稳定；仅检测到相关性重复时再做收紧，避免每次分页/
-    // 恢复都无条件重复一次全表 dedupe + sort。
-    if (_listHasCorrelatingDup(sorted)) {
-      final tightened = sortMessagesNewestFirst(dedupeMessages(sorted));
-      if (tightened.length < sorted.length) {
-        sorted = tightened;
-      }
-    }
-
-    if (applyMemoryWindow && !isDeleteMsg) {
-      sorted = _applyMessageMemoryWindow(
-        conversationID,
-        sorted,
-        anchorMsgID: memoryWindowAnchorMsgID,
-        anchorSeq: memoryWindowAnchorSeq,
-        forcePreferLatest: memoryWindowPreferLatest,
-      );
-    }
-    if (!isDeleteMsg && previous.isNotEmpty) {
-      sorted = restoreUncorrelatedInFlightOutgoing(
-        previous: previous,
-        incoming: sorted,
-      );
-    }
+    final sorted = ChatMainThreadPerf.measure(
+      ChatMainThreadPerf.setMessageListMs,
+      () {
+        var result = sortMessagesNewestFirst(dedupeMessages(mergedInput));
+        // 正常列表首遍已经稳定；仅检测到相关性重复时再做收紧，避免每次分页/
+        // 恢复都无条件重复一次全表 dedupe + sort。
+        if (_listHasCorrelatingDup(result)) {
+          final tightened = sortMessagesNewestFirst(dedupeMessages(result));
+          if (tightened.length < result.length) {
+            result = tightened;
+          }
+        }
+        if (applyMemoryWindow && !isDeleteMsg) {
+          result = _applyMessageMemoryWindow(
+            conversationID,
+            result,
+            anchorMsgID: memoryWindowAnchorMsgID,
+            anchorSeq: memoryWindowAnchorSeq,
+            forcePreferLatest: memoryWindowPreferLatest,
+          );
+        }
+        if (!isDeleteMsg && previous.isNotEmpty) {
+          result = restoreUncorrelatedInFlightOutgoing(
+            previous: previous,
+            incoming: result,
+          );
+        }
+        return result;
+      },
+      count: mergedInput.length,
+      source: replace ? 'replace' : 'merge',
+      conversationType: conversationID.startsWith('group_') ? 'group' : 'c2c',
+    );
 
     if (replace ||
         isDeleteMsg ||

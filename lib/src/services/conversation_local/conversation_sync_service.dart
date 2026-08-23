@@ -4,6 +4,7 @@ import 'dart:collection';
 import 'package:flutter/foundation.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_deleted_bus.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/outgoing_visible_probe.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_main_thread_perf.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_unread_guard.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_sync_notifier.dart';
@@ -1381,7 +1382,14 @@ class ConversationSyncService {
       _reloadUiDirtyForceFull = _reloadUiDirtyForceFull || forceFull;
       return _reloadUiInFlight!;
     }
-    final task = _reloadUiFromLocalImplInner(forceFull: forceFull);
+    final task = ChatMainThreadPerf.isEnabled
+        ? ChatMainThreadPerf.measureAsync(
+            ChatMainThreadPerf.conversationReloadMs,
+            () => _reloadUiFromLocalImplInner(forceFull: forceFull),
+            source: forceFull ? 'full' : 'soft',
+            conversationType: 'mixed',
+          )
+        : _reloadUiFromLocalImplInner(forceFull: forceFull);
     _reloadUiInFlight = task;
     try {
       await task;

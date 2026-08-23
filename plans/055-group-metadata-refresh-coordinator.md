@@ -7,7 +7,7 @@
 - **Risk**: MED
 - **Depends on**: plans/052-chat-main-thread-baseline.md
 - **Category**: correctness/perf
-- **Planned at**: commit `bc8e10d`, 2026-08-23
+- **Planned at**: commit `6333e34`, 2026-08-23
 
 ## Why this matters
 

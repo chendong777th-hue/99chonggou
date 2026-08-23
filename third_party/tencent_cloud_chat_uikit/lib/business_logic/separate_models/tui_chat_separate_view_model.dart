@@ -79,6 +79,7 @@ import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 import 'package:tencent_cloud_chat_uikit/ui/constants/history_message_constant.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_history_trace.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_main_thread_perf.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/outgoing_visible_probe.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_jitter_diag.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_history_open_layout_ready.dart';
@@ -5604,7 +5605,9 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
         }
       }
     }
-    if (convType == ConvType.group && _groupType == null && !preserveTargetGroupID) {
+    if (convType == ConvType.group &&
+        _groupType == null &&
+        !preserveTargetGroupID) {
       await loadGroupInfo(groupID);
     }
     // SelfHosted 拉到的真源 groupID（如 @TGS#_mc…）优先于会话里错误加成的 ID。
@@ -6634,7 +6637,8 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     for (var conversation in conversationList) {
       final convID = _forwardConversationId(conversation);
       final targetConvType = _forwardConversationType(conversation);
-      print('[ForwardDiag] source=${conversationID} targetRaw=${conversation.conversationID} '
+      print(
+          '[ForwardDiag] source=${conversationID} targetRaw=${conversation.conversationID} '
           'targetGroup=${conversation.groupID} targetUser=${conversation.userID} '
           'target=$convID type=$targetConvType');
       if (convID.isEmpty || targetConvType == ConvType.none) {

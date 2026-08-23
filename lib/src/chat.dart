@@ -208,6 +208,7 @@ import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitProfile/widget/tim_uik
 import 'package:tencent_cloud_chat_uikit/ui/widgets/link_preview/common/utils.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/wide_popup.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_history_open_layout_ready.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_main_thread_perf.dart';
 import 'package:tencent_cloud_chat_uikit/ui/constants/history_message_constant.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKItMessageList/tim_uikit_chat_history_message_list_config.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKItMessageList/TIMUIKitTongue/unread_tongue_policy.dart';
@@ -4139,7 +4140,13 @@ class _ChatState extends State<Chat> {
     if (loaded) {
       final messages = globalModel.getMessageList(convKey);
       if (messages != null && messages.isNotEmpty) {
-        ChatImageMessagePrefetch.fromMessages(messages);
+        ChatMainThreadPerf.measure(
+          ChatMainThreadPerf.imageDecodeMs,
+          () => ChatImageMessagePrefetch.fromMessages(messages),
+          count: messages.length,
+          source: 'open_prefetch',
+          conversationType: _getConvType().name,
+        );
         // 与历史上屏并行补 URL 并预热，气泡首帧即可挂网图。
         unawaited(
           ChatImageMessagePrefetch.resolveOnlineUrlsForMessages(messages).then(
@@ -5075,20 +5082,28 @@ class _ChatState extends State<Chat> {
         )) {
       return;
     }
-      if (_groupSide.groupNoticeBanner.isEmpty) {
-        _groupSide.groupNoticeBanner = notice;
-      }
+    if (_groupSide.groupNoticeBanner.isEmpty) {
+      _groupSide.groupNoticeBanner = notice;
+    }
 
-    final headerChanged = _groupMemberCount != prevCount ||
-        (_conversation.faceUrl ?? '') != prevFace ||
-        (_conversation.showName ?? '') != prevShowName;
-    final noticeChanged = _groupSide.groupNoticeBanner != prevNotice;
-    if (headerChanged) {
-      _syncChatHeaderState();
-    }
-    if (noticeChanged) {
-      _syncChatTopFixState();
-    }
+    ChatMainThreadPerf.measure(
+      ChatMainThreadPerf.groupMetadataApplyMs,
+      () {
+        final headerChanged = _groupMemberCount != prevCount ||
+            (_conversation.faceUrl ?? '') != prevFace ||
+            (_conversation.showName ?? '') != prevShowName;
+        final noticeChanged = _groupSide.groupNoticeBanner != prevNotice;
+        if (headerChanged) {
+          _syncChatHeaderState();
+        }
+        if (noticeChanged) {
+          _syncChatTopFixState();
+        }
+      },
+      count: record == null ? 0 : 1,
+      source: 'sqlite_first_paint',
+      conversationType: 'group',
+    );
   }
 
   bool _isCurrentConversation(String conversationId) {

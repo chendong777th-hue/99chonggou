@@ -141,3 +141,20 @@ docs/pro.md                      # optional merged summary pointing at the above
   stack proof (fights plans 017/024).
 - Do not invent `dart::` stacks or mark plan 032 DONE without a real device
   Time Profiler export.
+# 052 聊天页主线程基线
+
+使用 Profile 构建采集以下固定指标：`history_merge_ms`、
+`set_message_list_ms`、`group_metadata_apply_ms`、
+`conversation_reload_ms`、`image_decode_ms`、`keyboard_layout_ms`。
+探针默认关闭；仅采集时临时将 `ChatMainThreadPerf.localProfileEnabled` 设为
+`true`，采集完成后恢复为 `false`。Release 构建始终不会输出。
+
+每轮使用同一账号和同一组会话，依次执行：首次安装进入群聊、暖启动进入、
+长历史群、图片密集群、打开键盘、发送一张图片和一个视频。同步保存 Flutter
+控制台的 `[ChatMainPerf]` 行与 Instruments 的 Time Profiler、Core Animation
+hitch 区间。日志只能包含 `metric/ms/count/source/convType`，不得添加消息正文、
+用户或群标识、token。
+
+记录每个场景的设备型号、系统版本、构建 SHA、样本次数、P50/P95/最大值，
+并确认是否出现消息丢失、顺序变化、媒体内容变化。未获得真机结果前，不执行
+053 或 054 的算法、线程迁移。
