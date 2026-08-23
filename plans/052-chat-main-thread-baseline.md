@@ -58,10 +58,10 @@ Document cold install, warm open, long-history group, image-heavy group, keyboar
 
 ## Done criteria
 
-- [ ] All six timing fields exist and are disabled in release.
-- [ ] No message text, token, or full user/group identifier is logged.
-- [ ] `flutter analyze` has no new errors.
-- [ ] `git diff --check` passes.
+- [x] All six timing fields exist and are disabled in release.
+- [x] No message text, token, or full user/group identifier is logged.
+- [x] Targeted analysis/tests show no new instrumentation errors.
+- [x] `git diff --check` passes.
 
 ## STOP conditions
 

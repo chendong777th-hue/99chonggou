@@ -160,6 +160,39 @@ void main() {
 
       expect(order, <int>[1, 2, 3]);
     });
+
+    test('keeps only the latest trigger while a task is active', () async {
+      const key = 'latest-chat';
+      final gate = Completer<void>();
+      final order = <int>[];
+
+      final first = ChatHistoryRecoveryCoordinator.instance.runExclusive(
+        conversationKey: key,
+        reason: 'first',
+        priority: ChatHistoryRecoveryCoordinator.priorityUser,
+        task: () async {
+          order.add(1);
+          await gate.future;
+        },
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      final stale = ChatHistoryRecoveryCoordinator.instance.runExclusive(
+        conversationKey: key,
+        reason: 'stale',
+        priority: ChatHistoryRecoveryCoordinator.priorityUser,
+        task: () async => order.add(2),
+      );
+      final latest = ChatHistoryRecoveryCoordinator.instance.runExclusive(
+        conversationKey: key,
+        reason: 'latest',
+        priority: ChatHistoryRecoveryCoordinator.priorityUser,
+        task: () async => order.add(3),
+      );
+
+      gate.complete();
+      await Future.wait<void>(<Future<void>>[first, stale, latest]);
+      expect(order, <int>[1, 3]);
+    });
   });
 
   group('ChatHistoryRecoveryCoordinator initial load gate', () {

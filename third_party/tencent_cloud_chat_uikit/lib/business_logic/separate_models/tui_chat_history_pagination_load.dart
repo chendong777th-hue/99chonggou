@@ -614,6 +614,8 @@ class HistoryPaginationLoadRunner {
           applyMemoryWindow: direction != LoadDirection.previous,
           memoryWindowPreferLatest:
               direction == LoadDirection.latest || forceReloadNewest,
+          skipEquivalentHistoryWindow: true,
+          historyCommitSource: direction.name,
         );
         // 只有页面真正合并并写入权威列表后，才允许推进官方 SDK 分页游标。
         // 在途请求被窗口替换、去重无增长或提交失败时继续沿用原游标，避免跳页。
@@ -671,6 +673,8 @@ class HistoryPaginationLoadRunner {
           replace: true,
           memoryWindowPreferLatest:
               direction == LoadDirection.latest || forceReloadNewest,
+          skipEquivalentHistoryWindow: true,
+          historyCommitSource: direction.name,
         );
         if (forceReloadNewest) {
           model.globalModel.clearMemoryWindowMissingNewer(model.conversationID);

@@ -5943,12 +5943,48 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         ..write(message.seq ?? '')
         ..write(':')
         ..write(message.status ?? '')
+        ..write(':')
+        ..write(message.progress ?? '')
+        ..write(':')
+        ..write(message.localCustomInt ?? '')
+        ..write(':')
+        ..write(message.elemType)
+        ..write(':')
+        ..write(_messageMediaAvailabilitySignature(message))
         ..write(';');
     }
     return buffer.toString();
   }
 
+  static String _messageMediaAvailabilitySignature(V2TimMessage message) {
+    final imageSignature = (message.imageElem?.imageList ?? const [])
+        .whereType<V2TimImage>()
+        .map((item) => '${item.type}:${item.url ?? ''}:${item.localUrl ?? ''}')
+        .join(',');
+    final video = message.videoElem;
+    final sound = message.soundElem;
+    final file = message.fileElem;
+    return <String>[
+      imageSignature,
+      video?.videoUrl ?? '',
+      video?.snapshotUrl ?? '',
+      video?.localVideoUrl ?? '',
+      video?.localSnapshotUrl ?? '',
+      sound?.url ?? '',
+      sound?.localUrl ?? '',
+      file?.url ?? '',
+      file?.localUrl ?? '',
+    ].join('|');
+  }
+
+  @visibleForTesting
+  static String messageListCommitSignatureForTesting(
+    List<V2TimMessage> messages,
+  ) =>
+      _messageListContentSignature(messages);
+
   final Map<String, String> _messageListContentSignatureByConv = {};
+  final Map<String, String> _historyWindowCommitSignatureByConv = {};
 
   /// 读历史（一屏外 / 非最新）期间冻结内存窗口裁剪，避免 prepend 后列表长度震荡。
   bool _shouldFreezeMemoryWindowTrimWhileReadingHistory(String conversationID) {
@@ -6083,10 +6119,25 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
 
       /// 覆盖全局挂起的窗口锚点。
       String? memoryWindowAnchorMsgID,
-      String? memoryWindowAnchorSeq}) {
+      String? memoryWindowAnchorSeq,
+      bool skipEquivalentHistoryWindow = false,
+      String historyCommitSource = 'unspecified'}) {
     final canonical = canonicalHistoryStorageKey(conversationID);
     final storageKey = canonical.isNotEmpty ? canonical : conversationID.trim();
     final previous = _mergedAliasMessageList(conversationID);
+    if (skipEquivalentHistoryWindow &&
+        replace &&
+        !isDeleteMsg &&
+        previous.length == messageList.length) {
+      final previousSignature = _messageListContentSignature(previous);
+      final incomingSignature = _messageListContentSignature(messageList);
+      final commitSignature = '$historyCommitSource|$incomingSignature';
+      if (previousSignature == incomingSignature &&
+          _historyWindowCommitSignatureByConv[storageKey] == commitSignature) {
+        return;
+      }
+      _historyWindowCommitSignatureByConv[storageKey] = commitSignature;
+    }
     var incomingForMerge = messageList;
     if (!isDeleteMsg && previous.isNotEmpty) {
       final extras = collectUncorrelatedInFlightOutgoing(
@@ -6186,8 +6237,13 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       },
       count: mergedInput.length,
       source: replace ? 'replace' : 'merge',
-      conversationType: conversationID.startsWith('group_') ? 'group' : 'c2c',
+      conversationType:
+          ChatMainThreadPerf.conversationTypeForId(conversationID),
     );
+    if (skipEquivalentHistoryWindow) {
+      _historyWindowCommitSignatureByConv[storageKey] =
+          '$historyCommitSource|${_messageListContentSignature(sorted)}';
+    }
 
     if (replace ||
         isDeleteMsg ||

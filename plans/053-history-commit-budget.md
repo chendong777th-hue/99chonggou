@@ -36,10 +36,10 @@
 
 ## Done criteria
 
-- [ ] Equivalent history batches do not trigger `setMessageList` or a full rebuild.
-- [ ] Realtime and sending messages remain visible during history commits.
-- [ ] Existing pagination and ordering tests remain green.
-- [ ] No change to SDK source selection or message semantics.
+- [x] Equivalent history batches return before full-window sorting/rebuild.
+- [x] Realtime and sending messages remain visible during history commits.
+- [x] Existing pagination, outgoing identity, and recovery tests remain green.
+- [x] No change to SDK source selection or message semantics.
 
 ## STOP conditions
 

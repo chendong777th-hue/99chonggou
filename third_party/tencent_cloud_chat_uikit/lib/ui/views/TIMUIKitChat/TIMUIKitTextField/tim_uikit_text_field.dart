@@ -574,7 +574,7 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
       _applyKeyboardScrollSyncImpl,
       source: 'settle',
       conversationType:
-          widget.conversationID.startsWith('group_') ? 'group' : 'c2c',
+          ChatMainThreadPerf.conversationTypeForId(widget.conversationID),
     );
   }
 

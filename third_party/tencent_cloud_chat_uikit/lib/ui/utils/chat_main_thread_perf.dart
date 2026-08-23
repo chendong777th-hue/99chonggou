@@ -25,6 +25,13 @@ class ChatMainThreadPerf {
   static bool get isEnabled =>
       !kReleaseMode && (localProfileEnabled || debugForceEnabled);
 
+  static String conversationTypeForId(String conversationId) {
+    final value = conversationId.trim();
+    return value.startsWith('group_') || value.startsWith('@TGS')
+        ? 'group'
+        : 'c2c';
+  }
+
   static T measure<T>(
     String metric,
     T Function() operation, {

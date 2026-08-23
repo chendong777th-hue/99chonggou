@@ -186,33 +186,54 @@ class ChatHistoryRecoveryCoordinator {
       }
     }
 
-    while (true) {
-      final previous = _exclusiveTasks[key];
-      if (previous != null) {
-        if (shouldDropForPriority(conversationKey: key, priority: priority)) {
-          return;
-        }
-        await previous;
-        if (shouldDropForPriority(conversationKey: key, priority: priority)) {
-          return;
-        }
-        continue;
+    final previous = _exclusiveTasks[key];
+    final state = _states.putIfAbsent(key, _ConversationRecoveryState.new);
+    if (previous != null) {
+      if (shouldDropForPriority(conversationKey: key, priority: priority)) {
+        return;
       }
-
-      _activePriorityByKey[key] = priority;
-      late final Future<void> current;
-      current = task().whenComplete(() {
-        if (identical(_exclusiveTasks[key], current)) {
-          _exclusiveTasks.remove(key);
-        }
-        if (_activePriorityByKey[key] == priority) {
-          _activePriorityByKey.remove(key);
-        }
-      });
-      _exclusiveTasks[key] = current;
-      await current;
+      // While one recovery is active, retain only the newest accepted trigger.
+      // Every waiter shares the same drain future, so the active request is
+      // followed by at most one latest request instead of N queued refreshes.
+      state.pendingTask = task;
+      state.pendingPriority = priority;
+      state.pendingReason = reason;
+      await previous;
       return;
     }
+
+    final completion = Completer<void>();
+    _exclusiveTasks[key] = completion.future;
+    _activePriorityByKey[key] = priority;
+    unawaited(() async {
+      var nextTask = task;
+      var nextPriority = priority;
+      try {
+        while (true) {
+          await nextTask();
+          final pending = state.pendingTask;
+          if (pending == null) {
+            break;
+          }
+          nextTask = pending;
+          nextPriority = state.pendingPriority ?? nextPriority;
+          state.pendingTask = null;
+          state.pendingPriority = null;
+          state.pendingReason = null;
+          _activePriorityByKey[key] = nextPriority;
+        }
+        completion.complete();
+      } catch (error, stackTrace) {
+        completion.completeError(error, stackTrace);
+      } finally {
+        _exclusiveTasks.remove(key);
+        _activePriorityByKey.remove(key);
+        state.pendingTask = null;
+        state.pendingPriority = null;
+        state.pendingReason = null;
+      }
+    }());
+    await completion.future;
   }
 
   void schedulePostOpenRetry({
@@ -282,5 +303,8 @@ class _ConversationRecoveryState {
   bool postOpenRetryScheduled = false;
   DateTime? lastSuccessfulRecoveryAt;
   DateTime? lastForegroundRequestAt;
+  Future<void> Function()? pendingTask;
+  int? pendingPriority;
+  String? pendingReason;
   final List<Completer<void>> initialLoadWaiters = <Completer<void>>[];
 }
