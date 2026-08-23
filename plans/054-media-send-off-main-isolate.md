@@ -8,6 +8,7 @@
 - **Depends on**: plans/052-chat-main-thread-baseline.md
 - **Category**: perf
 - **Planned at**: commit `6333e34`, 2026-08-23
+- **Completed at**: 2026-08-23
 
 ## Why this matters
 
@@ -38,3 +39,13 @@ Image/video sending currently chains file read, compression, thumbnail generatio
 ## STOP conditions
 
 Stop if an SDK/plugin object must cross isolates, if stable identity cannot be preserved, or if moving work changes the uploaded bytes.
+
+## Completed implementation
+
+- The gallery inserts all image placeholders in one list commit before staging or compression and issues one post-layout bottom-pin request.
+- Each placeholder keeps one stable optimistic identity through preparation, SDK message creation, upload progress, receipt, retry, and final bubble adoption.
+- Compression remains in `FlutterImageCompress`, and video thumbnail generation remains in the native background implementation. No plugin or SDK object crosses an isolate and uploaded bytes/quality are unchanged.
+- iOS media preparation is intentionally bounded to one worker; Android remains bounded to two. This avoids iOS HEIC/iCloud export and decode-memory spikes without changing selected-media order.
+- Upload progress updates row-local state. Final adoption swaps the existing row instead of inserting another message, and does not issue another global bottom-pin request.
+
+The 052 iPhone Profile run measured the material pre-send delay in PhotoKit file resolution/export (roughly 31–80 ms in the captured run). That work is owned by the platform plugin and meets this plan's STOP condition: moving the plugin object to a Dart isolate is unsafe. Pure Dart size/header work did not exceed one frame, so no byte-processing migration was made.
