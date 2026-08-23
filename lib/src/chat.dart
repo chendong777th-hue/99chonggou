@@ -47,6 +47,7 @@ import 'package:tencent_cloud_chat_demo/src/widgets/group_game/sangong_bet_previ
 import 'package:tencent_cloud_chat_demo/src/widgets/group_game/sangong_round_settle_flow.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_info_resolver.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_local/group_metadata_refresh_coordinator.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_member_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_membership_sync_service.dart';
@@ -349,8 +350,6 @@ class _ChatState extends State<Chat> {
   final Map<Animation<double>, Set<AnimationStatusListener>>
       _routeTransitionListeners =
       <Animation<double>, Set<AnimationStatusListener>>{};
-  final Map<String, Future<void>> _groupMemberCountLoads =
-      <String, Future<void>>{};
   Timer? _peerPermissionSyncDebounce;
   String? backRemark;
   final V2TIMManager sdkInstance = TIMUIKitCore.getSDKInstance();
@@ -5006,89 +5005,73 @@ class _ChatState extends State<Chat> {
     if (groupId.isEmpty) {
       return;
     }
-    final record = await GroupInfoResolver.instance.readGroup(groupId);
-    if (!mounted) {
+    var snapshot = await GroupMetadataRefreshCoordinator.instance
+        .readLocalPlaceholder(groupId);
+    if (snapshot == null) {
       return;
     }
-    if (_getConvType() != ConvType.group ||
-        !ChatIdFormat.groupIdsEquivalent(
-          widget.selectedConversation.groupID,
-          groupId,
-        )) {
-      return;
-    }
-    final prevCount = _groupMemberCount;
-    final prevNotice = _groupSide.groupNoticeBanner;
-    final prevFace = _conversation.faceUrl ?? '';
-    final prevShowName = _conversation.showName ?? '';
-
-    if (record != null) {
-      // Local data is a first-paint fallback only. Once a value is already
-      // present, do not re-apply the stale SQLite snapshot and make the header
-      // jump while the authoritative request is in flight.
-      if (_groupMemberCount == null && record.memberCount > 0) {
-        _groupMemberCount = record.memberCount;
-      }
-      final groupName = record.groupName.trim();
-      final currentShowName = (_conversation.showName ?? '').trim();
-      final shouldApplyName = groupName.isNotEmpty &&
-          (currentShowName.isEmpty ||
-              currentShowName != groupName ||
-              GroupDisplayResolver.looksLikeGroupIdLabel(
-                currentShowName,
-                groupId: groupId,
-              ));
-      if (shouldApplyName) {
-        _conversation.showName = groupName;
-        widget.selectedConversation.showName = groupName;
-        conversationName = groupName;
-        _cachedHeaderShowName = groupName;
-      }
-      final avatar = record.avatarUrl.trim();
-      final currentFace = (_conversation.faceUrl ?? '').trim();
-      final shouldApply = avatar.isNotEmpty &&
-          !UserAvatarHelper.isDefaultPlaceholder(avatar) &&
-          avatar != currentFace;
-      _logGroupHeaderAvatarSource(
-        source: 'sqlite_local_hydrate',
-        currentFaceUrl: currentFace,
-        candidateFaceUrl: avatar,
-        applied: shouldApply,
-      );
-      if (shouldApply) {
-        _conversation.faceUrl = avatar;
-        widget.selectedConversation.faceUrl = avatar;
-        _cachedHeaderFaceUrl = avatar;
-      }
-    }
-
-    var notice = record?.notice.trim() ??
-        GroupDisplayResolver.resolveNotice(
-          groupId: groupId,
-          groupList: serviceLocator<TUIFriendShipViewModel>().groupList,
-        );
-    if (notice.isNotEmpty &&
+    if (snapshot.notice.isNotEmpty &&
         await GroupNoticeMarqueeDismissService.instance.isDismissed(
           groupId: groupId,
-          notice: notice,
+          notice: snapshot.notice,
         )) {
-      notice = '';
+      snapshot = GroupMetadataSnapshot(
+        groupId: snapshot.groupId,
+        name: snapshot.name,
+        memberCount: snapshot.memberCount,
+        notice: '',
+        avatarUrl: snapshot.avatarUrl,
+        source: snapshot.source,
+        generation: snapshot.generation,
+      );
     }
+    _applyGroupMetadataSnapshot(snapshot, localPlaceholder: true);
+  }
+
+  void _applyGroupMetadataSnapshot(
+    GroupMetadataSnapshot snapshot, {
+    required bool localPlaceholder,
+  }) {
     if (!mounted ||
         _getConvType() != ConvType.group ||
         !ChatIdFormat.groupIdsEquivalent(
           widget.selectedConversation.groupID,
-          groupId,
-        )) {
-      return;
-    }
-    if (_groupSide.groupNoticeBanner.isEmpty) {
-      _groupSide.groupNoticeBanner = notice;
-    }
-
+          snapshot.groupId,
+        )) return;
+    final prevCount = _groupMemberCount;
+    final prevNotice = _groupSide.groupNoticeBanner;
+    final prevFace = _conversation.faceUrl ?? '';
+    final prevShowName = _conversation.showName ?? '';
     ChatMainThreadPerf.measure(
       ChatMainThreadPerf.groupMetadataApplyMs,
       () {
+        if (snapshot.memberCount != null &&
+            (!localPlaceholder || _groupMemberCount == null)) {
+          _groupMemberCount = snapshot.memberCount;
+        }
+        final currentName = (_conversation.showName ?? '').trim();
+        if (snapshot.name.isNotEmpty &&
+            (!localPlaceholder ||
+                currentName.isEmpty ||
+                GroupDisplayResolver.looksLikeGroupIdLabel(
+                  currentName,
+                  groupId: snapshot.groupId,
+                ))) {
+          _conversation.showName = snapshot.name;
+          widget.selectedConversation.showName = snapshot.name;
+          conversationName = snapshot.name;
+          _cachedHeaderShowName = snapshot.name;
+        }
+        if (snapshot.avatarUrl.isNotEmpty &&
+            !UserAvatarHelper.isDefaultPlaceholder(snapshot.avatarUrl) &&
+            (!localPlaceholder || (_conversation.faceUrl ?? '').isEmpty)) {
+          _conversation.faceUrl = snapshot.avatarUrl;
+          widget.selectedConversation.faceUrl = snapshot.avatarUrl;
+          _cachedHeaderFaceUrl = snapshot.avatarUrl;
+        }
+        if (!localPlaceholder || _groupSide.groupNoticeBanner.isEmpty) {
+          _groupSide.groupNoticeBanner = snapshot.notice;
+        }
         final headerChanged = _groupMemberCount != prevCount ||
             (_conversation.faceUrl ?? '') != prevFace ||
             (_conversation.showName ?? '') != prevShowName;
@@ -5100,8 +5083,8 @@ class _ChatState extends State<Chat> {
           _syncChatTopFixState();
         }
       },
-      count: record == null ? 0 : 1,
-      source: 'sqlite_first_paint',
+      count: 1,
+      source: snapshot.source.name,
       conversationType: 'group',
     );
   }
@@ -5112,14 +5095,6 @@ class _ChatState extends State<Chat> {
           _resolvedConversationID(),
           conversationId,
         );
-  }
-
-  void _applyGroupMemberCountIfChanged(int? count) {
-    if (!mounted || _groupMemberCount == count) {
-      return;
-    }
-    _groupMemberCount = count;
-    _syncChatHeaderState();
   }
 
   Future<void> _applyResolvedGroupNoticeBanner({
@@ -5142,7 +5117,7 @@ class _ChatState extends State<Chat> {
     _syncChatTopFixState();
   }
 
-  Future<void> _loadGroupMemberCount() async {
+  Future<void> _loadGroupMemberCount({bool force = false}) async {
     if (_getConvType() != ConvType.group) {
       if (_groupMemberCount != null && mounted) {
         _groupMemberCount = null;
@@ -5154,53 +5129,19 @@ class _ChatState extends State<Chat> {
     if (groupID.isEmpty) {
       return;
     }
-    final now = DateTime.now();
-    final last = _lastGroupMetadataRefreshAt;
-    if (last != null && now.difference(last) < const Duration(seconds: 60)) {
-      return;
-    }
-    _lastGroupMetadataRefreshAt = now;
     final conversationId = _resolvedConversationID();
-    final loadKey = '${ContactSocialCacheStore.safeLoginUserId()}|$groupID';
-    final existing = _groupMemberCountLoads[loadKey];
-    if (existing != null) {
-      await existing;
-      return;
-    }
-    final task = _loadGroupMemberCountOnce(
-      groupID: groupID,
-      conversationId: conversationId,
-    );
-    _groupMemberCountLoads[loadKey] = task;
-    try {
-      await task;
-    } finally {
-      if (_groupMemberCountLoads[loadKey] == task) {
-        _groupMemberCountLoads.remove(loadKey);
-      }
-    }
-  }
-
-  Future<void> _loadGroupMemberCountOnce({
-    required String groupID,
-    required String conversationId,
-  }) async {
     final generation = _groupMemberCountGeneration;
-    var count = GroupDisplayResolver.resolveMemberCount(
-      groupId: groupID,
-      groupList: serviceLocator<TUIFriendShipViewModel>().groupList,
+    final snapshot = await GroupMetadataRefreshCoordinator.instance.refresh(
+      groupID,
+      force: force,
     );
-    count ??= await GroupInfoResolver.instance.memberCount(groupID);
-    if (count == null) {
-      await GroupMembershipSyncService.instance.refreshGroupDetail(groupID);
-      count = await GroupInfoResolver.instance.memberCount(groupID);
-    }
     if (!_isCurrentConversation(conversationId) ||
         generation != _groupMemberCountGeneration ||
-        count == null) {
+        snapshot == null) {
       return;
     }
-    _applyGroupMemberCountIfChanged(count);
+    _lastGroupMetadataRefreshAt = DateTime.now();
+    _applyGroupMetadataSnapshot(snapshot, localPlaceholder: false);
   }
 
   Future<void> _loadGroupGameStatus() async {
@@ -6521,7 +6462,7 @@ class _ChatState extends State<Chat> {
       return;
     }
     if (GroupSyncService.memberCountRefreshActions.contains(notice.action)) {
-      unawaited(_loadGroupMemberCount());
+      unawaited(_loadGroupMemberCount(force: true));
       _clearMountedDisplayListCache();
       unawaited(
         GroupChangeEventSyncService.instance.syncForGroup(
@@ -9770,6 +9711,10 @@ class _ChatState extends State<Chat> {
       widget.selectedConversation,
     );
     if (oldConversationID != newConversationID) {
+      final oldGroupId = oldWidget.selectedConversation.groupID?.trim() ?? '';
+      if (oldGroupId.isNotEmpty) {
+        GroupMetadataRefreshCoordinator.instance.invalidate(oldGroupId);
+      }
       _groupMemberCountGeneration++;
       _lastGroupMetadataRefreshAt = null;
       _clearExternalEntryState(oldConversationID);

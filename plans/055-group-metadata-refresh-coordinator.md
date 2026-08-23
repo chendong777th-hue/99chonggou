@@ -38,3 +38,11 @@ Opening a group can read local SQLite data, resolve SDK group data, refresh memb
 ## STOP conditions
 
 Stop if the remote API does not provide a coherent snapshot or if applying one field at a time is required for an existing product flow; document the exception instead.
+
+## Completed
+
+- [x] Canonical group ID single-flight with 60-second throttle.
+- [x] Coherent name/count/notice/avatar snapshot and atomic chat-header apply.
+- [x] Local SQLite is first-paint placeholder only; remote detail replaces it.
+- [x] Explicit membership events bypass throttle; stale generations are ignored.
+- [x] Metadata apply does not notify the message list.
