@@ -2,6 +2,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:tencent_cloud_chat_demo/src/services/system_media_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:tencent_cloud_chat_demo/src/i18n/app_i18n.dart';
 import 'package:tencent_cloud_chat_demo/src/platform/permission_guard.dart';
@@ -91,22 +92,11 @@ class CustomerServiceWebViewFileSelector {
     if (!allowed || !context.mounted) {
       return <String>[];
     }
-    final theme = Provider.of<DefaultThemeData>(context, listen: false).theme;
-    final pickedAssets = await EditableAssetPicker.pickAssets(
-      context,
-      pickerConfig: AssetPickerConfig(
-        maxAssets: 1,
-        requestType: RequestType.image,
-        themeColor: theme.primaryColor ?? AppColors.primaryBlue,
-      ),
-    );
+    final pickedAssets = await SystemMediaPicker.pickImages(maxAssets: 1);
     if (!context.mounted) {
       return <String>[];
     }
-    final imageFile = pickedAssets?.isNotEmpty == true
-        ? await EditableAssetPicker.resolveFile(pickedAssets!.first)
-        : null;
-    final path = imageFile?.path;
+    final path = pickedAssets.isEmpty ? null : pickedAssets.first.path;
     if (path == null || path.isEmpty) {
       return <String>[];
     }
@@ -118,23 +108,14 @@ class CustomerServiceWebViewFileSelector {
     if (!allowed || !context.mounted) {
       return <String>[];
     }
-    final theme = Provider.of<DefaultThemeData>(context, listen: false).theme;
-    final pickedAssets = await EditableAssetPicker.pickAssets(
-      context,
-      pickerConfig: AssetPickerConfig(
-        maxAssets: _maxMultipleImages,
-        requestType: RequestType.image,
-        themeColor: theme.primaryColor ?? AppColors.primaryBlue,
-      ),
-    );
-    if (!context.mounted || pickedAssets == null || pickedAssets.isEmpty) {
+    final pickedAssets = await SystemMediaPicker.pickImages(maxAssets: _maxMultipleImages);
+    if (!context.mounted || pickedAssets.isEmpty) {
       return <String>[];
     }
 
     final uris = <String>[];
     for (final asset in pickedAssets) {
-      final file = await EditableAssetPicker.resolveFile(asset);
-      final path = file?.path;
+      final path = asset.path;
       if (path != null && path.isNotEmpty) {
         uris.add(Uri.file(path).toString());
       }

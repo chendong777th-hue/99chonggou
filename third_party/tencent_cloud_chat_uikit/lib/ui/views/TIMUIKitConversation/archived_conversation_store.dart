@@ -51,6 +51,7 @@ final ValueNotifier<Set<String>> archivedConversationIDsNotifier =
 String? _loadedAccountScope;
 bool _c2cLoadedForScope = false;
 bool _groupLoadedForScope = false;
+int _archiveSessionGeneration = 0;
 
 void _syncLegacyMergedArchivedNotifier() {
   archivedConversationIDsNotifier.value = {
@@ -79,14 +80,23 @@ String accountScopeForArchivedConversations() {
   }
 }
 
-String archivedConversationIDsStorageKeyFor(ConversationArchiveScope scope) {
-  final accountScope = accountScopeForArchivedConversations();
+String archivedConversationIDsStorageKeyForAccountScope(
+  ConversationArchiveScope scope,
+  String accountScope,
+) {
   switch (scope) {
     case ConversationArchiveScope.c2c:
       return '$_archivedConversationIDsC2cScopedPrefix$accountScope';
     case ConversationArchiveScope.group:
       return '$_archivedConversationIDsGroupScopedPrefix$accountScope';
   }
+}
+
+String archivedConversationIDsStorageKeyFor(ConversationArchiveScope scope) {
+  return archivedConversationIDsStorageKeyForAccountScope(
+    scope,
+    accountScopeForArchivedConversations(),
+  );
 }
 
 ValueNotifier<Set<String>> archivedConversationIDsNotifierFor(
@@ -124,10 +134,11 @@ Future<void> _migrateLegacyArchivedConversationIDsIfNeeded() async {
   if (prefs.getBool(archivedConversationIDsMigratedStorageKey) == true) {
     return;
   }
-  final legacy =
-      prefs.getStringList(archivedConversationIDsLegacyStorageKey) ?? <String>[];
+  final legacy = prefs.getStringList(archivedConversationIDsLegacyStorageKey) ??
+      <String>[];
   final c2cIDs = <String>{
-    ...(prefs.getStringList(archivedConversationIDsC2cStorageKey) ?? <String>[]),
+    ...(prefs.getStringList(archivedConversationIDsC2cStorageKey) ??
+        <String>[]),
   };
   final groupIDs = <String>{
     ...(prefs.getStringList(archivedConversationIDsGroupStorageKey) ??
@@ -155,8 +166,16 @@ Future<void> _migrateGlobalArchivedConversationIDsToAccountIfNeeded(
   SharedPreferences prefs,
   String accountScope,
 ) async {
-  final migratedKey = '$_archivedConversationAccountMigratedPrefix$accountScope';
+  final migratedKey =
+      '$_archivedConversationAccountMigratedPrefix$accountScope';
   if (prefs.getBool(migratedKey) == true) {
+    return;
+  }
+  // Global legacy keys have no owner. Importing them into every account leaks
+  // one user's archive list into all later logins. Formal accounts rebuild
+  // from their scoped cache/server snapshot instead.
+  if (accountScope != '_guest') {
+    await prefs.setBool(migratedKey, true);
     return;
   }
   await _migrateLegacyArchivedConversationIDsIfNeeded();
@@ -184,21 +203,9 @@ Future<void> _migrateGlobalArchivedConversationIDsToAccountIfNeeded(
   await prefs.setBool(migratedKey, true);
 }
 
-void _resetLoadedScopeIfAccountChanged() {
-  final scope = accountScopeForArchivedConversations();
-  if (_loadedAccountScope == scope) {
-    return;
-  }
-  _loadedAccountScope = scope;
-  _c2cLoadedForScope = false;
-  _groupLoadedForScope = false;
-  archivedConversationC2cIDsNotifier.value = <String>{};
-  archivedConversationGroupIDsNotifier.value = <String>{};
-  _syncLegacyMergedArchivedNotifier();
-}
-
 /// 登出时仅清空内存态，保留各账号本地缓存。
 void clearArchivedConversationSessionState() {
+  _archiveSessionGeneration++;
   _loadedAccountScope = null;
   _c2cLoadedForScope = false;
   _groupLoadedForScope = false;
@@ -208,9 +215,21 @@ void clearArchivedConversationSessionState() {
 }
 
 Future<Set<String>> loadArchivedConversationIDs(
-  ConversationArchiveScope scope,
-) async {
-  _resetLoadedScopeIfAccountChanged();
+  ConversationArchiveScope scope, {
+  String? accountScope,
+}) async {
+  final resolvedScope = accountScope?.trim().isNotEmpty == true
+      ? accountScope!.trim()
+      : accountScopeForArchivedConversations();
+  if (_loadedAccountScope != resolvedScope) {
+    _loadedAccountScope = resolvedScope;
+    _c2cLoadedForScope = false;
+    _groupLoadedForScope = false;
+    archivedConversationC2cIDsNotifier.value = <String>{};
+    archivedConversationGroupIDsNotifier.value = <String>{};
+    _syncLegacyMergedArchivedNotifier();
+  }
+  final generation = _archiveSessionGeneration;
   if (scope == ConversationArchiveScope.c2c && _c2cLoadedForScope) {
     return archivedConversationC2cIDsNotifier.value;
   }
@@ -219,13 +238,22 @@ Future<Set<String>> loadArchivedConversationIDs(
   }
 
   final prefs = await SharedPreferences.getInstance();
-  final accountScope = accountScopeForArchivedConversations();
+  if (generation != _archiveSessionGeneration ||
+      _loadedAccountScope != resolvedScope) {
+    return <String>{};
+  }
   await _migrateGlobalArchivedConversationIDsToAccountIfNeeded(
     prefs,
-    accountScope,
+    resolvedScope,
   );
+  if (generation != _archiveSessionGeneration ||
+      _loadedAccountScope != resolvedScope) {
+    return <String>{};
+  }
 
-  final ids = prefs.getStringList(archivedConversationIDsStorageKeyFor(scope)) ??
+  final ids = prefs.getStringList(
+        archivedConversationIDsStorageKeyForAccountScope(scope, resolvedScope),
+      ) ??
       <String>[];
   final value = ids.toSet();
   archivedConversationIDsNotifierFor(scope).value = value;
@@ -240,14 +268,34 @@ Future<Set<String>> loadArchivedConversationIDs(
 
 Future<void> saveArchivedConversationIDs(
   ConversationArchiveScope scope,
-  Set<String> ids,
-) async {
-  _resetLoadedScopeIfAccountChanged();
+  Set<String> ids, {
+  String? accountScope,
+}) async {
+  final resolvedScope = accountScope?.trim().isNotEmpty == true
+      ? accountScope!.trim()
+      : accountScopeForArchivedConversations();
+  if (_loadedAccountScope != resolvedScope) {
+    _loadedAccountScope = resolvedScope;
+    _c2cLoadedForScope = false;
+    _groupLoadedForScope = false;
+    archivedConversationC2cIDsNotifier.value = <String>{};
+    archivedConversationGroupIDsNotifier.value = <String>{};
+    _syncLegacyMergedArchivedNotifier();
+  }
+  final generation = _archiveSessionGeneration;
   final prefs = await SharedPreferences.getInstance();
+  if (generation != _archiveSessionGeneration ||
+      _loadedAccountScope != resolvedScope) {
+    return;
+  }
   await prefs.setStringList(
-    archivedConversationIDsStorageKeyFor(scope),
+    archivedConversationIDsStorageKeyForAccountScope(scope, resolvedScope),
     ids.toList(),
   );
+  if (generation != _archiveSessionGeneration ||
+      _loadedAccountScope != resolvedScope) {
+    return;
+  }
   archivedConversationIDsNotifierFor(scope).value = ids;
   if (scope == ConversationArchiveScope.c2c) {
     _c2cLoadedForScope = true;
@@ -257,9 +305,34 @@ Future<void> saveArchivedConversationIDs(
   _syncLegacyMergedArchivedNotifier();
 }
 
-Future<void> ensureArchivedConversationIDsLoaded() async {
-  await loadArchivedConversationIDs(ConversationArchiveScope.c2c);
-  await loadArchivedConversationIDs(ConversationArchiveScope.group);
+/// Deletes one account's archive cache without resolving the current login.
+Future<void> clearArchivedConversationDataForAccountScope(
+  String rawAccountScope,
+) async {
+  final accountScope = rawAccountScope.trim();
+  if (accountScope.isEmpty || accountScope == '_guest') return;
+  final prefs = await SharedPreferences.getInstance();
+  for (final scope in ConversationArchiveScope.values) {
+    await prefs.remove(
+      archivedConversationIDsStorageKeyForAccountScope(scope, accountScope),
+    );
+  }
+  await prefs
+      .remove('$_archivedConversationAccountMigratedPrefix$accountScope');
+  if (_loadedAccountScope == accountScope) {
+    clearArchivedConversationSessionState();
+  }
+}
+
+Future<void> ensureArchivedConversationIDsLoaded({String? accountScope}) async {
+  await loadArchivedConversationIDs(
+    ConversationArchiveScope.c2c,
+    accountScope: accountScope,
+  );
+  await loadArchivedConversationIDs(
+    ConversationArchiveScope.group,
+    accountScope: accountScope,
+  );
 }
 
 Future<void> addArchivedConversation(

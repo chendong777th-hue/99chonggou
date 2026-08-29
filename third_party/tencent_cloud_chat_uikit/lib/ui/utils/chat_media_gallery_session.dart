@@ -100,14 +100,23 @@ class ChatMediaGalleryLiveSession {
 
   void _ingestNewest() {
     final newestFirst = chatModel.getGalleryOriginMessageList();
-    if (newestFirst.isEmpty) {
-      return;
-    }
+    final revokedAuthority = chatModel
+        .getOriginMessageList()
+        .where(isChatMediaMessageRevoked)
+        .toList(growable: false);
     final scanCount = newestFirst.length < newestScanCount
         ? newestFirst.length
         : newestScanCount;
-    var working = preview.sortedMessages;
-    var changed = false;
+    var working = preview.sortedMessages
+        .where(
+          (message) =>
+              _isPreviewable(message) &&
+              !revokedAuthority.any(
+                (revoked) => isSameChatMediaMessage(revoked, message),
+              ),
+        )
+        .toList(growable: false);
+    var changed = working.length != preview.sortedMessages.length;
     for (var i = 0; i < scanCount; i++) {
       final next = appendIncomingChatMediaGalleryMessage(
         currentOldestFirst: working,

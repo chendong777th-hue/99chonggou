@@ -302,7 +302,8 @@ String formatWalletAmount(String currency, int amount) {
   if (isWalletPlatformCurrency(currency)) {
     return formatPlatformFen(amount);
   }
-  return formatUsdtMicro(amount);
+  // Wallet-facing USDT amounts use two decimal places consistently.
+  return (amount / 1000000).toStringAsFixed(2);
 }
 
 int walletAmountScale(String currency) {

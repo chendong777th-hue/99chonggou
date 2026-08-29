@@ -4,8 +4,11 @@ import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversa
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_change_event_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_local_tips_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_tips_operator_patch_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/message_history_coverage_store.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/archive_history_provider.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
+import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 
 /// 聊天记录清空后的本地预览/列表同步。
 class ConversationHistoryClearService {
@@ -38,6 +41,21 @@ class ConversationHistoryClearService {
       conversationID: fullConversationId,
       snapshot: snapshot,
     );
+    final clearEpoch = await ConversationLocalStore.instance.historyClearedAtMs(
+      fullConversationId,
+    );
+    await MessageHistoryCoverageStore.instance.clearConversation(
+      fullConversationId,
+      isGroup: isGroup,
+      clearEpoch: clearEpoch,
+    );
+    try {
+      await serviceLocator<TUIChatGlobalModel>().invalidateMessageHistoryCoverage(
+        fullConversationId,
+        isGroup: isGroup,
+        clearEpoch: clearEpoch,
+      );
+    } catch (_) {}
     if (isGroup) {
       await _clearGroupLocalTipsArtifacts(conversationID);
     }

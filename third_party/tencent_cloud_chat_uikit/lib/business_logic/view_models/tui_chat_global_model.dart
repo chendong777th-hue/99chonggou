@@ -1,6 +1,7 @@
 // ignore_for_file: avoid_print, unnecessary_getters_setters, unused_element
 import 'dart:async';
 import 'dart:convert';
+import 'dart:collection';
 import 'dart:io';
 import 'dart:math';
 
@@ -8,6 +9,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitSearch/conversation_search_utils.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/gap_detector.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/inbound_reorder_buffer.dart';
 import 'package:tencent_cloud_chat_sdk/enum/V2TimAdvancedMsgListener.dart';
 import 'package:tencent_cloud_chat_sdk/enum/history_msg_get_type_enum.dart';
 import 'package:tencent_cloud_chat_sdk/enum/message_elem_type.dart';
@@ -41,6 +44,15 @@ import 'package:tencent_cloud_chat_uikit/business_logic/services/group_member_st
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/chat_message_window.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/chat_message_window_policy.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/chat_ui_state_store.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_commit_coordinator.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_cloud_catch_up.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_reconciliation_coordinator.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_reconciliation_identity.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_reconciliation_writer.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_history_coverage.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/open_hydrate_result.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_history_batch.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_delta.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/group/group_services.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/message_services.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/conversation_peer_read_coordinator.dart';
@@ -56,6 +68,7 @@ import 'package:tencent_cloud_chat_uikit/ui/utils/history_pagination_anchor.dart
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_jitter_diag.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/regexp_probe.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_media_send_utils.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_media_gallery_expand.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_message_height_cache.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/message_inbound_batch_coalescer.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/message_inbound_chunk_reveal.dart';
@@ -165,6 +178,120 @@ class _InboundUnreadState {
 
 enum _HistoryConversationKind { c2c, group }
 
+/// Viewport coordinates captured when a message context menu opens.
+///
+/// The scroll extent is not a sufficient anchor for a reverse chat list: the
+/// unread center, time dividers, spacers, or a later row measurement can all
+/// change the extent without preserving the selected row's screen position.
+class MessageContextMenuViewportAnchor {
+  const MessageContextMenuViewportAnchor({
+    required this.identity,
+    required this.seq,
+    required this.viewportTop,
+  });
+
+  /// Message `msgID`, or the local id while an optimistic row has no server id.
+  final String? identity;
+
+  /// Sequence is a fallback for SDK rows whose identity changes during sync.
+  final String? seq;
+
+  /// Top edge of the selected row relative to the chat scroll viewport.
+  final double viewportTop;
+}
+
+enum RowLocalMessageReplacementResult {
+  replaced,
+  stale,
+  notFound,
+  ambiguous,
+  reordered,
+  semanticChange,
+}
+
+/// Immutable synchronous snapshot produced by [TUIChatGlobalModel.setMessageList].
+///
+/// Callers that need post-commit state must consume this value instead of
+/// sampling the mutable global maps again.
+class MessageCommitResult {
+  const MessageCommitResult({
+    required this.conversationID,
+    required this.token,
+    required this.generation,
+    required this.listRevision,
+    required this.projectionRevision,
+    required this.rawCount,
+    required this.firstIdentity,
+    required this.lastIdentity,
+    required this.memoryWindowMissingNewer,
+    required this.memoryWindowMissingOlder,
+    required this.memoryWindowSuppressed,
+    required this.unreadBufferedCount,
+    required this.unreadProjectionHeld,
+    required this.structureChanged,
+    required this.contentChanged,
+  });
+
+  final String conversationID;
+  final int token;
+  final int generation;
+  final int listRevision;
+  final int projectionRevision;
+  final int rawCount;
+  final String? firstIdentity;
+  final String? lastIdentity;
+  final bool memoryWindowMissingNewer;
+  final bool memoryWindowMissingOlder;
+  final bool memoryWindowSuppressed;
+  final int unreadBufferedCount;
+  final bool unreadProjectionHeld;
+  final bool structureChanged;
+  final bool contentChanged;
+}
+
+/// Diagnostic metadata for the last authoritative history commit.
+///
+/// This deliberately contains no message payload, credentials, or media URL.
+class MessageHistoryCommitMetadata {
+  const MessageHistoryCommitMetadata({
+    required this.conversationKey,
+    required this.source,
+    required this.batchKind,
+    required this.generation,
+    required this.revision,
+    required this.resultCount,
+    required this.proofKind,
+    required this.clearEpoch,
+  });
+
+  final String conversationKey;
+  final MessageReconciliationSource source;
+  final MessageHistoryBatchKind batchKind;
+  final int generation;
+  final int revision;
+  final int resultCount;
+  final MessageHistoryProofKind proofKind;
+  bool get cloudProof => proofKind != MessageHistoryProofKind.none;
+  bool get cloudTransportConfirmed => cloudProof;
+  bool get serverContinuityProven =>
+      proofKind == MessageHistoryProofKind.serverContinuity;
+  final int clearEpoch;
+
+  Map<String, Object?> toMetadataJson() => <String, Object?>{
+        'conversationKey': conversationKey,
+        'source': source.name,
+        'batchKind': batchKind.name,
+        'generation': generation,
+        'revision': revision,
+        'resultCount': resultCount,
+        'proofKind': proofKind.name,
+        'cloudProof': cloudProof,
+        'cloudTransportConfirmed': cloudTransportConfirmed,
+        'serverContinuityProven': serverContinuityProven,
+        'clearEpoch': clearEpoch,
+      };
+}
+
 class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
   static void Function(TUIChatGlobalModel model)? registerAppExtensions;
 
@@ -177,9 +304,956 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
   final GroupServices _groupServices = serviceLocator<GroupServices>();
   final ChatUiStateStore _chatUiStateStore = serviceLocator<ChatUiStateStore>();
   final Map<String, List<V2TimMessage>?> _messageListMap = {};
+  final Map<String, MessageHistoryCommitMetadata>
+      _lastHistoryCommitMetadataByConv =
+      <String, MessageHistoryCommitMetadata>{};
+  final MessageCommitCoordinator _messageCommitCoordinator =
+      MessageCommitCoordinator();
+  late final MessageReconciliationWriter<V2TimMessage>
+      _messageReconciliationWriter = MessageReconciliationWriter<V2TimMessage>(
+    comparator: (left, right) => compareMessagesChronological(
+      right.value,
+      left.value,
+    ),
+  );
+  int _nextRealtimeReconciliationEvent = 0;
+
+  /// App-owned connectivity bridge. UIKit does not import the host app's
+  /// network services; when no provider is installed, reconciliation stays in
+  /// the conservative `unknown` state and never claims cloud completeness.
+  MessageReconciliationNetworkState Function()?
+      appMessageReconciliationNetworkStateProvider;
+
+  /// Host-app persistence for coverage metadata. UIKit owns the state shape,
+  /// while the app owns the SQLite lifecycle and account scoping.
+  MessageHistoryCoverageRepository? appMessageHistoryCoverageRepository;
+
+  Future<MessageHistoryCoverage?> loadMessageHistoryCoverage(
+    String conversationID,
+  ) {
+    final repository = appMessageHistoryCoverageRepository;
+    return repository?.load(conversationID) ??
+        Future<MessageHistoryCoverage?>.value();
+  }
+
+  Future<void> persistMessageHistoryCoverage(
+    MessageHistoryCoverage coverage,
+  ) async {
+    await appMessageHistoryCoverageRepository?.save(coverage);
+  }
+
+  Future<void> clearMessageHistoryCoverage(
+    String conversationID, {
+    required bool isGroup,
+    required int clearEpoch,
+  }) async {
+    await appMessageHistoryCoverageRepository?.clearConversation(
+      conversationID,
+      isGroup: isGroup,
+      clearEpoch: clearEpoch,
+    );
+  }
+
+  MessageReconciliationNetworkState get messageReconciliationNetworkState {
+    try {
+      return appMessageReconciliationNetworkStateProvider?.call() ??
+          MessageReconciliationNetworkState.unknown;
+    } catch (_) {
+      return MessageReconciliationNetworkState.unknown;
+    }
+  }
+
+  MessageReconciliationRecord<V2TimMessage> _reconciliationRecord(
+    V2TimMessage message,
+  ) {
+    return MessageReconciliationRecord<V2TimMessage>(
+      value: message,
+      msgID: message.msgID,
+      localID: message.id,
+      outgoingStableID: readOutgoingStableId(message),
+      seq: message.seq,
+    );
+  }
+
+  MessageReconciliationRecord<V2TimMessage> messageDeltaRecord(
+    V2TimMessage message,
+  ) =>
+      _reconciliationRecord(message);
+
+  Iterable<MessageReconciliationRecord<V2TimMessage>> _reconciliationRecords(
+      Iterable<V2TimMessage> messages) {
+    return messages.map(_reconciliationRecord);
+  }
+
+  int messageDeltaGenerationFor(String conversationID) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final key = storageKey.isEmpty ? conversationID.trim() : storageKey;
+    if (key.isEmpty) return 0;
+    return _messageReconciliationWriter.coordinator
+        .stateFor(key)
+        .requestGeneration;
+  }
+
+  int messageDeltaClearEpochFor(String conversationID) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final key = storageKey.isEmpty ? conversationID.trim() : storageKey;
+    return _messageHistoryCoverageByConv[key]?.clearEpoch ?? 0;
+  }
+
+  void releaseMessageDeltaTombstones(
+    String conversationID,
+    Iterable<String> msgIDs,
+  ) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final key = storageKey.isEmpty ? conversationID.trim() : storageKey;
+    if (key.isEmpty) return;
+    _messageReconciliationWriter.releaseTombstones(key, msgIDs);
+  }
+
+  void restoreMessageDeltaAfterDeleteFailure(
+    String conversationID,
+    Iterable<V2TimMessage> messages,
+  ) {
+    final restored = messages.toList(growable: false);
+    if (restored.isEmpty) return;
+    final ids = restored
+        .map((message) => message.msgID?.trim() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toList(growable: false);
+    releaseMessageDeltaTombstones(conversationID, ids);
+    commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: conversationID,
+        eventID:
+            'delete_rollback:${ids.join(',')}:${DateTime.now().microsecondsSinceEpoch}',
+        kind: MessageDeltaKind.optimisticAdoption,
+        source: MessageDeltaSource.userAction,
+        generation: messageDeltaGenerationFor(conversationID),
+        clearEpoch: messageDeltaClearEpochFor(conversationID),
+        upserts: _reconciliationRecords(restored),
+      ),
+    );
+  }
+
+  /// Authoritative boundary for realtime, optimistic, edit, revoke and delete.
+  /// `setMessageList` remains the final UI projection writer, but no caller in
+  /// these mutation paths decides merge/removal semantics independently.
+  MessageCommitResult? commitMessageDelta(
+    MessageDelta<V2TimMessage> delta, {
+    bool applyMemoryWindow = true,
+    bool memoryWindowPreferLatest = false,
+  }) {
+    final storageKey = _resolveMessageListStorageKey(delta.conversationKey);
+    final key = storageKey.isEmpty ? delta.conversationKey.trim() : storageKey;
+    if (key.isEmpty || delta.isSynthetic) return null;
+    if (!_messageReconciliationWriter.hasActiveRequest(key)) {
+      final current = _mergedAliasMessageList(key);
+      _messageReconciliationWriter.seedAuthoritative(
+        conversationID: key,
+        records: _reconciliationRecords(current),
+        trackSeqGaps: _isGroupConversation(key, messages: current),
+        clearEpoch: delta.clearEpoch,
+      );
+    }
+    final normalized = MessageDelta<V2TimMessage>(
+      conversationKey: key,
+      eventID: delta.eventID,
+      kind: delta.kind,
+      source: delta.source,
+      generation: delta.generation,
+      clearEpoch: delta.clearEpoch,
+      upserts: delta.upserts,
+      explicitDeletes: delta.explicitDeletes,
+      tombstones: delta.tombstones,
+    );
+    final commit = _messageReconciliationWriter.applyDelta(normalized);
+    if (commit == null) return null;
+    return setMessageList(
+      key,
+      commit.records.map((record) => record.value).toList(growable: false),
+      needResetNewMessageCount: false,
+      replace: true,
+      isDeleteMsg: delta.kind == MessageDeltaKind.delete,
+      applyMemoryWindow: applyMemoryWindow,
+      memoryWindowPreferLatest: memoryWindowPreferLatest,
+      historyCommitSource:
+          'message_delta:${delta.kind.name}:r${commit.revision}',
+    );
+  }
+
+  /// Starts one history transaction against the current authoritative window.
+  /// Realtime callbacks are queued by the same writer until this generation
+  /// either commits or fails, so an old history response cannot overwrite them.
+  MessageReconciliationRequest beginHistoryReconciliation({
+    required String conversationID,
+    required MessageReconciliationSource requestedSource,
+    required MessageReconciliationNetworkState networkState,
+  }) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final authoritative = _mergedAliasMessageList(storageKey);
+    _messageReconciliationWriter.seedAuthoritative(
+      conversationID: storageKey,
+      records: _reconciliationRecords(authoritative),
+      trackSeqGaps: _isGroupConversation(
+        storageKey,
+        messages: authoritative,
+      ),
+    );
+    return _messageReconciliationWriter.beginInitialHistory(
+      conversationID: storageKey,
+      requestedSource: requestedSource,
+      networkState: networkState,
+    );
+  }
+
+  bool hasActiveHistoryReconciliation(String conversationID) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final key = storageKey.isEmpty ? conversationID.trim() : storageKey;
+    return key.isNotEmpty && _messageReconciliationWriter.hasActiveRequest(key);
+  }
+
+  MessageReconciliationState messageReconciliationStateFor(
+    String conversationID,
+  ) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    return _messageReconciliationWriter.coordinator.stateFor(
+      storageKey.isEmpty ? conversationID : storageKey,
+    );
+  }
+
+  MessageHistoryCommitMetadata? messageHistoryCommitMetadataFor(
+    String conversationID,
+  ) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    return _lastHistoryCommitMetadataByConv[
+        storageKey.isEmpty ? conversationID.trim() : storageKey];
+  }
+
+  MessageCommitResult? completeHistoryReconciliation({
+    required MessageReconciliationRequest request,
+    required Iterable<V2TimMessage> history,
+    required MessageReconciliationSource actualSource,
+    required MessageReconciliationNetworkState networkState,
+    bool applyMemoryWindow = true,
+    bool memoryWindowPreferLatest = false,
+    String historyCommitSource = 'reconciliation',
+    bool cloudHasMoreNewer = false,
+    MessageHistoryBatchKind batchKind = MessageHistoryBatchKind.olderPage,
+    bool? historyIsFinished,
+    int clearEpoch = 0,
+    MessageHistoryCursor? requestedCursor,
+    MessageHistoryBounds? returnedBounds,
+    MessageHistoryProofKind? proofKind,
+    bool? cloudResponseProven,
+    Iterable<String> explicitDeletes = const <String>[],
+    Iterable<String> tombstones = const <String>[],
+  }) {
+    // Include direct row-local/self-send commits made while the request was in
+    // flight. Inbound callbacks are already held in pendingRealtime.
+    final historyList = history.toList(growable: false);
+    final current = _mergedAliasMessageList(request.conversationKey);
+    final authoritativeBase =
+        batchKind == MessageHistoryBatchKind.latestWindow &&
+                actualSource == MessageReconciliationSource.cloud
+            ? _authoritativeBaseForCloudLatestWindow(
+                conversationID: request.conversationKey,
+                current: current,
+                cloudWindow: historyList,
+              )
+            : current;
+    final resolvedProofKind = proofKind ??
+        (cloudResponseProven != null
+            ? (cloudResponseProven
+                ? MessageHistoryProofKind.transportObserved
+                : MessageHistoryProofKind.none)
+            : actualSource == MessageReconciliationSource.cloud &&
+                    networkState == MessageReconciliationNetworkState.online
+                ? MessageHistoryProofKind.transportObserved
+                : MessageHistoryProofKind.none);
+    final commit = _messageReconciliationWriter.completeHistory(
+      request: request,
+      history: _reconciliationRecords(historyList),
+      authoritativeBase: _reconciliationRecords(authoritativeBase),
+      actualSource: actualSource,
+      networkState: networkState,
+      cloudHasMoreNewer: cloudHasMoreNewer,
+      batchKind: batchKind,
+      proofKind: resolvedProofKind,
+      historyIsFinished: historyIsFinished,
+      explicitDeletes: explicitDeletes,
+      tombstones: tombstones,
+    );
+    if (commit == null) {
+      return null;
+    }
+    final result = setMessageList(
+      commit.conversationKey,
+      commit.records.map((record) => record.value).toList(growable: false),
+      needResetNewMessageCount: false,
+      replace: true,
+      applyMemoryWindow: applyMemoryWindow,
+      memoryWindowPreferLatest: memoryWindowPreferLatest,
+      skipEquivalentHistoryWindow: true,
+      historyCommitSource: '$historyCommitSource:r${commit.revision}',
+    );
+    final resolvedMetadataKey =
+        _resolveMessageListStorageKey(commit.conversationKey);
+    final metadataKey = resolvedMetadataKey.isEmpty
+        ? commit.conversationKey.trim()
+        : resolvedMetadataKey;
+    _lastHistoryCommitMetadataByConv[metadataKey] =
+        MessageHistoryCommitMetadata(
+      conversationKey: metadataKey,
+      source: actualSource,
+      batchKind: batchKind,
+      generation: request.generation,
+      revision: commit.revision,
+      resultCount: result.rawCount,
+      proofKind: resolvedProofKind,
+      clearEpoch: clearEpoch,
+    );
+    _recordMessageHistoryCoverageAfterCommit(
+      request: request,
+      batchKind: batchKind,
+      actualSource: actualSource,
+      networkState: networkState,
+      history: historyList,
+      historyIsFinished: historyIsFinished,
+      cloudHasMoreNewer: cloudHasMoreNewer,
+      clearEpoch: clearEpoch,
+      requestedCursor: requestedCursor,
+      returnedBounds: returnedBounds,
+      proofKind: resolvedProofKind,
+    );
+    return result;
+  }
+
+  /// Commits a typed history envelope after validating its request generation
+  /// and clear epoch. Transport provenance and continuity proof remain
+  /// separate; an online response is not promoted to complete history.
+  MessageCommitResult? completeHistoryBatch({
+    required MessageReconciliationRequest request,
+    required MessageHistoryBatch<V2TimMessage> batch,
+    required MessageReconciliationNetworkState networkState,
+    required int clearEpoch,
+    bool applyMemoryWindow = true,
+    bool memoryWindowPreferLatest = false,
+    String historyCommitSource = 'reconciliation_batch',
+  }) {
+    final batchKey = batch.conversationKey.trim();
+    final requestKey = request.conversationKey.trim();
+    final sameConversation =
+        isSameConversationIdForHistory(batchKey, requestKey);
+    final stale = batch.isStale(
+      generation: request.generation,
+      clearEpoch: clearEpoch,
+    );
+    if (!sameConversation || stale) {
+      ChatHistoryTrace.log(
+        'history_batch_rejected',
+        conversationID: requestKey,
+        extras: <String, Object?>{
+          'reason': !sameConversation ? 'conversation_mismatch' : 'stale',
+          'batchKind': batch.batchKind.name,
+          'requestGeneration': request.generation,
+          'batchGeneration': batch.generation,
+          'clearEpoch': clearEpoch,
+          'batchClearEpoch': batch.clearEpoch,
+        },
+      );
+      return null;
+    }
+    if (batchKey != requestKey) {
+      ChatHistoryTrace.log(
+        'history_batch_alias_accepted',
+        conversationID: requestKey,
+        extras: <String, Object?>{
+          'batchKind': batch.batchKind.name,
+          'requestGeneration': request.generation,
+        },
+      );
+    }
+    return completeHistoryReconciliation(
+      request: request,
+      history: batch.messages,
+      actualSource: batch.actualSource,
+      networkState: networkState,
+      applyMemoryWindow: applyMemoryWindow,
+      memoryWindowPreferLatest: memoryWindowPreferLatest,
+      historyCommitSource: historyCommitSource,
+      cloudHasMoreNewer: batch.cloudHasMoreNewer,
+      batchKind: batch.batchKind,
+      historyIsFinished: batch.isFinished,
+      clearEpoch: clearEpoch,
+      requestedCursor: batch.requestedCursor,
+      returnedBounds: batch.returnedBounds,
+      proofKind: batch.proofKind,
+      explicitDeletes: batch.explicitDeletes,
+      tombstones: batch.tombstones,
+    );
+  }
+
+  List<V2TimMessage> _authoritativeBaseForCloudLatestWindow({
+    required String conversationID,
+    required List<V2TimMessage> current,
+    required List<V2TimMessage> cloudWindow,
+  }) {
+    // A latest-window response proves only the bounded window it returned.
+    // Absence from that page is not a delete/revoke proof, especially when the
+    // SDK cloud request can fall back to local data. Keep every existing row;
+    // explicit tombstones/revoke callbacks are the only removal authority.
+    return current;
+  }
+
+  bool _groupWindowsOverlapOrTouch(
+    List<V2TimMessage> first,
+    List<V2TimMessage> second,
+  ) {
+    int? firstMin;
+    int? firstMax;
+    int? secondMin;
+    int? secondMax;
+    for (final message in first) {
+      final seq = int.tryParse(message.seq?.trim() ?? '');
+      if (seq == null || seq <= 0) continue;
+      firstMin = firstMin == null || seq < firstMin ? seq : firstMin;
+      firstMax = firstMax == null || seq > firstMax ? seq : firstMax;
+    }
+    for (final message in second) {
+      final seq = int.tryParse(message.seq?.trim() ?? '');
+      if (seq == null || seq <= 0) continue;
+      secondMin = secondMin == null || seq < secondMin ? seq : secondMin;
+      secondMax = secondMax == null || seq > secondMax ? seq : secondMax;
+    }
+    if (firstMin == null ||
+        firstMax == null ||
+        secondMin == null ||
+        secondMax == null) {
+      return false;
+    }
+    return firstMin <= secondMax + 1 && secondMin <= firstMax + 1;
+  }
+
+  void _recordMessageHistoryCoverageAfterCommit({
+    required MessageReconciliationRequest request,
+    required MessageHistoryBatchKind batchKind,
+    required MessageReconciliationSource actualSource,
+    required MessageReconciliationNetworkState networkState,
+    required List<V2TimMessage> history,
+    required bool? historyIsFinished,
+    required bool cloudHasMoreNewer,
+    required int clearEpoch,
+    MessageHistoryCursor? requestedCursor,
+    MessageHistoryBounds? returnedBounds,
+    required MessageHistoryProofKind proofKind,
+  }) {
+    final storageKey = _resolveMessageListStorageKey(request.conversationKey);
+    final key = storageKey.isEmpty ? request.conversationKey : storageKey;
+    final coverageSessionGeneration = _messageHistoryCoverageSessionGeneration;
+    final reconciliationState =
+        _messageReconciliationWriter.coordinator.stateFor(key);
+    final missingSeqRanges = List<MessageSeqRange>.unmodifiable(
+      reconciliationState.missingSeqRanges,
+    );
+    final historySnapshot = List<V2TimMessage>.unmodifiable(history);
+
+    void applyLoadedCoverage() {
+      if (coverageSessionGeneration !=
+          _messageHistoryCoverageSessionGeneration) {
+        return;
+      }
+      final current = _messageHistoryCoverageByConv[key];
+      if (current == null || current.clearEpoch != clearEpoch) return;
+      final previousGeneration =
+          _messageHistoryCoverageRequestGenerationByConv[key] ?? 0;
+      if (request.generation <= previousGeneration) return;
+      _messageHistoryCoverageRequestGenerationByConv[key] = request.generation;
+      _applyMessageHistoryCoverageCommit(
+        current: current,
+        request: request,
+        batchKind: batchKind,
+        actualSource: actualSource,
+        networkState: networkState,
+        history: historySnapshot,
+        historyIsFinished: historyIsFinished,
+        cloudHasMoreNewer: cloudHasMoreNewer,
+        missingSeqRanges: missingSeqRanges,
+        requestedCursor: requestedCursor,
+        returnedBounds: returnedBounds,
+        proofKind: proofKind,
+      );
+    }
+
+    if (_messageHistoryCoverageLoadedConvs.contains(key) &&
+        !_messageHistoryCoverageUpdateTailByConv.containsKey(key)) {
+      applyLoadedCoverage();
+      return;
+    }
+
+    unawaited(
+      _enqueueMessageHistoryCoverageUpdate(key, () async {
+        await ensureMessageHistoryCoverageLoaded(key, clearEpoch: clearEpoch);
+        applyLoadedCoverage();
+      }),
+    );
+  }
+
+  Future<void> _enqueueMessageHistoryCoverageUpdate(
+    String conversationID,
+    Future<void> Function() update,
+  ) {
+    final previous = _messageHistoryCoverageUpdateTailByConv[conversationID];
+    late final Future<void> task;
+    task = () async {
+      if (previous != null) {
+        try {
+          await previous;
+        } catch (_) {}
+      }
+      await update();
+    }()
+        .whenComplete(() {
+      if (identical(
+        _messageHistoryCoverageUpdateTailByConv[conversationID],
+        task,
+      )) {
+        _messageHistoryCoverageUpdateTailByConv.remove(conversationID);
+      }
+    });
+    _messageHistoryCoverageUpdateTailByConv[conversationID] = task;
+    return task;
+  }
+
+  void _applyMessageHistoryCoverageCommit({
+    required MessageHistoryCoverage current,
+    required MessageReconciliationRequest request,
+    required MessageHistoryBatchKind batchKind,
+    required MessageReconciliationSource actualSource,
+    required MessageReconciliationNetworkState networkState,
+    required List<V2TimMessage> history,
+    required bool? historyIsFinished,
+    required bool cloudHasMoreNewer,
+    required List<MessageSeqRange> missingSeqRanges,
+    MessageHistoryCursor? requestedCursor,
+    MessageHistoryBounds? returnedBounds,
+    required MessageHistoryProofKind proofKind,
+  }) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final isGroup = current.isGroup ||
+        _isGroupConversation(request.conversationKey, messages: history);
+    final oldest = _oldestServerHistoryMessage(history);
+    final newest = _newestServerHistoryMessage(history);
+    final cloudTransportConfirmed =
+        actualSource == MessageReconciliationSource.cloud &&
+            proofKind != MessageHistoryProofKind.none;
+    final serverContinuityProven =
+        proofKind == MessageHistoryProofKind.serverContinuity;
+    final holes = _coverageHolesForCommit(
+      current: current,
+      isGroup: isGroup,
+      batchKind: batchKind,
+      generation: request.generation,
+      history: history,
+      missingSeqRanges: missingSeqRanges,
+      cloudProven: cloudTransportConfirmed,
+      nowMs: now,
+    );
+    final nextNewerHasMore =
+        batchKind == MessageHistoryBatchKind.latestWindow ||
+                batchKind == MessageHistoryBatchKind.newerCatchUp
+            ? cloudHasMoreNewer
+            : current.newerHasMore;
+    // An online transport response only proves that this bounded request
+    // reached the server. It does not prove the conversation is continuous;
+    // only an explicit server-continuity token may produce `verified`.
+    final status = batchKind == MessageHistoryBatchKind.localSnapshot
+        ? MessageHistoryCoverageStatus.provisional
+        : !cloudTransportConfirmed
+            ? MessageHistoryCoverageStatus.offlineLocalOnly
+            : holes.isNotEmpty ||
+                    nextNewerHasMore ||
+                    historyIsFinished != true ||
+                    !serverContinuityProven
+                ? MessageHistoryCoverageStatus.partial
+                : MessageHistoryCoverageStatus.verified;
+    var next = current.copyWith(
+      isGroup: isGroup,
+      coverageRevision: current.coverageRevision + 1,
+      status: status,
+      holes: holes,
+      newerHasMore: nextNewerHasMore,
+      updatedAtMs: now,
+      lastRequestGeneration: request.generation,
+      lastRequestedSource: request.requestedSource.name,
+      lastActualSource: actualSource.name,
+      lastBatchKind: batchKind.name,
+      lastCursorDirection: requestedCursor?.direction.name,
+      lastCursorMsgID: requestedCursor?.lastMsgID,
+      lastCursorSeq: requestedCursor?.lastMsgSeq,
+      clearLastCursor: requestedCursor == null,
+      lastReturnedOldestMsgID: returnedBounds?.oldestMsgID,
+      lastReturnedNewestMsgID: returnedBounds?.newestMsgID,
+      lastReturnedOldestSeq: returnedBounds?.oldestSeq,
+      lastReturnedNewestSeq: returnedBounds?.newestSeq,
+      clearLastReturnedBounds: returnedBounds == null,
+      lastProofKind: proofKind,
+      lastCloudResponseProven: cloudTransportConfirmed,
+    );
+    final direction = _coverageDirectionForBatch(batchKind);
+    final boundedRange = _coverageRangeForCommit(
+      direction: direction,
+      isGroup: isGroup,
+      returnedBounds: returnedBounds,
+      history: history,
+      proofKind: proofKind,
+      closed: serverContinuityProven &&
+          historyIsFinished == true &&
+          !cloudHasMoreNewer &&
+          holes.isEmpty,
+      generation: request.generation,
+      nowMs: now,
+    );
+    final page = MessageHistoryPageRecord(
+      key:
+          'p:${request.generation}:${direction.name}:${requestedCursor?.lastMsgID ?? ''}:${requestedCursor?.lastMsgSeq ?? ''}',
+      direction: direction,
+      cursorMsgID: requestedCursor?.lastMsgID,
+      cursorSeq: requestedCursor?.lastMsgSeq,
+      returnedOldestMsgID: returnedBounds?.oldestMsgID,
+      returnedNewestMsgID: returnedBounds?.newestMsgID,
+      returnedOldestSeq: returnedBounds?.oldestSeq,
+      returnedNewestSeq: returnedBounds?.newestSeq,
+      isFinished: historyIsFinished == true,
+      hasMore: cloudHasMoreNewer || historyIsFinished != true,
+      proofKind: proofKind,
+      generation: request.generation,
+      updatedAtMs: now,
+    );
+    final continuationPending = !serverContinuityProven ||
+        cloudHasMoreNewer ||
+        historyIsFinished != true ||
+        holes.isNotEmpty;
+    // Persist the cursor that can actually continue this page chain. A
+    // requested cursor is the previous anchor; resuming must use the returned
+    // boundary (oldest for older pages, newest for newer/latest windows).
+    final continuationDirection = continuationPending
+        ? cloudHasMoreNewer
+            ? MessageHistoryCoverageDirection.newer
+            : historyIsFinished == false
+                ? MessageHistoryCoverageDirection.older
+                : direction
+        : null;
+    final continuationCursorMsgID =
+        continuationDirection == MessageHistoryCoverageDirection.older
+            ? (returnedBounds?.oldestMsgID ?? oldest?.msgID)
+            : (returnedBounds?.newestMsgID ?? newest?.msgID);
+    final continuationCursorSeq =
+        continuationDirection == MessageHistoryCoverageDirection.older
+            ? (returnedBounds?.oldestSeq ?? _messageNumericSeq(oldest))
+            : (returnedBounds?.newestSeq ?? _messageNumericSeq(newest));
+    next = next.copyWith(
+      ranges: _appendCoverageRange(current.ranges, boundedRange),
+      pages: _appendCoveragePage(current.pages, page),
+      continuationPending: continuationPending,
+      continuationDirection: continuationDirection,
+      clearContinuationDirection: !continuationPending,
+      continuationCursorMsgID:
+          continuationPending ? continuationCursorMsgID : null,
+      continuationCursorSeq: continuationPending ? continuationCursorSeq : null,
+      clearContinuationCursor: !continuationPending,
+    );
+    if (batchKind == MessageHistoryBatchKind.localSnapshot) {
+      next = next.copyWith(
+        localOldestMsgID: oldest?.msgID,
+        localNewestMsgID: newest?.msgID,
+      );
+    } else if (cloudTransportConfirmed) {
+      final updatesOldest = batchKind == MessageHistoryBatchKind.latestWindow ||
+          batchKind == MessageHistoryBatchKind.olderPage;
+      final updatesNewest = batchKind == MessageHistoryBatchKind.latestWindow ||
+          batchKind == MessageHistoryBatchKind.newerCatchUp;
+      next = next.copyWith(
+        verifiedOldestMsgID:
+            updatesOldest ? oldest?.msgID : current.verifiedOldestMsgID,
+        verifiedNewestMsgID:
+            updatesNewest ? newest?.msgID : current.verifiedNewestMsgID,
+        verifiedOldestSeq: updatesOldest
+            ? _messageNumericSeq(oldest)
+            : current.verifiedOldestSeq,
+        verifiedNewestSeq: updatesNewest
+            ? _messageNumericSeq(newest)
+            : current.verifiedNewestSeq,
+        olderExhausted: batchKind == MessageHistoryBatchKind.olderPage ||
+                batchKind == MessageHistoryBatchKind.latestWindow
+            ? historyIsFinished == true
+            : current.olderExhausted,
+        cloudVerifiedAtMs: now,
+      );
+    }
+    _storeMessageHistoryCoverage(next);
+  }
+
+  MessageHistoryCoverageDirection _coverageDirectionForBatch(
+    MessageHistoryBatchKind batchKind,
+  ) {
+    switch (batchKind) {
+      case MessageHistoryBatchKind.olderPage:
+      case MessageHistoryBatchKind.gapFill:
+        return MessageHistoryCoverageDirection.older;
+      case MessageHistoryBatchKind.newerCatchUp:
+        return MessageHistoryCoverageDirection.newer;
+      case MessageHistoryBatchKind.localSnapshot:
+      case MessageHistoryBatchKind.latestWindow:
+        return MessageHistoryCoverageDirection.latest;
+    }
+  }
+
+  MessageHistoryCoverageRange? _coverageRangeForCommit({
+    required MessageHistoryCoverageDirection direction,
+    required bool isGroup,
+    required MessageHistoryBounds? returnedBounds,
+    required List<V2TimMessage> history,
+    required MessageHistoryProofKind proofKind,
+    required bool closed,
+    required int generation,
+    required int nowMs,
+  }) {
+    final oldest = returnedBounds?.oldestMsgID ??
+        _oldestServerHistoryMessage(history)?.msgID;
+    final newest = returnedBounds?.newestMsgID ??
+        _newestServerHistoryMessage(history)?.msgID;
+    final oldestSeq = returnedBounds?.oldestSeq ??
+        _messageNumericSeq(_oldestServerHistoryMessage(history));
+    final newestSeq = returnedBounds?.newestSeq ??
+        _messageNumericSeq(_newestServerHistoryMessage(history));
+    if (isGroup && oldestSeq != null && newestSeq != null) {
+      return MessageHistoryCoverageRange(
+        key: 'seq:${direction.name}:$oldestSeq-$newestSeq',
+        direction: direction,
+        oldestMsgID: oldest,
+        newestMsgID: newest,
+        startSeq: oldestSeq,
+        endSeq: newestSeq,
+        proofKind: proofKind,
+        closed: closed,
+        generation: generation,
+        updatedAtMs: nowMs,
+      );
+    }
+    if (oldest == null && newest == null) return null;
+    return MessageHistoryCoverageRange(
+      key: 'page:${direction.name}:${oldest ?? ''}:$newest',
+      direction: direction,
+      oldestMsgID: oldest,
+      newestMsgID: newest,
+      proofKind: proofKind,
+      closed: closed,
+      generation: generation,
+      updatedAtMs: nowMs,
+    );
+  }
+
+  List<MessageHistoryCoverageRange> _appendCoverageRange(
+    List<MessageHistoryCoverageRange> existing,
+    MessageHistoryCoverageRange? incoming,
+  ) {
+    if (incoming == null) return existing;
+    final next = <MessageHistoryCoverageRange>[
+      ...existing.where((range) => range.key != incoming.key),
+      incoming,
+    ];
+    next.sort((a, b) => a.updatedAtMs.compareTo(b.updatedAtMs));
+    return List<MessageHistoryCoverageRange>.unmodifiable(
+      next.length <= 64 ? next : next.sublist(next.length - 64),
+    );
+  }
+
+  List<MessageHistoryPageRecord> _appendCoveragePage(
+    List<MessageHistoryPageRecord> existing,
+    MessageHistoryPageRecord incoming,
+  ) {
+    final next = <MessageHistoryPageRecord>[
+      ...existing.where((page) => page.key != incoming.key),
+      incoming,
+    ];
+    next.sort((a, b) => a.updatedAtMs.compareTo(b.updatedAtMs));
+    return List<MessageHistoryPageRecord>.unmodifiable(
+      next.length <= 64 ? next : next.sublist(next.length - 64),
+    );
+  }
+
+  List<MessageHistoryHole> _coverageHolesForCommit({
+    required MessageHistoryCoverage current,
+    required bool isGroup,
+    required MessageHistoryBatchKind batchKind,
+    required int generation,
+    required List<V2TimMessage> history,
+    required List<MessageSeqRange> missingSeqRanges,
+    required bool cloudProven,
+    required int nowMs,
+  }) {
+    if (isGroup) {
+      if (batchKind == MessageHistoryBatchKind.gapFill &&
+          missingSeqRanges.isEmpty) {
+        // The merged authoritative window is now Seq-contiguous. Retain
+        // unrelated hole kinds, but retire the group Seq holes that this
+        // gap-fill request was responsible for repairing.
+        return current.holes
+            .where((hole) => hole.kind != MessageHistoryHoleKind.groupSeq)
+            .toList(growable: false);
+      }
+      if (missingSeqRanges.isEmpty &&
+          batchKind != MessageHistoryBatchKind.gapFill) {
+        // A bounded newer/older page can be disjoint from a previously
+        // recorded hole. Do not erase that durable gap merely because this
+        // writer generation did not carry both Seq anchors.
+        return current.holes
+            .where((hole) => hole.kind == MessageHistoryHoleKind.groupSeq)
+            .toList(growable: false);
+      }
+      final status = batchKind == MessageHistoryBatchKind.gapFill
+          ? cloudProven
+              ? MessageHistoryHoleStatus.retryable
+              : MessageHistoryHoleStatus.cloudUnavailable
+          : MessageHistoryHoleStatus.open;
+      return missingSeqRanges
+          .map(
+            (range) => MessageHistoryHole(
+              key: 'seq:${range.start}-${range.end}',
+              kind: MessageHistoryHoleKind.groupSeq,
+              status: status,
+              startSeq: range.start,
+              endSeq: range.end,
+              generation: generation,
+              updatedAtMs: nowMs,
+            ),
+          )
+          .toList(growable: false);
+    }
+    final nonBoundaryHoles = current.holes
+        .where((hole) => hole.kind != MessageHistoryHoleKind.c2cBoundary)
+        .toList(growable: true);
+    if (batchKind == MessageHistoryBatchKind.localSnapshot) {
+      return nonBoundaryHoles;
+    }
+    final historyIDs = <String>{
+      for (final message in history)
+        if ((message.msgID?.trim() ?? '').isNotEmpty) message.msgID!.trim(),
+    };
+    final overlaps = historyIDs.contains(current.localOldestMsgID) ||
+        historyIDs.contains(current.localNewestMsgID);
+    if (overlaps) {
+      return nonBoundaryHoles;
+    }
+    final existingBoundaryStatus = !cloudProven
+        ? MessageHistoryHoleStatus.cloudUnavailable
+        : batchKind == MessageHistoryBatchKind.latestWindow
+            ? MessageHistoryHoleStatus.open
+            : MessageHistoryHoleStatus.retryable;
+    final existingBoundaryHoles = current.holes
+        .where((hole) => hole.kind == MessageHistoryHoleKind.c2cBoundary)
+        .where(
+          (hole) => !historyIDs.contains(hole.olderMsgID),
+        )
+        .map(
+          (hole) => MessageHistoryHole(
+            key: hole.key,
+            kind: hole.kind,
+            status: existingBoundaryStatus,
+            startSeq: hole.startSeq,
+            endSeq: hole.endSeq,
+            olderMsgID: hole.olderMsgID,
+            newerMsgID: hole.newerMsgID,
+            generation: generation,
+            updatedAtMs: nowMs,
+          ),
+        )
+        .toList(growable: false);
+    if (batchKind != MessageHistoryBatchKind.latestWindow ||
+        current.status != MessageHistoryCoverageStatus.provisional ||
+        history.isEmpty ||
+        current.localNewestMsgID == null) {
+      return <MessageHistoryHole>[
+        ...nonBoundaryHoles,
+        ...existingBoundaryHoles,
+      ];
+    }
+    final oldest = _oldestServerHistoryMessage(history);
+    return <MessageHistoryHole>[
+      ...nonBoundaryHoles,
+      MessageHistoryHole(
+        key: 'c2c:${current.localNewestMsgID}:${oldest?.msgID ?? ''}',
+        kind: MessageHistoryHoleKind.c2cBoundary,
+        status: cloudProven
+            ? MessageHistoryHoleStatus.open
+            : MessageHistoryHoleStatus.cloudUnavailable,
+        olderMsgID: current.localNewestMsgID,
+        newerMsgID: oldest?.msgID,
+        generation: generation,
+        updatedAtMs: nowMs,
+      ),
+    ];
+  }
+
+  V2TimMessage? _oldestServerHistoryMessage(List<V2TimMessage> messages) {
+    V2TimMessage? result;
+    for (final message in messages) {
+      if ((message.msgID?.trim() ?? '').isEmpty) continue;
+      if (result == null || compareMessagesChronological(message, result) < 0) {
+        result = message;
+      }
+    }
+    return result;
+  }
+
+  V2TimMessage? _newestServerHistoryMessage(List<V2TimMessage> messages) {
+    V2TimMessage? result;
+    for (final message in messages) {
+      if ((message.msgID?.trim() ?? '').isEmpty) continue;
+      if (result == null || compareMessagesChronological(message, result) > 0) {
+        result = message;
+      }
+    }
+    return result;
+  }
+
+  int? _messageNumericSeq(V2TimMessage? message) {
+    final seq = int.tryParse(message?.seq?.trim() ?? '');
+    return seq == null || seq <= 0 ? null : seq;
+  }
+
+  MessageCommitResult? failHistoryReconciliation({
+    required MessageReconciliationRequest request,
+    required String reason,
+  }) {
+    final commit = _messageReconciliationWriter.failHistory(
+      request: request,
+      reason: reason,
+      networkState: messageReconciliationNetworkState,
+    );
+    if (commit == null) {
+      return null;
+    }
+    return setMessageList(
+      commit.conversationKey,
+      commit.records.map((record) => record.value).toList(growable: false),
+      needResetNewMessageCount: false,
+      replace: true,
+      applyMemoryWindow: false,
+      historyCommitSource: 'reconciliation_fail:r${commit.revision}',
+    );
+  }
+
+  final Map<String, int> _messageCommitGenerationByConv = {};
+  final Map<String, int> _messageCommitTokenByConv = {};
+  int _nextMessageCommitToken = 0;
 
   /// 内存窗口裁掉了较新端：下翻/回底需能再 loadLatest。
   final Map<String, bool> _memoryWindowMissingNewerByConv = {};
+  final Map<String, Map<String, String>> _rowLocalAliasByConversation = {};
+  final Map<String, bool> _memoryWindowMissingOlderByConv = {};
+  final Map<String, int> _memoryWindowBoundaryTimestampByConv = {};
+  final Map<String, String> _memoryWindowBoundarySeqByConv = {};
 
   /// 搜索/引用定位拉历史期间抑制窗口，避免目标被 trim 掉。
   final Set<String> _memoryWindowSuppressedConvs = {};
@@ -190,7 +1264,25 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
   final Map<String, List<V2TimMessage>> _localMergerMessageCache = {};
   final Set<String> _initialHistoryLoadedConvs = {};
   final Map<String, bool> _mayHaveOlderHistoryByConv = {};
+  final Map<String, MessageHistoryCoverage> _messageHistoryCoverageByConv =
+      <String, MessageHistoryCoverage>{};
+  final Set<String> _messageHistoryCoverageLoadedConvs = <String>{};
+  final Map<String, Future<MessageHistoryCoverage?>>
+      _messageHistoryCoverageLoadInFlight =
+      <String, Future<MessageHistoryCoverage?>>{};
+  final Map<String, Future<void>> _messageHistoryCoverageUpdateTailByConv =
+      <String, Future<void>>{};
+  final Map<String, int> _messageHistoryCoverageRequestGenerationByConv =
+      <String, int>{};
+  int _messageHistoryCoverageSessionGeneration = 0;
+
+  bool _isMessageLifecycleCurrent(int generation) {
+    return generation == _messageHistoryCoverageSessionGeneration;
+  }
+
   final Map<String, Future<void>> _openHydrateInFlightByConv = {};
+  final Map<String, OpenHydrateResult> _openHydrateResultByConv =
+      <String, OpenHydrateResult>{};
   final Map<String, V2TimMessageReceipt> _messageReadReceiptMap = {};
   final Map<String, int> _c2cPeerReadTimestampMap = {};
   final Map<String, int> _messageListProgressMap = {};
@@ -309,6 +1401,25 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
   final List<int> _inboundFloodArrivalMs = <int>[];
   late final MessageInboundBatchCoalescer _inboundBatchCoalescer;
   late final MessageInboundChunkedReveal _inboundChunkReveal;
+  final Map<String, InboundReorderBuffer> _reorderBuffersByConv =
+      <String, InboundReorderBuffer>{};
+  final Set<String> _gapCatchUpInFlight = <String>{};
+  final Map<String, int> _groupGapAutoAttemptAtMs = <String, int>{};
+  static const int _groupGapAutoCooldownMs = 5000;
+  final BoundedMessageCloudCatchUp _boundedCloudCatchUp =
+      BoundedMessageCloudCatchUp();
+  final Map<String, int> _cloudContinuationRoundsByConv = <String, int>{};
+  final Map<String, Timer> _cloudContinuationTimersByConv = <String, Timer>{};
+
+  /// C2C has no conversation-wide seq cursor. Keep the last stalled anchor so
+  /// an automatic continuation cannot replay the same CLOUD_NEWER request.
+  final Map<String, String> _cloudCatchUpStalledAnchorByConv =
+      <String, String>{};
+  static const String _cloudCatchUpStalledBatchKind = 'cloud_catch_up_stalled';
+  static const String _cloudCatchUpUnblockedBatchKind =
+      'cloud_catch_up_unblocked';
+  static const int _maxAutomaticCloudContinuationRounds = 2;
+  static const Duration _cloudContinuationDelay = Duration(milliseconds: 600);
   final Map<String, int> _bulkMessageSyncDepthByConv = <String, int>{};
   final Map<String, bool> _pendingPinAfterBulkByConv = <String, bool>{};
   int _inboundScrollFollowSeq = 0;
@@ -623,6 +1734,12 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         page.value != position) {
       page.value = position;
     }
+    if (position == HistoryMessagePosition.bottom) {
+      final state = _messageReconciliationWriter.coordinator.stateFor(convId);
+      if (state.cloudHasMoreNewer) {
+        _scheduleCloudContinuation(convId);
+      }
+    }
   }
 
   bool get shouldAnimateInboundPresentation =>
@@ -652,6 +1769,14 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
           DateTime.now().millisecondsSinceEpoch + 5000;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         reconcileActiveChatAfterForegroundResume();
+        if (convId.isNotEmpty) {
+          unawaited(
+            reconcileConversationCloud(
+              convId,
+              reason: 'app_foreground',
+            ),
+          );
+        }
       });
     }
 
@@ -732,6 +1857,18 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         _inboundChunkReveal.isActiveFor(currentSelectedConv);
   }
 
+  /// Cancels presentation-only inbound work before an authoritative history
+  /// replacement reveals the complete projection.
+  void cancelInboundProjectionRevealForAuthoritativeReplace(
+    String conversationID,
+  ) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    _inboundChunkReveal.cancelForAuthoritativeReplace(conversationID);
+    if (storageKey.isNotEmpty && storageKey != conversationID.trim()) {
+      _inboundChunkReveal.cancelForAuthoritativeReplace(storageKey);
+    }
+  }
+
   /// Acknowledges that the message list finished laying out and animating the
   /// currently revealed projection group. The next group is not exposed until
   /// this acknowledgement, so burst traffic can never stack row controllers.
@@ -774,6 +1911,38 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
 
   int messageProjectionRevisionFor(String conversationID) =>
       _messageProjectionRevisionByConv[_inboundStateKey(conversationID)] ?? 0;
+
+  /// Privacy-safe counts for diagnosing authority -> projection -> render
+  /// discontinuities. Message content is intentionally excluded.
+  Map<String, Object?> historyProjectionDiagnostics(String conversationID) {
+    final convKey = _inboundStateKey(conversationID);
+    final authoritative = _collectAuthoritativeMessages(conversationID);
+    final hidden = _inboundHiddenKeysByConv[convKey] ?? const <String>{};
+    final unreadState = _inboundUnreadStateFor(convKey, create: false);
+    final display = _messageListDisplayCache[conversationID];
+    return <String, Object?>{
+      'authorityCount': authoritative.length,
+      'hiddenCount': hidden.length,
+      'projectedCount': authoritative
+          .where((message) => !hidden.contains(messageDedupKey(message)))
+          .length,
+      'displayCount':
+          display?.where((message) => message.elemType != 11).length,
+      'displayDividerCount':
+          display?.where((message) => message.elemType == 11).length,
+      'displayCacheHit': display != null,
+      'bufferedCount': unreadState.bufferedMessages.length,
+      'tongueUnread': unreadState.unreadCount,
+      'lockedEntryUnread': unreadState.lockedEntryUnreadCount,
+      'pendingReveal': pendingInboundProjectionCount(convKey),
+      'revealWaiting': isInboundProjectionRevealWaiting(convKey),
+      'listRevision': messageListRevisionFor(conversationID),
+      'projectionRevision': messageProjectionRevisionFor(convKey),
+      'position': getMessageListPosition(conversationID).name,
+      'deferredUntilBottom':
+          _deferredUntilUserBottomConversations.contains(convKey),
+    };
+  }
 
   String _authoritativeDeferredKey(
     String conversationID,
@@ -1077,29 +2246,198 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (key.isEmpty) {
       return null;
     }
-    final list = _messageListMap[conversationID];
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final list = _messageListMap[storageKey];
     if (list == null || list.isEmpty) {
       return null;
     }
+    final resolvedKey = _rowLocalAliasByConversation[storageKey]?[key] ?? key;
     for (final item in list) {
-      if (item.msgID == key || item.id == key) {
+      if (item.msgID == resolvedKey || item.id == resolvedKey) {
         return item;
       }
       final seq = item.seq?.trim();
-      if (seq != null && seq.isNotEmpty && 'seq_$seq' == key) {
+      if (seq != null && seq.isNotEmpty && 'seq_$seq' == resolvedKey) {
         return item;
       }
-      if (ChatUiStateStore.messageKeyOf(item) == key) {
+      if (ChatUiStateStore.messageKeyOf(item) == resolvedKey) {
         return item;
       }
     }
     return null;
   }
 
+  bool _messageMatchesRowIdentity(
+    V2TimMessage message,
+    Set<String> identities,
+  ) {
+    if (identities.isEmpty) {
+      return false;
+    }
+    final values = <String>{
+      ChatUiStateStore.messageKeyOf(message).trim(),
+      message.id?.trim() ?? '',
+      message.msgID?.trim() ?? '',
+      readOutgoingStableId(message)?.trim() ?? '',
+      if (message.elemType == MessageElemType.V2TIM_ELEM_TYPE_IMAGE)
+        message.imageElem?.path?.trim() ?? '',
+    }..remove('');
+    return values.any(identities.contains);
+  }
+
+  void _rememberRowLocalAliases(
+    String storageKey,
+    Iterable<String?> aliases,
+    String targetKey,
+  ) {
+    final target = targetKey.trim();
+    if (target.isEmpty) {
+      return;
+    }
+    final map = _rowLocalAliasByConversation.putIfAbsent(
+      storageKey,
+      () => <String, String>{},
+    );
+    final normalizedAliases = aliases
+        .map((value) => value?.trim() ?? '')
+        .where((value) => value.isNotEmpty)
+        .toSet();
+    final chainedSources = map.entries
+        .where((entry) => normalizedAliases.contains(entry.value))
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    for (final source in chainedSources) {
+      map[source] = target;
+    }
+    for (final value in normalizedAliases) {
+      if (value.isNotEmpty && value != target) {
+        map[value] = target;
+      }
+    }
+    while (map.length > 512) {
+      map.remove(map.keys.first);
+    }
+  }
+
+  /// Resolves exactly one row through the outgoing stable identity chain.
+  /// Missing/ambiguous identities, semantic changes and reordering are never
+  /// guessed: callers must keep their full-list fallback for those results.
+  RowLocalMessageReplacementResult replaceMessageRowByStableIdentity({
+    required String conversationID,
+    required String stableIdentity,
+    required V2TimMessage replacement,
+    Iterable<String?> aliases = const <String?>[],
+  }) {
+    final primary = stableIdentity.trim();
+    if (primary.isEmpty) {
+      return RowLocalMessageReplacementResult.notFound;
+    }
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final current = _messageListMap[storageKey];
+    if (current == null || current.isEmpty) {
+      return RowLocalMessageReplacementResult.notFound;
+    }
+    final identities = <String>{primary};
+    for (final alias in aliases) {
+      final value = alias?.trim() ?? '';
+      if (value.isNotEmpty) {
+        identities.add(value);
+      }
+    }
+    final matches = <int>[];
+    for (var index = 0; index < current.length; index++) {
+      if (_messageMatchesRowIdentity(current[index], identities)) {
+        matches.add(index);
+      }
+    }
+    if (matches.isEmpty) {
+      return RowLocalMessageReplacementResult.notFound;
+    }
+    if (matches.length != 1) {
+      return RowLocalMessageReplacementResult.ambiguous;
+    }
+    final index = matches.single;
+    final expected = current[index];
+    if (expected.elemType != replacement.elemType ||
+        expected.isSelf != replacement.isSelf) {
+      return RowLocalMessageReplacementResult.semanticChange;
+    }
+    final next = List<V2TimMessage>.from(current)..[index] = replacement;
+    if (!isNewestFirstStorageOrderValid(next)) {
+      return RowLocalMessageReplacementResult.reordered;
+    }
+    _messageListMap[storageKey] = next;
+    final replacementKey = ChatUiStateStore.messageKeyOf(replacement);
+    final allAliases = <String?>{
+      ChatUiStateStore.messageKeyOf(expected),
+      expected.id,
+      expected.msgID,
+      readOutgoingStableId(expected),
+      replacement.id,
+      replacement.msgID,
+      readOutgoingStableId(replacement),
+      ...aliases,
+    };
+    _rememberRowLocalAliases(storageKey, allAliases, replacementKey);
+    for (final alias in allAliases) {
+      final value = alias?.trim() ?? '';
+      if (value.isNotEmpty && value != replacementKey) {
+        _chatUiStateStore.bindMessageAlias(storageKey, value, replacementKey);
+      }
+    }
+    _markMessageRowChanged(storageKey, replacement);
+    return RowLocalMessageReplacementResult.replaced;
+  }
+
+  /// Replaces one authoritative row without invalidating the whole message
+  /// window. The caller must already have proved that membership and ordering
+  /// are unchanged; otherwise use [setMessageList].
+  RowLocalMessageReplacementResult replaceMessageRowLocal({
+    required String conversationID,
+    required int index,
+    required V2TimMessage expected,
+    required V2TimMessage replacement,
+    Iterable<String?> aliases = const <String?>[],
+  }) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final current = _messageListMap[storageKey];
+    if (current == null ||
+        index < 0 ||
+        index >= current.length ||
+        !identical(current[index], expected)) {
+      return RowLocalMessageReplacementResult.stale;
+    }
+    final next = List<V2TimMessage>.from(current);
+    next[index] = replacement;
+    if (!isNewestFirstStorageOrderValid(next)) {
+      return RowLocalMessageReplacementResult.reordered;
+    }
+    _messageListMap[storageKey] = next;
+    final replacementKey = ChatUiStateStore.messageKeyOf(replacement);
+    final keys = <String?>{
+      ChatUiStateStore.messageKeyOf(expected),
+      expected.id,
+      expected.msgID,
+      replacement.id,
+      replacement.msgID,
+      ...aliases,
+    };
+    _rememberRowLocalAliases(storageKey, keys, replacementKey);
+    for (final alias in keys) {
+      final value = alias?.trim() ?? '';
+      if (value.isNotEmpty && value != replacementKey) {
+        _chatUiStateStore.bindMessageAlias(storageKey, value, replacementKey);
+      }
+    }
+    _markMessageRowChanged(storageKey, replacement);
+    return RowLocalMessageReplacementResult.replaced;
+  }
+
   void _markMessageRowChanged(
     String conversationID,
     V2TimMessage message, {
     String? extraKey,
+    MessageMutationType mutationType = MessageMutationType.contentOrMedia,
   }) {
     final keys = <String>{
       ChatUiStateStore.messageKeyOf(message),
@@ -1120,6 +2458,16 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (key != null && key.isNotEmpty) {
       keys.add(key);
     }
+    _messageCommitCoordinator.stage(
+      MessageMutation(
+        conversationID: conversationID,
+        type: mutationType,
+        generation: _messageCommitGenerationByConv[conversationID] ?? 0,
+        source: 'row_local',
+        stableIdentity: _commitSnapshotIdentity(message),
+      ),
+      requiresListRevision: false,
+    );
     _chatUiStateStore.markMessagesChanged(conversationID, keys);
   }
 
@@ -1154,6 +2502,16 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       }
     }
     if (keys.isNotEmpty) {
+      _messageCommitCoordinator.stage(
+        MessageMutation(
+          conversationID: conversationID,
+          type: MessageMutationType.statusOrProgress,
+          generation: _messageCommitGenerationByConv[conversationID] ?? 0,
+          source: 'status_progress',
+          stableIdentity: mid?.isNotEmpty == true ? mid : cid,
+        ),
+        requiresListRevision: false,
+      );
       _chatUiStateStore.markMessagesChanged(conversationID, keys);
     }
   }
@@ -1603,6 +2961,12 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       return;
     }
     final state = _inboundUnreadStateFor(convId, create: false);
+    // A caller may reach the bottom in the same event-loop turn that the
+    // coalescer routes an inbound message to the away buffer. Never let an
+    // unread cleanup operation discard a message that has not been merged.
+    if (state.bufferedMessages.isNotEmpty) {
+      return;
+    }
     if (state.lockedEntryUnreadCount <= 0 && state.unreadCount <= 0) {
       return;
     }
@@ -1748,6 +3112,9 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       return;
     }
     final state = _inboundUnreadStateFor(convId, create: false);
+    if (state.bufferedMessages.isNotEmpty) {
+      return;
+    }
     if (state.lockedEntryUnreadCount > 0) {
       return;
     }
@@ -1926,6 +3293,36 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     return true;
   }
 
+  /// Flushes messages that are either waiting in the SDK batch coalescer or
+  /// buffered while the user was away from the latest message. This is the
+  /// final inbound drain used by an explicit return-to-bottom transaction.
+  ///
+  /// The coalescer is deliberately drained first: otherwise a message already
+  /// delivered by the SDK can arrive in the 50ms coalescing gap after the UI's
+  /// first deferred flush and be mistaken for a post-transaction message.
+  bool flushPendingIncomingMessagesForUserBottom(String conversationID) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final keys = <String>{
+      conversationID.trim(),
+      storageKey,
+      _inboundStateKey(conversationID),
+      _inboundStateKey(storageKey),
+    }..removeWhere((key) => key.isEmpty);
+    var hadCoalescedMessages = false;
+    for (final key in keys) {
+      hadCoalescedMessages = _inboundBatchCoalescer.pendingCountFor(key) > 0 ||
+          hadCoalescedMessages;
+      _inboundBatchCoalescer.flushConversation(key);
+    }
+    final beforeDeferred = deferredIncomingBufferedCount(conversationID);
+    final flushedDeferred = flushDeferredIncomingMessages(
+      storageKey.isEmpty ? conversationID : storageKey,
+      notify: true,
+      userInitiated: true,
+    );
+    return hadCoalescedMessages || beforeDeferred > 0 || flushedDeferred;
+  }
+
   List<V2TimGroupApplication> get groupApplicationList =>
       _groupApplicationList ?? [];
   List<GroupSystemNoticeItem> get groupSystemNoticeList =>
@@ -2068,6 +3465,23 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
 
   bool _isSameConversationID(String? left, String? right) {
     return isSameConversationIdForHistory(left, right);
+  }
+
+  bool _isGroupConversation(
+    String conversationID, {
+    Iterable<V2TimMessage> messages = const <V2TimMessage>[],
+  }) {
+    final selectedType = currentSelectedConvType;
+    if (selectedType != null &&
+        _isSameConversationID(conversationID, currentSelectedConv)) {
+      return selectedType == ConvType.group;
+    }
+    if (messages.any(
+      (message) => TencentUtils.checkString(message.groupID) != null,
+    )) {
+      return true;
+    }
+    return _historyIdKind(conversationID) == _HistoryConversationKind.group;
   }
 
   /// 包内外统一的会话 ID 等价判断（前缀、社群短码）。
@@ -2218,6 +3632,14 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         notify: false,
         userInitiated: true,
       );
+      final leavingStorageKey = _resolveMessageListStorageKey(leaving);
+      final reorderBuffer = _reorderBuffersByConv.remove(leavingStorageKey) ??
+          _reorderBuffersByConv.remove(leaving);
+      reorderBuffer?.dispose();
+      _cancelCloudContinuation(leaving);
+      _groupGapAutoAttemptAtMs.removeWhere(
+        (key, _) => key.startsWith('$leavingStorageKey:'),
+      );
       final stateKey = _inboundStateKey(leaving);
       _inboundUnreadStateByConversation.remove(stateKey);
       _deferredUntilUserBottomConversations.remove(stateKey);
@@ -2295,6 +3717,124 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         .removeWhere((key, _) => _isSameConversationID(key, trimmed));
   }
 
+  Future<MessageHistoryCoverage> ensureMessageHistoryCoverageLoaded(
+    String conversationID, {
+    int clearEpoch = 0,
+  }) async {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final key = storageKey.isEmpty ? conversationID.trim() : storageKey;
+    if (key.isEmpty) {
+      return MessageHistoryCoverage.empty('', isGroup: false);
+    }
+    final cached = _messageHistoryCoverageByConv[key];
+    if (_messageHistoryCoverageLoadedConvs.contains(key) && cached != null) {
+      if (clearEpoch <= cached.clearEpoch) return cached;
+      final cleared = MessageHistoryCoverage.empty(
+        key,
+        isGroup: cached.isGroup,
+        clearEpoch: clearEpoch,
+      );
+      _storeMessageHistoryCoverage(cleared);
+      return cleared;
+    }
+    final existingTask = _messageHistoryCoverageLoadInFlight[key];
+    if (existingTask != null) {
+      final loaded = await existingTask;
+      return loaded ??
+          MessageHistoryCoverage.empty(
+            key,
+            isGroup: _looksLikeGroupConversationKey(key),
+            clearEpoch: clearEpoch,
+          );
+    }
+    late final Future<MessageHistoryCoverage?> task;
+    final coverageSessionGeneration = _messageHistoryCoverageSessionGeneration;
+    task = loadMessageHistoryCoverage(key).then((loaded) {
+      final isGroup = loaded?.isGroup ?? _looksLikeGroupConversationKey(key);
+      final normalized = loaded == null || loaded.clearEpoch < clearEpoch
+          ? MessageHistoryCoverage.empty(
+              key,
+              isGroup: isGroup,
+              clearEpoch: clearEpoch,
+            )
+          : loaded.copyWith(conversationKey: key);
+      if (coverageSessionGeneration !=
+          _messageHistoryCoverageSessionGeneration) {
+        return normalized;
+      }
+      _messageHistoryCoverageByConv[key] = normalized;
+      _messageHistoryCoverageLoadedConvs.add(key);
+      return normalized;
+    }).whenComplete(() {
+      if (identical(_messageHistoryCoverageLoadInFlight[key], task)) {
+        _messageHistoryCoverageLoadInFlight.remove(key);
+      }
+    });
+    _messageHistoryCoverageLoadInFlight[key] = task;
+    return await task ??
+        MessageHistoryCoverage.empty(
+          key,
+          isGroup: _looksLikeGroupConversationKey(key),
+          clearEpoch: clearEpoch,
+        );
+  }
+
+  MessageHistoryCoverage? messageHistoryCoverageFor(String conversationID) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final key = storageKey.isEmpty ? conversationID.trim() : storageKey;
+    return _messageHistoryCoverageByConv[key];
+  }
+
+  @visibleForTesting
+  Future<void> waitForMessageHistoryCoverageUpdates(String conversationID) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final key = storageKey.isEmpty ? conversationID.trim() : storageKey;
+    return _messageHistoryCoverageUpdateTailByConv[key] ?? Future<void>.value();
+  }
+
+  Future<void> invalidateMessageHistoryCoverage(
+    String conversationID, {
+    required bool isGroup,
+    required int clearEpoch,
+  }) async {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final key = storageKey.isEmpty ? conversationID.trim() : storageKey;
+    if (key.isEmpty) return;
+    final coverage = MessageHistoryCoverage.empty(
+      key,
+      isGroup: isGroup,
+      clearEpoch: clearEpoch,
+    ).copyWith(updatedAtMs: DateTime.now().millisecondsSinceEpoch);
+    _messageHistoryCoverageByConv[key] = coverage;
+    _messageHistoryCoverageLoadedConvs.add(key);
+    _messageHistoryCoverageRequestGenerationByConv.remove(key);
+    _messageReconciliationWriter.reset(key);
+    _boundedCloudCatchUp.invalidate(key);
+    await clearMessageHistoryCoverage(
+      key,
+      isGroup: isGroup,
+      clearEpoch: clearEpoch,
+    );
+  }
+
+  void _storeMessageHistoryCoverage(MessageHistoryCoverage coverage) {
+    final key = _resolveMessageListStorageKey(coverage.conversationKey);
+    final storageKey = key.isEmpty ? coverage.conversationKey.trim() : key;
+    if (storageKey.isEmpty) return;
+    final normalized = coverage.copyWith(conversationKey: storageKey);
+    _messageHistoryCoverageByConv[storageKey] = normalized;
+    _messageHistoryCoverageLoadedConvs.add(storageKey);
+    unawaited(persistMessageHistoryCoverage(normalized));
+  }
+
+  bool _looksLikeGroupConversationKey(String conversationID) {
+    final key = conversationID.trim();
+    if (key.isEmpty) return false;
+    final lower = key.toLowerCase();
+    return (lower.startsWith('group_') && !lower.startsWith('group_c2c_')) ||
+        key.toUpperCase().contains('TGS#');
+  }
+
   bool hasInitialHistoryLoaded(String conversationID) {
     final trimmed = conversationID.trim();
     if (trimmed.isEmpty) {
@@ -2316,10 +3856,34 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     return false;
   }
 
-  void markInitialHistoryLoaded(String conversationID) {
+  void _markInitialHistoryVisible(String conversationID) {
     for (final key in _historyFlagKeys(conversationID)) {
       _initialHistoryLoadedConvs.add(key);
     }
+    _activateReorderBuffer(conversationID);
+  }
+
+  /// Local SDK history is allowed to release the first-frame gate, but it is
+  /// not proof that cloud history is complete and must not start a second
+  /// bootstrap catch-up request.
+  void markLocalInitialHistoryVisible(String conversationID) {
+    _markInitialHistoryVisible(conversationID);
+  }
+
+  /// A proven initial cloud window is visible. Reconnect/foreground events own
+  /// later catch-up; the bootstrap itself already performed the cloud request.
+  void markCloudInitialHistoryVerified(String conversationID) {
+    _markInitialHistoryVisible(conversationID);
+  }
+
+  void markInitialHistoryLoaded(String conversationID) {
+    _markInitialHistoryVisible(conversationID);
+    unawaited(
+      reconcileConversationCloud(
+        conversationID,
+        reason: 'chat_open',
+      ),
+    );
     if (OutgoingVisibleProbe.matches(conversationID)) {
       OutgoingVisibleProbe.log(
         'mark_initial_history_loaded',
@@ -2330,6 +3894,635 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         },
       );
     }
+  }
+
+  /// Activates the InboundReorderBuffer for group conversations after
+  /// initial history is loaded. C2C seq has no global continuity, so
+  /// the buffer is only used for group chats.
+  void _activateReorderBuffer(String conversationID) {
+    final trimmed = conversationID.trim();
+    if (trimmed.isEmpty) return;
+    final storageKey = _resolveMessageListStorageKey(trimmed);
+    final list = _messageListMap[storageKey] ?? _messageListMap[trimmed];
+    if (list == null || list.isEmpty) return;
+    if (!_isGroupConversation(storageKey, messages: list)) return;
+    int newestSeq = 0;
+    for (final msg in list) {
+      final seq = int.tryParse(msg.seq?.trim() ?? '') ?? 0;
+      if (seq > newestSeq) newestSeq = seq;
+    }
+    if (newestSeq <= 0) return;
+    final buffer = _reorderBuffersByConv.putIfAbsent(
+      storageKey,
+      () => InboundReorderBuffer(
+        onFlush: (messages) {
+          _applyInboundMessageBatch(storageKey, messages);
+        },
+        onGapTimeout: (anchorSeq, convID) {
+          _triggerGroupGapCatchUp(convID, anchorSeq);
+        },
+      ),
+    );
+    buffer.activate(storageKey, newestSeq);
+  }
+
+  /// Triggers a CLOUD_NEWER pull when a group seq gap times out.
+  Future<void> _triggerGroupGapCatchUp(
+      String conversationID, int expectedSeq) async {
+    final trimmed = conversationID.trim();
+    if (trimmed.isEmpty) {
+      return;
+    }
+    await reconcileConversationCloud(
+      trimmed,
+      reason: 'seq_gap_$expectedSeq',
+    );
+  }
+
+  V2TimMessage? _cloudCatchUpNewestAnchor(
+    List<V2TimMessage> messages,
+  ) {
+    for (final message in messages) {
+      if (HistoryPaginationAnchor.canUseForSdkPagination(message)) {
+        return message;
+      }
+    }
+    return null;
+  }
+
+  String _cloudCatchUpAnchorKey(V2TimMessage? anchor) {
+    if (anchor == null) {
+      return '';
+    }
+    final msgID = anchor.msgID?.trim() ?? '';
+    if (msgID.isEmpty) {
+      return '';
+    }
+    // Include the visible content signature in the in-memory key. A server
+    // edit to the same message therefore invalidates the stalled decision.
+    return '$msgID|${_messageListContentSignature(<V2TimMessage>[anchor])}';
+  }
+
+  Future<bool> _shouldHoldStalledCloudContinuation(
+    String conversationID,
+  ) async {
+    final current = _mergedAliasMessageList(conversationID);
+    final anchor = _cloudCatchUpNewestAnchor(current);
+    final anchorID = anchor?.msgID?.trim() ?? '';
+    if (anchorID.isEmpty) {
+      return false;
+    }
+    final inMemory = _cloudCatchUpStalledAnchorByConv[conversationID];
+    if (inMemory != null) {
+      // A changed anchor or content is a fresh observation. Do not fall back
+      // to the durable ID-only record, otherwise an edited tip would remain
+      // blocked until another lifecycle event.
+      if (inMemory == _cloudCatchUpAnchorKey(anchor)) {
+        return true;
+      }
+      _cloudCatchUpStalledAnchorByConv.remove(conversationID);
+      return false;
+    }
+    var coverage = messageHistoryCoverageFor(conversationID);
+    coverage ??= await ensureMessageHistoryCoverageLoaded(conversationID);
+    if (!coverage.cloudContinuationStalled ||
+        coverage.continuationCursorMsgID != anchorID) {
+      return false;
+    }
+    _cloudCatchUpStalledAnchorByConv[conversationID] =
+        _cloudCatchUpAnchorKey(anchor);
+    return true;
+  }
+
+  Future<void> _markCloudCatchUpUnblocked(String conversationID) async {
+    _cloudCatchUpStalledAnchorByConv.remove(conversationID);
+    await _enqueueMessageHistoryCoverageUpdate(conversationID, () async {
+      var coverage = messageHistoryCoverageFor(conversationID);
+      coverage ??= await ensureMessageHistoryCoverageLoaded(conversationID);
+      if (coverage.lastBatchKind != _cloudCatchUpStalledBatchKind) {
+        return;
+      }
+      _storeMessageHistoryCoverage(
+        coverage.copyWith(
+          coverageRevision: coverage.coverageRevision + 1,
+          lastBatchKind: _cloudCatchUpUnblockedBatchKind,
+          updatedAtMs: DateTime.now().millisecondsSinceEpoch,
+        ),
+      );
+    });
+  }
+
+  Future<void> _recordCloudCatchUpStalled(
+    String conversationID,
+    List<V2TimMessage> current,
+  ) async {
+    final anchor = _cloudCatchUpNewestAnchor(current);
+    final anchorID = anchor?.msgID?.trim() ?? '';
+    if (anchorID.isEmpty) {
+      return;
+    }
+    final anchorKey = _cloudCatchUpAnchorKey(anchor);
+    _cloudCatchUpStalledAnchorByConv[conversationID] = anchorKey;
+    await _enqueueMessageHistoryCoverageUpdate(conversationID, () async {
+      var coverage = messageHistoryCoverageFor(conversationID);
+      coverage ??= await ensureMessageHistoryCoverageLoaded(conversationID);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      _storeMessageHistoryCoverage(
+        coverage.copyWith(
+          coverageRevision: coverage.coverageRevision + 1,
+          status: MessageHistoryCoverageStatus.partial,
+          newerHasMore: true,
+          continuationPending: true,
+          continuationDirection: MessageHistoryCoverageDirection.newer,
+          continuationCursorMsgID: anchorID,
+          clearContinuationCursor: false,
+          lastBatchKind: _cloudCatchUpStalledBatchKind,
+          lastCursorDirection: MessageHistoryCoverageDirection.newer.name,
+          lastCursorMsgID: anchorID,
+          clearLastCursor: false,
+          updatedAtMs: now,
+        ),
+      );
+    });
+  }
+
+  /// Runs one bounded cloud reconciliation for open/reconnect/foreground and
+  /// gap-repair triggers. All fetched rows are committed through the same
+  /// reconciliation writer as initial history and realtime callbacks.
+  Future<MessageCloudCatchUpResult> reconcileConversationCloud(
+    String conversationID, {
+    required String reason,
+  }) async {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    if (storageKey.isEmpty) {
+      return const MessageCloudCatchUpResult(
+        disposition: MessageCloudCatchUpDisposition.offline,
+        attempts: 0,
+        timedOut: false,
+      );
+    }
+    if (_shouldDeferCloudCatchUpWhileReadingHistory(storageKey)) {
+      ChatHistoryTrace.log(
+        'cloud_catch_up_deferred_reading_history',
+        conversationID: storageKey,
+        extras: <String, Object?>{
+          'reason': reason,
+          'position': getMessageListPosition(storageKey).name,
+          'memorySuppressed': isMemoryWindowSuppressed(storageKey),
+          'missingNewer': memoryWindowMissingNewer(storageKey),
+        },
+      );
+      return const MessageCloudCatchUpResult(
+        disposition: MessageCloudCatchUpDisposition.settled,
+        attempts: 0,
+        timedOut: false,
+      );
+    }
+    if (reason == 'cloud_continuation') {
+      if (await _shouldHoldStalledCloudContinuation(storageKey)) {
+        ChatHistoryTrace.log(
+          'cloud_catch_up_stalled_hold',
+          conversationID: storageKey,
+          extras: <String, Object?>{'reason': reason},
+        );
+        return const MessageCloudCatchUpResult(
+          disposition: MessageCloudCatchUpDisposition.stalled,
+          attempts: 0,
+          timedOut: false,
+        );
+      }
+    } else {
+      // A fresh lifecycle/open/bottom trigger is the explicit escape hatch
+      // from a stalled same-anchor continuation.
+      await _markCloudCatchUpUnblocked(storageKey);
+    }
+    if (reason != 'cloud_continuation') {
+      _cancelCloudContinuation(storageKey, clearBudget: false);
+      _cloudContinuationRoundsByConv[storageKey] = 0;
+    }
+    final result = await _boundedCloudCatchUp.run(
+      conversationID: storageKey,
+      operation: (attempt) => _runCloudCatchUpAttempt(
+        storageKey,
+        reason: reason,
+        attempt: attempt,
+      ),
+    );
+    await _markUnresolvedGroupCoverageAfterCatchUp(storageKey, result);
+    if (result.disposition == MessageCloudCatchUpDisposition.stalled) {
+      await _recordCloudCatchUpStalled(
+        storageKey,
+        _mergedAliasMessageList(storageKey),
+      );
+    }
+    if (result.settled) {
+      ChatHistoryTrace.log(
+        'cloud_catch_up_settled',
+        conversationID: storageKey,
+        extras: <String, Object?>{
+          'reason': reason,
+          'attempts': result.attempts,
+        },
+      );
+    }
+    if (result.completed || result.settled) {
+      _cancelCloudContinuation(storageKey);
+    } else if (result.needsContinuation) {
+      _scheduleCloudContinuation(storageKey);
+    }
+    return result;
+  }
+
+  Future<void> _markUnresolvedGroupCoverageAfterCatchUp(
+    String conversationID,
+    MessageCloudCatchUpResult result,
+  ) async {
+    if (result.completed || result.settled || result.needsContinuation) return;
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    if (storageKey.isEmpty) return;
+    await _enqueueMessageHistoryCoverageUpdate(storageKey, () async {
+      final current = await ensureMessageHistoryCoverageLoaded(storageKey);
+      final unresolved = current.holes
+          .where((hole) =>
+              hole.kind == MessageHistoryHoleKind.groupSeq &&
+              hole.status != MessageHistoryHoleStatus.resolved)
+          .toList(growable: false);
+      if (!current.isGroup || unresolved.isEmpty) return;
+      final nextHoleStatus =
+          result.disposition == MessageCloudCatchUpDisposition.offline
+              ? MessageHistoryHoleStatus.cloudUnavailable
+              : MessageHistoryHoleStatus.retryable;
+      if (unresolved.every((hole) => hole.status == nextHoleStatus)) return;
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final holes = current.holes.map((hole) {
+        if (hole.kind != MessageHistoryHoleKind.groupSeq ||
+            hole.status == MessageHistoryHoleStatus.resolved) {
+          return hole;
+        }
+        return MessageHistoryHole(
+          key: hole.key,
+          kind: hole.kind,
+          status: nextHoleStatus,
+          startSeq: hole.startSeq,
+          endSeq: hole.endSeq,
+          olderMsgID: hole.olderMsgID,
+          newerMsgID: hole.newerMsgID,
+          generation: hole.generation,
+          updatedAtMs: now,
+        );
+      }).toList(growable: false);
+      _storeMessageHistoryCoverage(
+        current.copyWith(
+          coverageRevision: current.coverageRevision + 1,
+          status: result.disposition == MessageCloudCatchUpDisposition.offline
+              ? MessageHistoryCoverageStatus.offlineLocalOnly
+              : MessageHistoryCoverageStatus.partial,
+          holes: holes,
+          updatedAtMs: now,
+        ),
+      );
+    });
+  }
+
+  void _scheduleCloudContinuation(String conversationID) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final current = storageKey.isEmpty
+        ? const <V2TimMessage>[]
+        : _mergedAliasMessageList(storageKey);
+    if (storageKey.isEmpty ||
+        _isGroupConversation(storageKey, messages: current) ||
+        _cloudContinuationTimersByConv.containsKey(storageKey)) {
+      return;
+    }
+    final rounds = _cloudContinuationRoundsByConv[storageKey] ?? 0;
+    if (rounds >= _maxAutomaticCloudContinuationRounds ||
+        !_chatAppForeground ||
+        !_isSameConversationID(currentSelectedConv, storageKey) ||
+        isChatListUserScrolling) {
+      return;
+    }
+    final position = getMessageListPosition(storageKey);
+    if (!_isActiveChatNearBottom(storageKey) &&
+        position != HistoryMessagePosition.bottom) {
+      return;
+    }
+    _cloudContinuationTimersByConv[storageKey] = Timer(
+      _cloudContinuationDelay,
+      () {
+        _cloudContinuationTimersByConv.remove(storageKey);
+        if (!_chatAppForeground ||
+            !_isSameConversationID(currentSelectedConv, storageKey) ||
+            isChatListUserScrolling ||
+            _messageReconciliationWriter.hasActiveRequest(storageKey)) {
+          return;
+        }
+        final currentRounds = _cloudContinuationRoundsByConv[storageKey] ?? 0;
+        if (currentRounds >= _maxAutomaticCloudContinuationRounds) {
+          return;
+        }
+        _cloudContinuationRoundsByConv[storageKey] = currentRounds + 1;
+        unawaited(reconcileConversationCloud(
+          storageKey,
+          reason: 'cloud_continuation',
+        ));
+      },
+    );
+  }
+
+  void _cancelCloudContinuation(
+    String conversationID, {
+    bool clearBudget = true,
+  }) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    _cloudContinuationTimersByConv.remove(storageKey)?.cancel();
+    if (clearBudget) {
+      _cloudContinuationRoundsByConv.remove(storageKey);
+    }
+  }
+
+  Future<MessageCloudCatchUpDisposition> _runCloudCatchUpAttempt(
+    String storageKey, {
+    required String reason,
+    required MessageCloudCatchUpAttempt attempt,
+  }) async {
+    if (_shouldDeferCloudCatchUpWhileReadingHistory(storageKey)) {
+      return MessageCloudCatchUpDisposition.settled;
+    }
+    final networkBefore = messageReconciliationNetworkState;
+    if (networkBefore != MessageReconciliationNetworkState.online) {
+      return MessageCloudCatchUpDisposition.offline;
+    }
+    if (_messageReconciliationWriter.hasActiveRequest(storageKey)) {
+      return MessageCloudCatchUpDisposition.retry;
+    }
+    final current = _mergedAliasMessageList(storageKey);
+    if (current.isEmpty) {
+      return MessageCloudCatchUpDisposition.complete;
+    }
+    final isGroup = _isGroupConversation(storageKey, messages: current);
+    _messageReconciliationWriter.seedAuthoritative(
+      conversationID: storageKey,
+      records: _reconciliationRecords(current),
+      trackSeqGaps: isGroup,
+    );
+    final request = _messageReconciliationWriter.beginCloudCatchUp(
+      conversationID: storageKey,
+      networkState: networkBefore,
+    );
+    attempt.onInvalidated(() {
+      failHistoryReconciliation(
+        request: request,
+        reason: 'cloud_catch_up_timeout',
+      );
+    });
+    final sdkConversationID = normalizeConversationIdForHistory(storageKey);
+    final groupID = isGroup ? sdkConversationID : null;
+    final userID = isGroup ? null : sdkConversationID;
+    final missingSeqs = isGroup
+        ? _boundedMissingGroupSeqs(current, maxCount: 100)
+        : const <int>[];
+    V2TimMessage? newestAnchor;
+    var newestSeq = 0;
+    for (final message in current) {
+      if (!HistoryPaginationAnchor.canUseForSdkPagination(message)) {
+        continue;
+      }
+      newestAnchor ??= message;
+      final seq = int.tryParse(message.seq?.trim() ?? '') ?? 0;
+      if (seq > newestSeq) {
+        newestSeq = seq;
+      }
+    }
+    if ((isGroup && missingSeqs.isEmpty && newestSeq <= 0) ||
+        (!isGroup && newestAnchor == null)) {
+      failHistoryReconciliation(
+        request: request,
+        reason: 'cloud_catch_up_missing_anchor',
+      );
+      return MessageCloudCatchUpDisposition.complete;
+    }
+
+    try {
+      final response = await _messageService.getHistoryMessageListWithComplete(
+        count: missingSeqs.isNotEmpty ? missingSeqs.length : 50,
+        getType: HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_NEWER_MSG,
+        userID: userID,
+        groupID: groupID,
+        // Group reconciliation uses a Seq cursor only. Passing lastMsg too
+        // would make the SDK silently ignore lastMsgSeq.
+        lastMsgSeq: isGroup && missingSeqs.isEmpty ? newestSeq : 0,
+        lastMsg: isGroup ? null : newestAnchor,
+        messageSeqList: missingSeqs.isEmpty ? null : missingSeqs,
+      );
+      if (!attempt.isCurrent) {
+        failHistoryReconciliation(
+          request: request,
+          reason: 'cloud_catch_up_stale_attempt',
+        );
+        return MessageCloudCatchUpDisposition.retry;
+      }
+      if (_shouldDeferCloudCatchUpWhileReadingHistory(storageKey)) {
+        failHistoryReconciliation(
+          request: request,
+          reason: 'cloud_catch_up_deferred_reading_history',
+        );
+        return MessageCloudCatchUpDisposition.settled;
+      }
+      if (response == null) {
+        failHistoryReconciliation(
+          request: request,
+          reason: 'cloud_catch_up_null_response',
+        );
+        return MessageCloudCatchUpDisposition.retry;
+      }
+      if (!isGroup &&
+          !response.isFinished &&
+          !_c2cCatchUpHasNewMessage(current, response.messageList)) {
+        // C2C has no conversation-wide Seq. If the SDK returns the same page
+        // under the same lastMsg anchor, another immediate continuation would
+        // repeat the request forever. Keep reconciliation incomplete and wait
+        // for a later foreground/reconnect/bottom-edge trigger.
+        failHistoryReconciliation(
+          request: request,
+          reason: 'cloud_catch_up_no_progress',
+        );
+        return MessageCloudCatchUpDisposition.stalled;
+      }
+      final networkAfter = messageReconciliationNetworkState;
+      final provenance = MessageReconciliationProvenance.resolve(
+        requestedSource: MessageReconciliationSource.cloud,
+        beforeRequest: networkBefore,
+        afterResponse: networkAfter,
+      );
+      final returnedOldest = _oldestServerHistoryMessage(response.messageList);
+      final returnedNewest = _newestServerHistoryMessage(response.messageList);
+      final catchUpCursor = MessageHistoryCursor(
+        direction: missingSeqs.isEmpty
+            ? MessageHistoryCursorDirection.newer
+            : MessageHistoryCursorDirection.older,
+        lastMsgID: missingSeqs.isEmpty && !isGroup ? newestAnchor?.msgID : null,
+        lastMsgSeq: missingSeqs.isNotEmpty
+            ? missingSeqs.first
+            : (isGroup && newestSeq > 0 ? newestSeq : null),
+      );
+      final commit = completeHistoryReconciliation(
+        request: request,
+        history: response.messageList,
+        actualSource: provenance.actualSource,
+        networkState: provenance.networkState,
+        historyCommitSource: 'cloud_catch_up:$reason:a${attempt.number}',
+        cloudHasMoreNewer: missingSeqs.isEmpty && !response.isFinished,
+        batchKind: missingSeqs.isEmpty
+            ? MessageHistoryBatchKind.newerCatchUp
+            : MessageHistoryBatchKind.gapFill,
+        historyIsFinished: response.isFinished,
+        clearEpoch: messageHistoryCoverageFor(storageKey)?.clearEpoch ?? 0,
+        requestedCursor: catchUpCursor,
+        returnedBounds: MessageHistoryBounds(
+          oldestMsgID: returnedOldest?.msgID,
+          newestMsgID: returnedNewest?.msgID,
+          oldestSeq: _messageNumericSeq(returnedOldest),
+          newestSeq: _messageNumericSeq(returnedNewest),
+        ),
+        cloudResponseProven: provenance.cloudResponseProven,
+      );
+      if (commit == null) {
+        return MessageCloudCatchUpDisposition.retry;
+      }
+      if (!provenance.cloudResponseProven) {
+        return MessageCloudCatchUpDisposition.offline;
+      }
+      final state = _messageReconciliationWriter.coordinator.stateFor(
+        storageKey,
+      );
+      final needsAnotherPage = missingSeqs.isEmpty && !response.isFinished;
+      if (state.missingSeqRanges.isNotEmpty || needsAnotherPage) {
+        return needsAnotherPage
+            ? MessageCloudCatchUpDisposition.continuation
+            : MessageCloudCatchUpDisposition.retry;
+      }
+      // A successful finished transport response ends this bounded pass, but
+      // does not upgrade durable coverage to verified. A later open/reconnect
+      // can validate again without three identical immediate retries.
+      if (provenance.proofKind != MessageHistoryProofKind.serverContinuity) {
+        return MessageCloudCatchUpDisposition.settled;
+      }
+      return MessageCloudCatchUpDisposition.complete;
+    } catch (_) {
+      if (attempt.isCurrent) {
+        failHistoryReconciliation(
+          request: request,
+          reason: 'cloud_catch_up_exception',
+        );
+      }
+      return MessageCloudCatchUpDisposition.retry;
+    }
+  }
+
+  bool _c2cCatchUpHasNewMessage(
+    List<V2TimMessage> current,
+    List<V2TimMessage> fetched,
+  ) {
+    final known = <String, String>{};
+    for (final message in current) {
+      final id = (message.msgID?.trim().isNotEmpty ?? false)
+          ? message.msgID!.trim()
+          : (message.id?.trim() ?? '');
+      if (id.isNotEmpty) {
+        known[id] = _messageListContentSignature(<V2TimMessage>[message]);
+      }
+    }
+    for (final message in fetched) {
+      final id = (message.msgID?.trim().isNotEmpty ?? false)
+          ? message.msgID!.trim()
+          : (message.id?.trim() ?? '');
+      if (id.isEmpty || !known.containsKey(id)) return true;
+      if (known[id] != _messageListContentSignature(<V2TimMessage>[message])) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  List<int> _boundedMissingGroupSeqs(
+    List<V2TimMessage> newestFirst, {
+    required int maxCount,
+  }) {
+    final gaps = GapDetector.detectGaps(
+      newestFirst: newestFirst,
+      isGroup: true,
+      fullScan: true,
+    );
+    if (gaps.isEmpty) {
+      return const <int>[];
+    }
+    final seqs = <int>[];
+    for (final gap in gaps) {
+      final lower = gap.lowerSeq;
+      final upper = gap.upperSeq;
+      if (lower == null || upper == null) {
+        continue;
+      }
+      for (var seq = lower + 1; seq < upper && seqs.length < maxCount; seq++) {
+        seqs.add(seq);
+      }
+      if (seqs.length >= maxCount) {
+        break;
+      }
+    }
+    return List<int>.unmodifiable(seqs);
+  }
+
+  void _requestDetectedGroupGapCatchUp(String conversationID, GapInfo gap) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final lower = gap.lowerSeq ?? 0;
+    final upper = gap.upperSeq ?? 0;
+    if (storageKey.isEmpty || lower <= 0 || upper <= lower + 1) {
+      return;
+    }
+    if (_shouldDeferCloudCatchUpWhileReadingHistory(storageKey)) {
+      ChatHistoryTrace.log(
+        'seq_gap_catch_up_deferred_reading_history',
+        conversationID: storageKey,
+        extras: <String, Object?>{
+          'lowerSeq': lower,
+          'upperSeq': upper,
+          'position': getMessageListPosition(storageKey).name,
+          'memorySuppressed': isMemoryWindowSuppressed(storageKey),
+        },
+      );
+      return;
+    }
+    final rangeKey = '$storageKey:$lower-$upper';
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final previous = _groupGapAutoAttemptAtMs[rangeKey] ?? 0;
+    if (now - previous < _groupGapAutoCooldownMs) {
+      return;
+    }
+    _groupGapAutoAttemptAtMs[rangeKey] = now;
+    unawaited(reconcileConversationCloud(
+      storageKey,
+      reason: 'seq_gap_${lower}_$upper',
+    ));
+  }
+
+  bool _shouldDeferCloudCatchUpWhileReadingHistory(String conversationID) {
+    return isMemoryWindowSuppressed(conversationID) ||
+        isReadingHistory(conversationID);
+  }
+
+  void _clearResolvedGroupGapAttempts(
+    String conversationID,
+    List<GapInfo> gaps,
+  ) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final active = <String>{
+      for (final gap in gaps)
+        '$storageKey:${gap.lowerSeq ?? 0}-${gap.upperSeq ?? 0}',
+    };
+    _groupGapAutoAttemptAtMs.removeWhere(
+      (key, _) => key.startsWith('$storageKey:') && !active.contains(key),
+    );
   }
 
   /// 保留当前消息窗口，只撤销“首屏已验证”资格。
@@ -2431,6 +4624,52 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     return _findOpenHydrateInFlight(conversationID) != null;
   }
 
+  /// Last terminal result for the app-owned first-window bootstrap. This is
+  /// separate from the in-flight map so a caller arriving just after
+  /// completion can consume the same result without issuing LOCAL/CLOUD again.
+  OpenHydrateResult? openHydrateResultFor(String conversationID) {
+    final trimmed = conversationID.trim();
+    if (trimmed.isEmpty) return null;
+    final direct = _openHydrateResultByConv[trimmed];
+    if (direct != null) return direct;
+    final normalized = _normalizeConversationID(trimmed);
+    if (normalized.isNotEmpty) {
+      final byNorm = _openHydrateResultByConv[normalized];
+      if (byNorm != null) return byNorm;
+    }
+    for (final entry in _openHydrateResultByConv.entries) {
+      if (_isSameConversationID(entry.key, trimmed)) return entry.value;
+    }
+    return null;
+  }
+
+  OpenHydrateResult? takeOpenHydrateResult(String conversationID) {
+    final result = openHydrateResultFor(conversationID);
+    if (result != null) {
+      clearOpenHydrateResult(conversationID);
+    }
+    return result;
+  }
+
+  void publishOpenHydrateResult(
+    String conversationID,
+    OpenHydrateResult result,
+  ) {
+    final key = conversationID.trim();
+    if (key.isEmpty) return;
+    for (final alias in _historyFlagKeys(key)) {
+      _openHydrateResultByConv[alias] = result;
+    }
+  }
+
+  void clearOpenHydrateResult(String conversationID) {
+    final key = conversationID.trim();
+    if (key.isEmpty) return;
+    _openHydrateResultByConv.removeWhere(
+      (alias, _) => _isSameConversationID(alias, key),
+    );
+  }
+
   Future<void>? _findOpenHydrateInFlight(String conversationID) {
     final trimmed = conversationID.trim();
     if (trimmed.isEmpty) {
@@ -2458,16 +4697,17 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
   /// 聊天页 initState 启动的首屏灌入任务；hydrate 可短暂等待以避免 0→N 闪屏。
   void registerOpenHydrateInFlight(
     String conversationID,
-    Future<void> future,
+    Future<dynamic> future,
   ) {
     final key = conversationID.trim();
     if (key.isEmpty) {
       return;
     }
     final existing = _findOpenHydrateInFlight(key);
+    final normalizedFuture = future.then<void>((_) {});
     final tracked = existing == null
-        ? future
-        : Future.wait<void>(<Future<void>>[existing, future]);
+        ? normalizedFuture
+        : Future.wait<void>(<Future<void>>[existing, normalizedFuture]);
     // 主 key + 等价别名都挂上，避免 c2c_/group_/裸 id 互相等不到。
     for (final alias in _historyFlagKeys(key)) {
       _openHydrateInFlightByConv[alias] = tracked;
@@ -2511,6 +4751,56 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     return false;
   }
 
+  /// True when the in-memory window was trimmed and must be reconciled with
+  /// SDK history before it can be considered a complete open window.
+  /// This is deliberately separate from the SDK's own "has more" flags.
+  bool memoryWindowNeedsReconciliation(String conversationID) {
+    return memoryWindowMissingNewer(conversationID) ||
+        _memoryWindowMissingOlderByConv.entries.any(
+          (entry) =>
+              entry.value && _isSameConversationID(entry.key, conversationID),
+        );
+  }
+
+  bool memoryWindowReconciliationCovered(
+    String conversationID,
+    List<V2TimMessage>? messages,
+  ) {
+    if (!memoryWindowNeedsReconciliation(conversationID) ||
+        messages == null ||
+        messages.isEmpty) return false;
+    final boundary = _memoryWindowBoundaryTimestampByConv.entries
+        .where((e) => _isSameConversationID(e.key, conversationID))
+        .map((e) => e.value)
+        .fold<int>(0, (a, b) => a > b ? a : b);
+    final newer = memoryWindowMissingNewer(conversationID);
+    final older = _memoryWindowMissingOlderByConv.entries
+        .any((e) => e.value && _isSameConversationID(e.key, conversationID));
+    if (boundary <= 0) return messages.isNotEmpty;
+    final timestamps =
+        messages.map((m) => m.timestamp ?? 0).where((v) => v > 0);
+    if (timestamps.isNotEmpty) {
+      final minTs = timestamps.reduce((a, b) => a < b ? a : b);
+      final maxTs = timestamps.reduce((a, b) => a > b ? a : b);
+      if (newer && maxTs > boundary) return true;
+      if (older && minTs < boundary) return true;
+    }
+    final seqs = messages
+        .map((m) => int.tryParse(m.seq?.trim() ?? '') ?? 0)
+        .where((v) => v > 0);
+    final boundarySeq = int.tryParse(_memoryWindowBoundarySeqByConv.entries
+            .firstWhere((e) => _isSameConversationID(e.key, conversationID),
+                orElse: () => const MapEntry('', ''))
+            .value) ??
+        0;
+    if (boundarySeq > 0 && seqs.isNotEmpty) {
+      final minSeq = seqs.reduce((a, b) => a < b ? a : b);
+      final maxSeq = seqs.reduce((a, b) => a > b ? a : b);
+      return (newer && maxSeq > boundarySeq) || (older && minSeq < boundarySeq);
+    }
+    return false;
+  }
+
   void markMemoryWindowMissingNewer(String conversationID) {
     final key = conversationID.trim();
     if (key.isEmpty) {
@@ -2519,12 +4809,29 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     _memoryWindowMissingNewerByConv[key] = true;
   }
 
+  void markMemoryWindowMissingOlder(String conversationID) {
+    final key = conversationID.trim();
+    if (key.isNotEmpty) _memoryWindowMissingOlderByConv[key] = true;
+  }
+
   void clearMemoryWindowMissingNewer(String conversationID) {
     final keys = _memoryWindowMissingNewerByConv.keys
         .where((k) => _isSameConversationID(k, conversationID))
         .toList(growable: false);
     for (final key in keys) {
       _memoryWindowMissingNewerByConv.remove(key);
+    }
+  }
+
+  void clearMemoryWindowReconciliation(String conversationID) {
+    clearMemoryWindowMissingNewer(conversationID);
+    final keys = _memoryWindowMissingOlderByConv.keys
+        .where((k) => _isSameConversationID(k, conversationID))
+        .toList(growable: false);
+    for (final key in keys) {
+      _memoryWindowMissingOlderByConv.remove(key);
+      _memoryWindowBoundaryTimestampByConv.remove(key);
+      _memoryWindowBoundarySeqByConv.remove(key);
     }
   }
 
@@ -2608,6 +4915,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     String? memoryWindowAnchorMsgID,
     String? memoryWindowAnchorSeq,
     bool memoryWindowPreferLatest = false,
+    bool forceWhileReadingHistory = false,
   }) {
     final list = rawMessageList(conversationID);
     if (list == null || list.isEmpty) {
@@ -2624,6 +4932,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       memoryWindowPreferLatest: memoryWindowPreferLatest,
       memoryWindowAnchorMsgID: memoryWindowAnchorMsgID,
       memoryWindowAnchorSeq: memoryWindowAnchorSeq,
+      forceMemoryWindowTrimWhileReading: forceWhileReadingHistory,
     );
   }
 
@@ -2686,6 +4995,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     setMemoryWindowSuppressed(conversationID, false);
     for (final key in keys) {
       _messageListMap.remove(key);
+      _rowLocalAliasByConversation.remove(key);
       _messageListContentSignatureByConv.remove(key);
       _historyMessagePositionMap.remove(key);
       _searchJumpStatusMap.remove(key);
@@ -2977,20 +5287,56 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       {required String msgID,
       required String conversationID,
       required ConvType conversationType}) async {
+    final lifecycleGeneration = _messageHistoryCoverageSessionGeneration;
     final TUIChatModelTools tools = serviceLocator<TUIChatModelTools>();
     V2TimMessage? newMessage = await tools.getExistingMessageByID(
         msgID: msgID,
         conversationID: conversationID,
         conversationType: conversationType);
-    if (newMessage != null) {
-      onMessageModified(newMessage, currentSelectedConv);
+    if (newMessage != null && _isMessageLifecycleCurrent(lifecycleGeneration)) {
+      // Keep the scope captured by the controller request. The selected
+      // conversation may have changed while the SDK lookup was in flight.
+      onMessageModified(newMessage, conversationID);
     }
   }
 
   clearData() {
-    _inboundBatchCoalescer.cancelAllSilently();
-    _inboundChunkReveal.cancelAllSilently();
+    // Flush all buffered inbound messages before clearing state so SDK
+    // push messages that haven't been committed to messageListMap are
+    // not lost. SDK internal SQLite persists them, but flushing ensures
+    // consistency for any in-flight presentation.
+    _inboundBatchCoalescer.flushAll();
+    _inboundChunkReveal.flushAll();
+    for (final buffer in _reorderBuffersByConv.values) {
+      buffer.dispose();
+    }
+    _reorderBuffersByConv.clear();
+    _gapCatchUpInFlight.clear();
+    _groupGapAutoAttemptAtMs.clear();
+    for (final timer in _cloudContinuationTimersByConv.values) {
+      timer.cancel();
+    }
+    _cloudContinuationTimersByConv.clear();
+    _cloudContinuationRoundsByConv.clear();
+    _cloudCatchUpStalledAnchorByConv.clear();
+    _messageReconciliationWriter.resetAll();
+    _boundedCloudCatchUp.invalidateAll();
+    _messageHistoryCoverageSessionGeneration += 1;
+    _messageHistoryCoverageByConv.clear();
+    _messageHistoryCoverageLoadedConvs.clear();
+    _messageHistoryCoverageLoadInFlight.clear();
+    _messageHistoryCoverageUpdateTailByConv.clear();
+    _messageHistoryCoverageRequestGenerationByConv.clear();
+    _openHydrateResultByConv.clear();
+    for (final timer in _activeReadReportDebounceMap.values) {
+      timer.cancel();
+    }
+    _activeReadReportDebounceMap.clear();
+    _lastActiveReadReportAtMs.clear();
+    unawaited(appMessageHistoryCoverageRepository?.clearSession());
     _messageListMap.clear();
+    _lastHistoryCommitMetadataByConv.clear();
+    _rowLocalAliasByConversation.clear();
     _initialHistoryLoadedConvs.clear();
     _mayHaveOlderHistoryByConv.clear();
     _currentConversationList.clear();
@@ -3014,6 +5360,9 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     _messageListDisplayCache.clear();
     _bulkMessageSyncDepthByConv.clear();
     _pendingPinAfterBulkByConv.clear();
+    _userScrollToBottomConvId = null;
+    _userScrollToBottomTransactionActive = false;
+    _userScrollToBottomUntilMs = 0;
     _lastInboundScrollFollowChunk = const <V2TimMessage>[];
     _inboundScrollFollowSessionEnding = false;
     notifyListeners();
@@ -3123,6 +5472,27 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     }
     _messageListProgressMap.remove(msgID);
     _markNeedsNotify();
+  }
+
+  /// Metadata writes used while adopting an already-mounted outgoing row.
+  /// The adoption publishes one row revision after all fields are coherent.
+  void setUploadProgressRowLocal(String msgID, int progress) {
+    _setUploadProgressSilently(msgID, progress);
+  }
+
+  void clearUploadProgressRowLocal(String? msgID) {
+    _clearUploadProgressSilently(msgID);
+  }
+
+  void setFileMessageLocationRowLocal(
+    String msgID,
+    String location, {
+    Size? imageSize,
+  }) {
+    _fileListLocationMap[msgID] = location;
+    if (imageSize != null && imageSize.width > 0 && imageSize.height > 0) {
+      _fileMessageSizeMap[msgID] = imageSize;
+    }
   }
 
   setFileMessageLocation(String msgID, String location, {Size? imageSize}) {
@@ -3402,6 +5772,8 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
           _outgoingLocalSeqKey,
           _outgoingLocalSentAtKey,
           kChatOutgoingStableIdKey,
+          kChatMediaBatchIdKey,
+          kChatMediaBatchIndexKey,
         ]) {
           if (previousDecoded.containsKey(key)) {
             data[key] = previousDecoded[key];
@@ -4078,6 +6450,42 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (storageKey.isEmpty) {
       return false;
     }
+    final serverID = newMsg.msgID?.trim() ?? '';
+    if (serverID.isNotEmpty &&
+        _messageReconciliationWriter
+            .tombstonesFor(storageKey)
+            .contains(serverID)) {
+      // A late self receipt must not reinsert a server-deleted/revoked row.
+      return false;
+    }
+    if (newMsg.isSelf == true &&
+        _messageReconciliationWriter.hasActiveRequest(storageKey)) {
+      final current = _messageListMap[storageKey] ?? const <V2TimMessage>[];
+      V2TimMessage? correlated;
+      for (final item in current) {
+        if (_messageCorrelatesWithStored(item, newMsg)) {
+          correlated = item;
+          break;
+        }
+      }
+      final stableIdentity = readOutgoingStableId(newMsg) ??
+          readOutgoingStableId(correlated) ??
+          newMsg.id;
+      final record = MessageReconciliationRecord<V2TimMessage>(
+        value: newMsg,
+        msgID: newMsg.msgID,
+        localID: newMsg.id,
+        outgoingStableID: stableIdentity,
+        seq: newMsg.seq,
+      );
+      _messageReconciliationWriter.enqueueRealtime(
+        conversationID: storageKey,
+        eventID: 'realtime:self:${++_nextRealtimeReconciliationEvent}:'
+            '${messageDedupKey(newMsg)}',
+        records: <MessageReconciliationRecord<V2TimMessage>>[record],
+      );
+      return false;
+    }
     var list = List<V2TimMessage>.from(
       _messageListMap[storageKey] ?? const <V2TimMessage>[],
     );
@@ -4241,6 +6649,67 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       );
     }
 
+    // Normal inbound rows use the same authoritative writer as history. Keep
+    // the mature self-send correlation path below because it also migrates
+    // local media metadata and placeholder status; server inbound rows have
+    // no such local-only side effects.
+    if (messages.every((message) => message.isSelf != true)) {
+      final before = _mergedAliasMessageList(convID);
+      final eventID = 'realtime:${++_nextRealtimeReconciliationEvent}:'
+          '${messages.map(messageDedupKey).join(',')}';
+      final commit = commitMessageDelta(
+        MessageDelta<V2TimMessage>(
+          conversationKey: convID,
+          eventID: eventID,
+          kind: MessageDeltaKind.realtimeUpsert,
+          source: MessageDeltaSource.sdkRealtime,
+          generation: messageDeltaGenerationFor(convID),
+          clearEpoch: messageDeltaClearEpochFor(convID),
+          upserts: _reconciliationRecords(messages),
+        ),
+      );
+      if (commit == null) {
+        return (
+          inserted: false,
+          lastInserted: null,
+          insertedMessages: const <V2TimMessage>[],
+        );
+      }
+      final after = commit.rawCount > 0
+          ? (rawMessageList(convID) ?? const <V2TimMessage>[])
+          : const <V2TimMessage>[];
+      final insertedMessages = messages
+          .where(
+            (message) => !before.any(
+              (existing) => _messageCorrelatesWithStored(existing, message),
+            ),
+          )
+          .toList(growable: false);
+      return (
+        inserted: insertedMessages.isNotEmpty || after.length > before.length,
+        lastInserted: insertedMessages.isEmpty ? null : insertedMessages.last,
+        insertedMessages: insertedMessages,
+      );
+    }
+
+    if (_messageReconciliationWriter.hasActiveRequest(convID)) {
+      // History and realtime are one transaction. Do not mutate the raw map
+      // while an older history snapshot is in flight; its completion publishes
+      // the fetched rows plus this queued batch under one list revision.
+      final eventID = 'realtime:${++_nextRealtimeReconciliationEvent}:'
+          '${messages.map(messageDedupKey).join(',')}';
+      _messageReconciliationWriter.enqueueRealtime(
+        conversationID: convID,
+        eventID: eventID,
+        records: _reconciliationRecords(messages),
+      );
+      return (
+        inserted: false,
+        lastInserted: null,
+        insertedMessages: const <V2TimMessage>[],
+      );
+    }
+
     final pending = <V2TimMessage>[];
     final insertedMessages = <V2TimMessage>[];
     var inserted = false;
@@ -4250,11 +6719,9 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       if (pending.isEmpty) {
         return;
       }
-      _messageListMap[convID] = sortMessagesNewestFirst(
-        <V2TimMessage>[
-          ...pending,
-          ...(_messageListMap[convID] ?? const <V2TimMessage>[]),
-        ],
+      _messageListMap[convID] = _mergePendingIncomingForDedup(
+        pending: pending,
+        existing: _messageListMap[convID] ?? const <V2TimMessage>[],
       );
       pending.clear();
     }
@@ -4272,7 +6739,10 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         if (msgID != null && msgID.isNotEmpty && item.msgID == msgID) {
           return true;
         }
-        return id != null && id.isNotEmpty && item.id == id;
+        if (id != null && id.isNotEmpty && item.id == id) {
+          return true;
+        }
+        return messagesCorrelateForDedup(item, message);
       });
     }
 
@@ -4315,6 +6785,65 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       insertedMessages.add(message);
     }
     flushPending();
+    if (messages.every((message) => message.isSelf == true)) {
+      final current = _messageListMap[convID] ?? const <V2TimMessage>[];
+      final records = <MessageReconciliationRecord<V2TimMessage>>[];
+      for (final message in messages) {
+        V2TimMessage? value;
+        for (final item in current) {
+          if (_messageCorrelatesWithStored(item, message)) {
+            value = item;
+            break;
+          }
+        }
+        final resolved = value ?? message;
+        records.add(
+          MessageReconciliationRecord<V2TimMessage>(
+            value: resolved,
+            msgID: resolved.msgID,
+            localID: resolved.id,
+            outgoingStableID: readOutgoingStableId(resolved) ??
+                readOutgoingStableId(message) ??
+                resolved.id,
+            seq: resolved.seq,
+          ),
+        );
+      }
+      commitMessageDelta(
+        MessageDelta<V2TimMessage>(
+          conversationKey: convID,
+          eventID: 'realtime:self:batch:${++_nextRealtimeReconciliationEvent}:'
+              '${messages.map(messageDedupKey).join(',')}',
+          kind: MessageDeltaKind.optimisticAdoption,
+          source: MessageDeltaSource.sdkRealtime,
+          generation: messageDeltaGenerationFor(convID),
+          clearEpoch: messageDeltaClearEpochFor(convID),
+          upserts: records,
+        ),
+      );
+    }
+    if (ChatJitterDiag.enabled) {
+      final groupCount =
+          messages.where((message) => _isGroupLikeMessage(message)).length;
+      final c2cCount = messages
+          .where((message) => _isC2cConversationMessage(message))
+          .length;
+      ChatJitterDiag.log(
+        'inbound_batch_dedup',
+        conv: convID,
+        extras: <String, Object?>{
+          'count': messages.length,
+          'upserted': insertedMessages.length,
+          'duplicates': messages.length - insertedMessages.length,
+          'source': groupCount > 0 && c2cCount == 0
+              ? 'group'
+              : c2cCount > 0 && groupCount == 0
+                  ? 'c2c'
+                  : 'mixed',
+          'seqPresent': messages.any((message) => _messageSortSeq(message) > 0),
+        },
+      );
+    }
     return (
       inserted: inserted,
       lastInserted: lastInserted,
@@ -4653,11 +7182,51 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
             isOutgoingMediaCancelled(newMsg.msgID))) {
       return false;
     }
-    return _upsertIncomingMessage(
+    final result = _upsertIncomingMessage(
       convID,
       newMsg,
       forceSuccess: forceSuccess,
     );
+    final storageKey = _resolveMessageListStorageKey(convID);
+    if (storageKey.isEmpty ||
+        _messageReconciliationWriter.hasActiveRequest(storageKey)) {
+      return result;
+    }
+    // The mature self-send merge above preserves local media metadata and row
+    // order. Record its resulting authoritative value in the same writer so
+    // a later history page uses the exact server/stable identity boundary.
+    V2TimMessage? merged;
+    for (final item in _messageListMap[storageKey] ?? const <V2TimMessage>[]) {
+      if (_messageCorrelatesWithStored(item, newMsg)) {
+        merged = item;
+        break;
+      }
+    }
+    final value = merged ?? newMsg;
+    final stableIdentity =
+        readOutgoingStableId(value) ?? readOutgoingStableId(newMsg) ?? value.id;
+    commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: storageKey,
+        eventID:
+            'realtime:self:authoritative:${++_nextRealtimeReconciliationEvent}:'
+            '${messageDedupKey(value)}',
+        kind: MessageDeltaKind.optimisticAdoption,
+        source: MessageDeltaSource.sdkRealtime,
+        generation: messageDeltaGenerationFor(storageKey),
+        clearEpoch: messageDeltaClearEpochFor(storageKey),
+        upserts: <MessageReconciliationRecord<V2TimMessage>>[
+          MessageReconciliationRecord<V2TimMessage>(
+            value: value,
+            msgID: value.msgID,
+            localID: value.id,
+            outgoingStableID: stableIdentity,
+            seq: value.seq,
+          ),
+        ],
+      ),
+    );
+    return result;
   }
 
   void _syncGroupMemberFromMessage(V2TimMessage message) {
@@ -4717,6 +7286,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
   }
 
   _onReceiveNewMsg(V2TimMessage msgComing) async {
+    final lifecycleGeneration = _messageHistoryCoverageSessionGeneration;
     final initialConvID = _messageConversationID(msgComing);
     if (initialConvID == null || initialConvID.isEmpty) {
       return;
@@ -4730,6 +7300,17 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         outputLogger.i('newMessageWillMount error: $e');
         mountedMessage = msgComing;
       }
+    }
+    if (!_isMessageLifecycleCurrent(lifecycleGeneration)) {
+      ChatJitterDiag.log(
+        'message_inbound_drop_stale_lifecycle',
+        conv: initialConvID,
+        extras: <String, Object?>{
+          'generation': lifecycleGeneration,
+          'currentGeneration': _messageHistoryCoverageSessionGeneration,
+        },
+      );
+      return;
     }
     if (mountedMessage == null) {
       return;
@@ -4779,6 +7360,28 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (isActiveConversation && mountedMessage.isSelf == true) {
       _syncSelfSentMessage(convID, mountedMessage, forceSuccess: true);
       _markNeedsNotify();
+      return;
+    }
+
+    // Group seq gap detection: if the reorder buffer is active for this
+    // conversation, route through it so out-of-order messages are buffered
+    // and missing messages trigger a cloud catch-up. C2C seq has no global
+    // continuity so the buffer is never active for C2C.
+    final buffer = _reorderBuffersByConv[convID];
+    if (buffer != null && buffer.isActivated && convType == ConvType.group) {
+      final result = buffer.accept(mountedMessage);
+      if (result == null) {
+        // Buffered: out-of-order or gap detected, will be flushed later.
+        return;
+      }
+      if (result.isEmpty) {
+        // Duplicate (seq <= expected), silently dropped.
+        return;
+      }
+      // Contiguous: upsert immediately (may include drained buffer messages).
+      for (final msg in result) {
+        _inboundBatchCoalescer.enqueue(convID, msg);
+      }
       return;
     }
 
@@ -4861,7 +7464,54 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     for (final key in keys) {
       final activeMessageList = _messageListMap[key];
       if (activeMessageList == null || activeMessageList.isEmpty) {
+        // Keep the revoke authority even when the row is outside the current
+        // memory window. A later older-page response must not resurrect it.
+        commitMessageDelta(
+          MessageDelta<V2TimMessage>(
+            conversationKey: key,
+            eventID: 'revoke_tombstone:$targetMsgID:$key',
+            kind: MessageDeltaKind.revoke,
+            source: MessageDeltaSource.sdkRealtime,
+            generation: messageDeltaGenerationFor(key),
+            clearEpoch: messageDeltaClearEpochFor(key),
+            tombstones: <String>{targetMsgID},
+          ),
+        );
         continue;
+      }
+
+      final target = activeMessageList.cast<V2TimMessage?>().firstWhere(
+            (item) => item?.msgID == targetMsgID,
+            orElse: () => null,
+          );
+      if (target != null) {
+        final revoked = _cloneMessage(target);
+        revoked.status = MessageStatus.V2TIM_MSG_STATUS_LOCAL_REVOKED;
+        revoked.cloudCustomData =
+            _revokedCloudCustomData(revoked.cloudCustomData, isAdmin);
+        revoked.id ??= revoked.msgID;
+        final commit = commitMessageDelta(
+          MessageDelta<V2TimMessage>(
+            conversationKey: key,
+            eventID:
+                'revoke:$targetMsgID:${DateTime.now().microsecondsSinceEpoch}',
+            kind: MessageDeltaKind.revoke,
+            source: MessageDeltaSource.sdkRealtime,
+            generation: messageDeltaGenerationFor(key),
+            clearEpoch: messageDeltaClearEpochFor(key),
+            upserts: [messageDeltaRecord(revoked)],
+            tombstones: <String>{targetMsgID},
+          ),
+        );
+        if (commit != null) {
+          didUpdate = true;
+          continue;
+        }
+        if (_messageReconciliationWriter.hasActiveRequest(key)) {
+          // The revoke is queued in the active history generation; do not
+          // mutate the projection outside that transaction.
+          continue;
+        }
       }
 
       var changed = false;
@@ -4906,9 +7556,25 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       for (final messageKey in changedMessageKeys) {
         _chatUiStateStore.markMessageChanged(key, messageKey);
       }
-      _bumpMessageListRevisionFor(key);
+      final stage = _messageCommitCoordinator.stage(
+        MessageMutation(
+          conversationID: key,
+          type: MessageMutationType.removeOrRevoke,
+          generation: (_messageCommitGenerationByConv[key] ?? 0) + 1,
+          source: 'revoke',
+          stableIdentity: targetMsgID,
+        ),
+      );
+      if (stage.shouldAdvanceListRevision) {
+        _bumpMessageListRevisionFor(key);
+      }
       didUpdate = true;
     }
+
+    // The recalled row may already be outside the in-memory chat window while
+    // still present in the short gallery cache. Invalidate by server identity
+    // even when no visible row was updated, and across alias conversation keys.
+    ChatMediaGalleryExpandCache.removeMessage(targetMsgID);
 
     if (didUpdate) {
       // Revoke is a user-visible command. Refresh immediately like WeChat instead
@@ -4935,7 +7601,128 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     _markNeedsNotify();
   }
 
+  /// Commits media metadata that arrived after a history row was mounted.
+  ///
+  /// URL resolution usually mutates the SDK message object in place. A cloud
+  /// reconciliation can instead have cloned that row, so update the
+  /// authoritative row when identity matches and then use the existing
+  /// row-level revision channel. This keeps late media enrichment from
+  /// rebuilding or resorting the whole message window.
+  void mergeMessageMediaMetadata(
+    V2TimMessage resolved, {
+    String? conversationID,
+  }) {
+    final msgID = resolved.msgID?.trim() ?? '';
+    final clientID = resolved.id?.trim() ?? '';
+    if (msgID.isEmpty && clientID.isEmpty) {
+      return;
+    }
+
+    final explicitConversation = conversationID?.trim() ?? '';
+    String inferredConversation = explicitConversation;
+    if (inferredConversation.isEmpty) {
+      inferredConversation = resolved.userID?.trim() ?? '';
+    }
+    if (inferredConversation.isEmpty) {
+      inferredConversation = resolved.groupID?.trim() ?? '';
+    }
+    if (inferredConversation.isEmpty) {
+      try {
+        inferredConversation = resolved.messageConvID?.toString().trim() ?? '';
+      } catch (_) {}
+    }
+
+    // Explicit context is authoritative. Without it, userID/groupID is only
+    // a preference because self-sent C2C rows may carry the login user ID.
+    final allEntries = _messageListMap.entries.toList(growable: true);
+    final entries = explicitConversation.isNotEmpty
+        ? allEntries
+            .where(
+              (entry) => _isSameConversationID(entry.key, explicitConversation),
+            )
+            .toList(growable: true)
+        : allEntries.toList(growable: true);
+    if (explicitConversation.isEmpty && inferredConversation.isNotEmpty) {
+      entries.sort((left, right) {
+        final leftMatches =
+            _isSameConversationID(left.key, inferredConversation);
+        final rightMatches =
+            _isSameConversationID(right.key, inferredConversation);
+        if (leftMatches == rightMatches) {
+          return 0;
+        }
+        return leftMatches ? -1 : 1;
+      });
+    }
+    final visitedStorageKeys = <String>{};
+    var changed = false;
+    for (final entry in entries) {
+      final storageKey = _resolveMessageListStorageKey(entry.key);
+      if (!visitedStorageKeys.add(storageKey)) {
+        continue;
+      }
+      final current = _messageListMap[storageKey];
+      if (current == null || current.isEmpty) {
+        continue;
+      }
+      final index = current.indexWhere(
+        (candidate) =>
+            (msgID.isNotEmpty && candidate.msgID == msgID) ||
+            (clientID.isNotEmpty && candidate.id == clientID),
+      );
+      if (index < 0) {
+        continue;
+      }
+      final existing = current[index];
+      if (identical(existing, resolved)) {
+        _messageListDisplayCache.removeWhere(
+          (key, _) => _isSameConversationID(key, storageKey),
+        );
+        _markMessageRowChanged(
+          storageKey,
+          existing,
+          extraKey: msgID.isNotEmpty ? msgID : clientID,
+        );
+        changed = true;
+        continue;
+      }
+
+      final replacement = _cloneMessage(existing);
+      if (resolved.imageElem != null) {
+        replacement.imageElem = resolved.imageElem;
+      }
+      if (resolved.videoElem != null) {
+        replacement.videoElem = resolved.videoElem;
+      }
+      if (replacement.elemType == MessageElemType.V2TIM_ELEM_TYPE_NONE &&
+          resolved.elemType != MessageElemType.V2TIM_ELEM_TYPE_NONE) {
+        replacement.elemType = resolved.elemType;
+      }
+      final result = replaceMessageRowLocal(
+        conversationID: storageKey,
+        index: index,
+        expected: existing,
+        replacement: replacement,
+        aliases: <String?>[msgID, clientID],
+      );
+      if (result == RowLocalMessageReplacementResult.replaced) {
+        _messageListDisplayCache.removeWhere(
+          (key, _) => _isSameConversationID(key, storageKey),
+        );
+        changed = true;
+      }
+    }
+
+    // A metadata response may finish before the matching history window is
+    // committed. The row-level invalidation is harmless and lets a later
+    // alias-aware lookup rebuild the row as soon as it exists.
+    if (!changed && msgID.isNotEmpty) {
+      markMessageRowsChangedByMsgIDs(<String?>[msgID]);
+    }
+  }
+
   onMessageModified(V2TimMessage modifiedMessage, [String? convID]) async {
+    final lifecycleGeneration = _messageHistoryCoverageSessionGeneration;
     final String? exactId = TencentUtils.checkString(modifiedMessage.userID) ??
         TencentUtils.checkString(modifiedMessage.groupID);
     final rawConvID = convID ?? exactId;
@@ -4946,27 +7733,68 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (resolvedConvID.isEmpty) {
       return;
     }
-    if (modifiedMessage.isSelf == true &&
-        _syncSelfSentMessage(
-          resolvedConvID,
-          modifiedMessage,
-          forceSuccess: modifiedMessage.status ==
-              MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC,
-        )) {
-      _chatUiStateStore.markMessageChangedByMessage(
+    if (modifiedMessage.isSelf == true) {
+      final applied = _syncSelfSentMessage(
         resolvedConvID,
         modifiedMessage,
+        forceSuccess:
+            modifiedMessage.status == MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC,
       );
-      _markNeedsNotify();
+      if (applied) {
+        _chatUiStateStore.markMessageChangedByMessage(
+          resolvedConvID,
+          modifiedMessage,
+        );
+        _markNeedsNotify();
+      }
+      return;
+    }
+    final V2TimMessage newMsg =
+        await _lifeCycle?.modifiedMessageWillMount(modifiedMessage) ??
+            modifiedMessage;
+    if (!_isMessageLifecycleCurrent(lifecycleGeneration)) {
+      ChatJitterDiag.log(
+        'message_modified_drop_stale_lifecycle',
+        conv: resolvedConvID,
+        extras: <String, Object?>{
+          'generation': lifecycleGeneration,
+          'currentGeneration': _messageHistoryCoverageSessionGeneration,
+        },
+      );
+      return;
+    }
+    if (newMsg.isSelf != true) {
+      final msgID = newMsg.msgID?.trim() ?? '';
+      final clientId = newMsg.id?.trim() ?? '';
+      final editCommit = commitMessageDelta(
+        MessageDelta<V2TimMessage>(
+          conversationKey: resolvedConvID,
+          eventID: 'edit:${msgID.isNotEmpty ? msgID : clientId}:'
+              '${DateTime.now().microsecondsSinceEpoch}',
+          kind: MessageDeltaKind.edit,
+          source: MessageDeltaSource.sdkRealtime,
+          generation: messageDeltaGenerationFor(resolvedConvID),
+          clearEpoch: messageDeltaClearEpochFor(resolvedConvID),
+          upserts: [messageDeltaRecord(newMsg)],
+        ),
+      );
+      // The row may be outside the current memory window. The delta still
+      // needs to be remembered as an authoritative overlay so an older page
+      // cannot resurrect stale content. While history is in flight the delta
+      // is queued and must not be applied through the legacy direct writer.
+      if (editCommit != null ||
+          _messageReconciliationWriter.hasActiveRequest(resolvedConvID)) {
+        return;
+      }
+      // A null commit means the writer rejected a stale/duplicate/tombstoned
+      // edit. Never fall back to a direct list mutation in that case, or a
+      // deleted row could be reintroduced outside the authoritative state.
       return;
     }
     final activeMessageList = _messageListMap[resolvedConvID];
     if (activeMessageList == null || activeMessageList.isEmpty) {
       return;
     }
-    final V2TimMessage newMsg =
-        await _lifeCycle?.modifiedMessageWillMount(modifiedMessage) ??
-            modifiedMessage;
     final msgID = newMsg.msgID;
     final clientId = newMsg.id;
     var changed = false;
@@ -5083,11 +7911,19 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       for (var receipt in receiptList) {
         final msgID = receipt.msgID;
         if (msgID != null && msgID.isNotEmpty) {
+          // Some SDK versions report a fully-read receipt as
+          // unreadCount=0/readCount>0 while leaving isPeerRead=false.
+          // Normalize that combination so the chat message model and the
+          // conversation-list projection use the same read decision.
+          final fullyRead = receipt.isPeerRead == true ||
+              (receipt.unreadCount != null &&
+                  receipt.unreadCount == 0 &&
+                  (receipt.readCount ?? 0) > 0);
           final next = V2TimMessageReceipt(
             userID: receipt.userID,
             timestamp: _receiptTimestamp(receipt.timestamp),
             msgID: msgID,
-            isPeerRead: receipt.isPeerRead,
+            isPeerRead: fullyRead,
             readCount: receipt.readCount,
             unreadCount: receipt.unreadCount,
             groupID: receipt.groupID,
@@ -5355,33 +8191,89 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     required String convID,
     required ConvType convType,
   }) async {
+    ChatJitterDiag.log(
+      'active_read_report_start',
+      conv: convID,
+      extras: <String, Object?>{'convType': convType.name},
+    );
+    dynamic result;
     if (convType == ConvType.c2c) {
-      return _messageService.markC2CMessageAsRead(userID: convID);
-    }
-    if (kIsWeb) {
+      result = await _messageService.markC2CMessageAsRead(userID: convID);
+    } else if (kIsWeb) {
+      ChatJitterDiag.log(
+        'active_read_report_skip',
+        conv: convID,
+        extras: const <String, Object?>{'reason': 'web_group'},
+      );
       return null;
+    } else {
+      result = await _messageService.markGroupMessageAsRead(groupID: convID);
     }
-    return _messageService.markGroupMessageAsRead(groupID: convID);
+    ChatJitterDiag.log(
+      'active_read_report_done',
+      conv: convID,
+      extras: <String, Object?>{
+        'convType': convType.name,
+        'sdkCode': result?.code,
+        'sdkDesc': result?.desc,
+      },
+    );
+    return result;
   }
 
   void _scheduleActiveReadReport({
     required String convID,
     required ConvType convType,
   }) {
+    final lifecycleGeneration = _messageHistoryCoverageSessionGeneration;
     final normalizedConvID = _normalizeConversationID(convID);
     if (normalizedConvID.isEmpty) {
       return;
     }
 
     if (convType == ConvType.c2c) {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final last = _lastActiveReadReportAtMs[normalizedConvID] ?? 0;
+      final elapsed = now - last;
+      final delayMs = elapsed >= _activeReadReportMinIntervalMs
+          ? _activeReadReportDebounceMs
+          : _activeReadReportMinIntervalMs - elapsed;
       _activeReadReportDebounceMap[normalizedConvID]?.cancel();
       _activeReadReportDebounceMap[normalizedConvID] = Timer(
-        const Duration(milliseconds: 500),
-        () {
+        Duration(milliseconds: delayMs),
+        () async {
           _activeReadReportDebounceMap.remove(normalizedConvID);
-          if (_isSameConversationID(normalizedConvID, currentSelectedConv)) {
-            markMessageAsRead(convID: normalizedConvID, convType: convType);
+          if (!_isMessageLifecycleCurrent(lifecycleGeneration) ||
+              !_isSameConversationID(normalizedConvID, currentSelectedConv)) {
+            ChatJitterDiag.log(
+              'active_read_report_skip',
+              conv: normalizedConvID,
+              extras: const <String, Object?>{
+                'reason': 'lifecycle_or_conversation_changed',
+              },
+            );
+            return;
           }
+          if (_isSameConversationID(normalizedConvID, currentSelectedConv)) {
+            await markMessageAsRead(
+              convID: normalizedConvID,
+              convType: convType,
+            );
+            if (_isMessageLifecycleCurrent(lifecycleGeneration) &&
+                _isSameConversationID(normalizedConvID, currentSelectedConv)) {
+              _lastActiveReadReportAtMs[normalizedConvID] =
+                  DateTime.now().millisecondsSinceEpoch;
+            }
+          }
+        },
+      );
+      ChatJitterDiag.log(
+        'active_read_report_scheduled',
+        conv: normalizedConvID,
+        extras: <String, Object?>{
+          'convType': 'c2c',
+          'delayMs': delayMs,
+          'elapsedMs': elapsed,
         },
       );
       return;
@@ -5403,12 +8295,32 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       Duration(milliseconds: delayMs),
       () async {
         _activeReadReportDebounceMap.remove(normalizedConvID);
-        if (!_isSameConversationID(normalizedConvID, currentSelectedConv)) {
+        if (!_isMessageLifecycleCurrent(lifecycleGeneration) ||
+            !_isSameConversationID(normalizedConvID, currentSelectedConv)) {
+          ChatJitterDiag.log(
+            'active_read_report_skip',
+            conv: normalizedConvID,
+            extras: const <String, Object?>{
+              'reason': 'lifecycle_or_conversation_changed',
+            },
+          );
           return;
         }
         await markMessageAsRead(convID: normalizedConvID, convType: convType);
-        _lastActiveReadReportAtMs[normalizedConvID] =
-            DateTime.now().millisecondsSinceEpoch;
+        if (_isMessageLifecycleCurrent(lifecycleGeneration) &&
+            _isSameConversationID(normalizedConvID, currentSelectedConv)) {
+          _lastActiveReadReportAtMs[normalizedConvID] =
+              DateTime.now().millisecondsSinceEpoch;
+        }
+      },
+    );
+    ChatJitterDiag.log(
+      'active_read_report_scheduled',
+      conv: normalizedConvID,
+      extras: <String, Object?>{
+        'convType': 'group',
+        'delayMs': delayMs,
+        'elapsedMs': elapsed,
       },
     );
   }
@@ -5461,7 +8373,6 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     String? localCustomData,
   }) {
     final TUIChatModelTools tools = serviceLocator<TUIChatModelTools>();
-    List<V2TimMessage> currentHistoryMsgList = _messageListMap[convID] ?? [];
     if (messageInfo != null) {
       final messageInfoWithSender = messageInfo.sender == null
           ? tools.setUserInfoForMessage(messageInfo, messageInfo.id!)
@@ -5470,8 +8381,17 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       markMessageEnterAnimation(messageInfoWithSender);
       prepareForOutgoingMessage(convID);
       assignOutgoingLocalSeq(convID, messageInfoWithSender);
-      currentHistoryMsgList = [messageInfoWithSender, ...currentHistoryMsgList];
-      setMessageList(convID, currentHistoryMsgList);
+      commitMessageDelta(
+        MessageDelta<V2TimMessage>(
+          conversationKey: convID,
+          eventID: 'optimistic:controller:${messageInfoWithSender.id ?? ''}',
+          kind: MessageDeltaKind.optimisticInsert,
+          source: MessageDeltaSource.sendPipeline,
+          generation: messageDeltaGenerationFor(convID),
+          clearEpoch: messageDeltaClearEpochFor(convID),
+          upserts: [messageDeltaRecord(messageInfoWithSender)],
+        ),
+      );
       requestPinToBottom(convID, force: true);
       if (loadingMessage[convID] != null &&
           loadingMessage[convID]!.isNotEmpty) {
@@ -5517,7 +8437,6 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       return null;
     }
     final TUIChatModelTools tools = serviceLocator<TUIChatModelTools>();
-    List<V2TimMessage> currentHistoryMsgList = _messageListMap[convID] ?? [];
     V2TimMsgCreateInfoResult? textMessageInfo =
         await _messageService.createTextMessage(text: text);
 
@@ -5557,8 +8476,17 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       markMessageEnterAnimation(messageInfoWithSender);
       prepareForOutgoingMessage(convID);
       assignOutgoingLocalSeq(convID, messageInfoWithSender);
-      currentHistoryMsgList = [messageInfoWithSender, ...currentHistoryMsgList];
-      setMessageList(convID, currentHistoryMsgList);
+      commitMessageDelta(
+        MessageDelta<V2TimMessage>(
+          conversationKey: convID,
+          eventID: 'optimistic:reply:${messageInfoWithSender.id ?? ''}',
+          kind: MessageDeltaKind.optimisticInsert,
+          source: MessageDeltaSource.sendPipeline,
+          generation: messageDeltaGenerationFor(convID),
+          clearEpoch: messageDeltaClearEpochFor(convID),
+          upserts: [messageDeltaRecord(messageInfoWithSender)],
+        ),
+      );
       requestPinToBottom(convID, force: true);
       if (loadingMessage[convID] != null &&
           loadingMessage[convID]!.isNotEmpty) {
@@ -6005,11 +8933,12 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     String? anchorMsgID,
     String? anchorSeq,
     bool forcePreferLatest = false,
+    bool forceWhileReadingHistory = false,
   }) {
     if (!ChatMessageWindowPolicy.enabled) {
       return sorted;
     }
-    if (isMemoryWindowSuppressed(conversationID)) {
+    if (isMemoryWindowSuppressed(conversationID) && !forceWhileReadingHistory) {
       ChatJitterDiag.log(
         'memory_window',
         conv: conversationID,
@@ -6021,7 +8950,8 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       );
       return sorted;
     }
-    if (_shouldFreezeMemoryWindowTrimWhileReadingHistory(conversationID)) {
+    if (!forceWhileReadingHistory &&
+        _shouldFreezeMemoryWindowTrimWhileReadingHistory(conversationID)) {
       ChatJitterDiag.log(
         'memory_window',
         conv: conversationID,
@@ -6067,6 +8997,27 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (result.trimmedAwayLatest) {
       markMemoryWindowMissingNewer(conversationID);
     }
+    if (result.trimmedAwayOldestInMemory) {
+      markMemoryWindowMissingOlder(conversationID);
+    }
+    final retainedBoundary = result.list.isEmpty
+        ? 0
+        : (preferLatest
+            ? (result.list.last.timestamp ?? 0)
+            : (result.list.first.timestamp ?? 0));
+    if (retainedBoundary > 0) {
+      _memoryWindowBoundaryTimestampByConv[conversationID.trim()] =
+          retainedBoundary;
+    }
+    final retainedSeq = result.list.isEmpty
+        ? ''
+        : (preferLatest
+            ? (result.list.last.seq ?? '')
+            : (result.list.first.seq ?? ''));
+    if (retainedSeq.trim().isNotEmpty) {
+      _memoryWindowBoundarySeqByConv[conversationID.trim()] =
+          retainedSeq.trim();
+    }
     // 注意：preferLatest 只表示「保留当前内存里的最新端」，不等于全局最新。
     // missingNewer 只能在真正 loadLatest 到底 / reloadNewest 成功后清除。
     ChatHistoryTrace.log(
@@ -6104,7 +9055,148 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     return result.list;
   }
 
-  void setMessageList(String conversationID, List<V2TimMessage> messageList,
+  String _commitSnapshotIdentity(V2TimMessage message) {
+    final key = messageDedupKey(message).trim();
+    if (key.isNotEmpty) return key;
+    final msgID = message.msgID?.trim() ?? '';
+    if (msgID.isNotEmpty) return 'msg:$msgID';
+    final id = message.id?.trim() ?? '';
+    if (id.isNotEmpty) return 'id:$id';
+    return 'wire:${message.timestamp ?? 0}:${message.random ?? 0}';
+  }
+
+  bool _messageCommitStructureChanged(
+    List<V2TimMessage> previous,
+    List<V2TimMessage> next,
+  ) {
+    if (previous.length != next.length) return true;
+    for (var index = 0; index < previous.length; index++) {
+      if (_commitSnapshotIdentity(previous[index]) !=
+          _commitSnapshotIdentity(next[index])) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool _memoryWindowMissingOlder(String conversationID) =>
+      _memoryWindowMissingOlderByConv.entries.any(
+        (entry) =>
+            entry.value && _isSameConversationID(entry.key, conversationID),
+      );
+
+  /// Public accessor: true when the memory window was trimmed on the older
+  /// side and the user can scroll up to load more (haveMoreData must be true).
+  bool memoryWindowMissingOlder(String conversationID) =>
+      _memoryWindowMissingOlder(conversationID);
+
+  /// C2C lastMessage verification: when onConversationChanged arrives with
+  /// a lastMessage that is not in the active C2C chat's visible list,
+  /// the onRecvNewMessage push was lost. Trigger a CLOUD_NEWER catch-up.
+  void verifyC2CLastMessage(List<V2TimConversation> conversations) {
+    final activeConv = currentSelectedConv;
+    if (activeConv.isEmpty) return;
+    for (final conv in conversations) {
+      final convIdRaw = (conv.conversationID ?? '').trim();
+      if (!convIdRaw.toLowerCase().startsWith('c2c')) continue;
+      final convID = _resolveMessageListStorageKey(conv.conversationID ?? '');
+      if (!_isSameConversationID(convID, activeConv)) continue;
+      final lastMsg = conv.lastMessage;
+      if (lastMsg == null) continue;
+      final lastMsgID = (lastMsg.msgID ?? lastMsg.id ?? '').trim();
+      if (lastMsgID.isEmpty) continue;
+      final list = _messageListMap[convID] ??
+          _messageListMap[_resolveMessageListStorageKey(convID)];
+      if (list == null || list.isEmpty) continue;
+      bool found = false;
+      for (final msg in list) {
+        final msgID = (msg.msgID ?? msg.id ?? '').trim();
+        if (msgID.isNotEmpty && msgID == lastMsgID) {
+          found = true;
+          break;
+        }
+      }
+      if (!found && !_gapCatchUpInFlight.contains(convID)) {
+        _gapCatchUpInFlight.add(convID);
+        unawaited(_c2cLastMessageCatchUp(convID, activeConv));
+      }
+    }
+  }
+
+  Future<void> _c2cLastMessageCatchUp(String convID, String rawConvID) async {
+    await reconcileConversationCloud(
+      rawConvID.isEmpty ? convID : rawConvID,
+      reason: 'c2c_preview_ahead',
+    );
+    _gapCatchUpInFlight.remove(convID);
+  }
+
+  /// Clears the missing-older flag so haveMoreData reflects only the SDK
+  /// pagination state.
+  void clearMemoryWindowMissingOlder(String conversationID) {
+    final keys = _memoryWindowMissingOlderByConv.keys
+        .where((k) => _isSameConversationID(k, conversationID))
+        .toList(growable: false);
+    for (final key in keys) {
+      _memoryWindowMissingOlderByConv.remove(key);
+    }
+  }
+
+  MessageCommitResult _messageCommitSnapshot({
+    required String conversationID,
+    required String storageKey,
+    required List<V2TimMessage> list,
+    required bool structureChanged,
+    required bool contentChanged,
+    required bool recordCommit,
+  }) {
+    if (recordCommit) {
+      _messageCommitGenerationByConv[storageKey] =
+          (_messageCommitGenerationByConv[storageKey] ?? 0) + 1;
+      _messageCommitTokenByConv[storageKey] = ++_nextMessageCommitToken;
+    }
+    final projectionKey = _inboundStateKey(conversationID);
+    final unreadState = _inboundUnreadStateFor(projectionKey, create: false);
+    return MessageCommitResult(
+      conversationID: storageKey,
+      token: _messageCommitTokenByConv[storageKey] ?? 0,
+      generation: _messageCommitGenerationByConv[storageKey] ?? 0,
+      listRevision: messageListRevisionFor(storageKey),
+      projectionRevision: messageProjectionRevisionFor(conversationID),
+      rawCount: list.length,
+      firstIdentity: list.isEmpty ? null : _commitSnapshotIdentity(list.first),
+      lastIdentity: list.isEmpty ? null : _commitSnapshotIdentity(list.last),
+      memoryWindowMissingNewer: memoryWindowMissingNewer(conversationID),
+      memoryWindowMissingOlder: _memoryWindowMissingOlder(conversationID),
+      memoryWindowSuppressed: isMemoryWindowSuppressed(conversationID),
+      unreadBufferedCount: unreadState.bufferedMessageKeys.length,
+      unreadProjectionHeld:
+          _deferredUntilUserBottomConversations.contains(projectionKey),
+      structureChanged: structureChanged,
+      contentChanged: contentChanged,
+    );
+  }
+
+  bool isMessageCommitCurrent(MessageCommitResult result) {
+    final key = canonicalHistoryStorageKey(result.conversationID);
+    final storageKey = key.isNotEmpty ? key : result.conversationID.trim();
+    return (_messageCommitTokenByConv[storageKey] ?? 0) == result.token &&
+        (_messageCommitGenerationByConv[storageKey] ?? 0) == result.generation;
+  }
+
+  MessageMutationType _messageMutationTypeForCommit({
+    required bool replace,
+    required bool isDeleteMsg,
+    required bool structureChanged,
+  }) {
+    if (replace) return MessageMutationType.historyWindow;
+    if (isDeleteMsg) return MessageMutationType.removeOrRevoke;
+    if (structureChanged) return MessageMutationType.reorder;
+    return MessageMutationType.contentOrMedia;
+  }
+
+  MessageCommitResult setMessageList(
+      String conversationID, List<V2TimMessage> messageList,
       {bool needResetNewMessageCount = true,
       bool isDeleteMsg = false,
 
@@ -6117,6 +9209,9 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       /// true：强制保留最新端窗口（loadLatest / 回底补窗）。
       bool memoryWindowPreferLatest = false,
 
+      /// true：显式分页收尾时允许按锚点收束读历史窗口。
+      bool forceMemoryWindowTrimWhileReading = false,
+
       /// 覆盖全局挂起的窗口锚点。
       String? memoryWindowAnchorMsgID,
       String? memoryWindowAnchorSeq,
@@ -6125,6 +9220,12 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     final canonical = canonicalHistoryStorageKey(conversationID);
     final storageKey = canonical.isNotEmpty ? canonical : conversationID.trim();
     final previous = _mergedAliasMessageList(conversationID);
+    if (replace) {
+      // Do this before the equivalent-window fast path as well. A replace can
+      // carry no content delta while still superseding a pending presentation
+      // transaction that has hidden rows in the projection.
+      cancelInboundProjectionRevealForAuthoritativeReplace(conversationID);
+    }
     if (skipEquivalentHistoryWindow &&
         replace &&
         !isDeleteMsg &&
@@ -6134,7 +9235,18 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       final commitSignature = '$historyCommitSource|$incomingSignature';
       if (previousSignature == incomingSignature &&
           _historyWindowCommitSignatureByConv[storageKey] == commitSignature) {
-        return;
+        if (replace &&
+            _revealAllDeferredProjectionAcrossAliases(conversationID)) {
+          _markNeedsNotify();
+        }
+        return _messageCommitSnapshot(
+          conversationID: conversationID,
+          storageKey: storageKey,
+          list: previous,
+          structureChanged: false,
+          contentChanged: false,
+          recordCommit: false,
+        );
       }
       _historyWindowCommitSignatureByConv[storageKey] = commitSignature;
     }
@@ -6219,12 +9331,33 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
           }
         }
         if (applyMemoryWindow && !isDeleteMsg) {
+          // Only group Seq provides protocol-level continuity. A detected
+          // range is repaired through the bounded reconciliation writer;
+          // synchronization state never enters the message list as a marker.
+          final isGroup = _isGroupConversation(
+            storageKey,
+            messages: result,
+          );
+          final gaps = isGroup
+              ? GapDetector.detectGaps(
+                  newestFirst: result,
+                  isGroup: true,
+                  fullScan: true,
+                )
+              : const <GapInfo>[];
+          if (isGroup) {
+            _clearResolvedGroupGapAttempts(storageKey, gaps);
+          }
+          if (gaps.isNotEmpty) {
+            _requestDetectedGroupGapCatchUp(storageKey, gaps.first);
+          }
           result = _applyMessageMemoryWindow(
             conversationID,
             result,
             anchorMsgID: memoryWindowAnchorMsgID,
             anchorSeq: memoryWindowAnchorSeq,
             forcePreferLatest: memoryWindowPreferLatest,
+            forceWhileReadingHistory: forceMemoryWindowTrimWhileReading,
           );
         }
         if (!isDeleteMsg && previous.isNotEmpty) {
@@ -6343,7 +9476,9 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     var signature = _messageListContentSignature(sorted);
     var signatureChanged =
         _messageListContentSignatureByConv[storageKey] != signature;
+    final structureChanged = _messageCommitStructureChanged(previous, sorted);
     if (!signatureChanged && !isDeleteMsg && !_listHasCorrelatingDup(sorted)) {
+      ChatMainThreadPerf.increment('message_list_noop_commit');
       // 列表语义未变：仍补种行高供短历史估 spacer，但不掀翻 UI。
       if (OutgoingVisibleProbe.matches(conversationID) ||
           OutgoingVisibleProbe.matches(storageKey)) {
@@ -6371,7 +9506,14 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       if (projectionChanged) {
         _markNeedsNotify();
       }
-      return;
+      return _messageCommitSnapshot(
+        conversationID: conversationID,
+        storageKey: storageKey,
+        list: sorted,
+        structureChanged: structureChanged,
+        contentChanged: false,
+        recordCommit: true,
+      );
     }
 
     _messageListMap[storageKey] = sorted;
@@ -6382,11 +9524,30 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     // 首屏 / 增量写入时补种缺省行高，避免冷进页 short-history 全靠常量估算。
     ChatMessageHeightCache.instance.seedEstimatesForMessages(sorted);
     _messageListContentSignatureByConv[storageKey] = signature;
-    _bumpMessageListRevisionFor(
-      storageKey,
-      reason:
-          isDeleteMsg ? 'setMessageList_delete' : 'setMessageList_signature',
+    final commitStage = _messageCommitCoordinator.stage(
+      MessageMutation(
+        conversationID: storageKey,
+        type: _messageMutationTypeForCommit(
+          replace: replace,
+          isDeleteMsg: isDeleteMsg,
+          structureChanged: structureChanged,
+        ),
+        generation: (_messageCommitGenerationByConv[storageKey] ?? 0) + 1,
+        source: historyCommitSource,
+        expectedFirstIdentity:
+            sorted.isEmpty ? null : _commitSnapshotIdentity(sorted.first),
+        expectedLastIdentity:
+            sorted.isEmpty ? null : _commitSnapshotIdentity(sorted.last),
+      ),
     );
+    ChatMainThreadPerf.increment('message_list_structural_commit');
+    if (commitStage.shouldAdvanceListRevision) {
+      _bumpMessageListRevisionFor(
+        storageKey,
+        reason:
+            isDeleteMsg ? 'setMessageList_delete' : 'setMessageList_signature',
+      );
+    }
     // bump 对 setMessageList_* 不再清签名；此处再写一次以防旧调用路径。
     _messageListContentSignatureByConv[storageKey] = signature;
     if (needResetNewMessageCount && !holdUntilUserBottom) {
@@ -6430,6 +9591,14 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     }
 
     _markNeedsNotify();
+    return _messageCommitSnapshot(
+      conversationID: conversationID,
+      storageKey: storageKey,
+      list: sorted,
+      structureChanged: structureChanged,
+      contentChanged: true,
+      recordCommit: true,
+    );
   }
 
   V2TimMessage _cloneMessage(V2TimMessage message) {
@@ -6455,6 +9624,24 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     );
   }
 
+  bool _isRowLocalOutgoingMediaReceipt(
+    V2TimMessage? previous,
+    V2TimMessage replacement,
+  ) {
+    if (previous == null ||
+        previous.isSelf != true ||
+        replacement.isSelf != true ||
+        previous.elemType != replacement.elemType) {
+      return false;
+    }
+    return const <int>{
+      MessageElemType.V2TIM_ELEM_TYPE_IMAGE,
+      MessageElemType.V2TIM_ELEM_TYPE_VIDEO,
+      MessageElemType.V2TIM_ELEM_TYPE_FILE,
+      MessageElemType.V2TIM_ELEM_TYPE_SOUND,
+    }.contains(replacement.elemType);
+  }
+
   updateMessage(
       V2TimValueCallback<V2TimMessage> sendMsgRes,
       String convID,
@@ -6471,10 +9658,10 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     // Always set the correct status based on send result
     if (sendMsgRes.code == 0) {
       resolvedMessage.status = MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC;
-      setMessageProgress(id, 100);
+      _setUploadProgressSilently(id, 100);
       final resolvedMsgID = resolvedMessage.msgID?.trim();
       if (resolvedMsgID != null && resolvedMsgID.isNotEmpty) {
-        setMessageProgress(resolvedMsgID, 100);
+        _setUploadProgressSilently(resolvedMsgID, 100);
       }
     } else {
       resolvedMessage.status = MessageStatus.V2TIM_MSG_STATUS_SEND_FAIL;
@@ -6484,6 +9671,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     }
     final targetIndex =
         _findMessageIndexForUpdate(currentHistoryMsgList, id, resolvedMessage);
+    final originalRowCount = currentHistoryMsgList.length;
     if (sendMsgRes.code != 0 &&
         resolvedMessage.status == MessageStatus.V2TIM_MSG_STATUS_SEND_FAIL) {
       ErrorMessageConverter.attachSendFailCode(
@@ -6520,9 +9708,9 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
           localCustomData: resolvedMessage.localCustomData ?? '',
         );
       }
-      clearUploadProgress(resolvedId);
+      _clearUploadProgressSilently(resolvedId);
       if (resolvedMsgID != null && resolvedMsgID.isNotEmpty) {
-        clearUploadProgress(resolvedMsgID);
+        _clearUploadProgressSilently(resolvedMsgID);
       }
       _migrateFileMessageMetadata(id, resolvedMsgID);
       if (resolvedMessage.elemType == MessageElemType.V2TIM_ELEM_TYPE_IMAGE) {
@@ -6558,6 +9746,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         return false;
       }).toList();
     }
+    final collapsedDuplicate = currentHistoryMsgList.length < originalRowCount;
     if (loadingMessage[storageConvID] != null &&
         loadingMessage[storageConvID]!.isNotEmpty) {
       loadingMessage[storageConvID]!.removeWhere((element) => element.id == id);
@@ -6569,12 +9758,102 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
           V2TimMessageReceipt(timestamp: 0, userID: "", readCount: 0);
     }
     _registerSoundLocalPath(resolvedMessage);
+    final stableIdentity =
+        readOutgoingStableId(previousForMerge)?.trim().isNotEmpty == true
+            ? readOutgoingStableId(previousForMerge)!.trim()
+            : readOutgoingStableId(resolvedMessage)?.trim().isNotEmpty == true
+                ? readOutgoingStableId(resolvedMessage)!.trim()
+                : id.trim();
+    final adoptionRecord = MessageReconciliationRecord<V2TimMessage>(
+      value: resolvedMessage,
+      msgID: resolvedMessage.msgID,
+      localID: resolvedMessage.id,
+      outgoingStableID: stableIdentity,
+      seq: resolvedMessage.seq,
+    );
+    final authoritativeSendCommit = commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: storageConvID,
+        eventID: 'send_adoption:$stableIdentity:${resolvedMessage.msgID ?? ''}',
+        kind: MessageDeltaKind.optimisticAdoption,
+        source: MessageDeltaSource.sendPipeline,
+        generation: messageDeltaGenerationFor(storageConvID),
+        clearEpoch: messageDeltaClearEpochFor(storageConvID),
+        upserts: [adoptionRecord],
+      ),
+    );
+    if (authoritativeSendCommit != null) {
+      ChatMessageHeightCache.instance.rememberAlias(
+        id,
+        resolvedMessage.msgID,
+      );
+      if (resolvedMessage.msgID?.isNotEmpty == true) {
+        _clearUploadProgressSilently(resolvedMessage.msgID!);
+      }
+      _markNeedsNotify();
+      return;
+    }
+    if (targetIndex != -1 &&
+        !collapsedDuplicate &&
+        stableIdentity.isNotEmpty &&
+        _isRowLocalOutgoingMediaReceipt(
+          previousForMerge,
+          resolvedMessage,
+        )) {
+      final rowResult = replaceMessageRowByStableIdentity(
+        conversationID: storageConvID,
+        stableIdentity: stableIdentity,
+        replacement: resolvedMessage,
+        aliases: <String?>[
+          id,
+          previousForMerge?.id,
+          previousForMerge?.msgID,
+          resolvedMessage.id,
+          resolvedMessage.msgID,
+          previousForMerge?.imageElem?.path,
+          resolvedMessage.imageElem?.path,
+        ],
+      );
+      if (rowResult == RowLocalMessageReplacementResult.replaced) {
+        ChatMessageHeightCache.instance.rememberAlias(
+          id,
+          resolvedMessage.msgID,
+        );
+        final knownHeight =
+            ChatMessageHeightCache.instance.heightFor(resolvedMessage);
+        if (knownHeight != null && knownHeight > 0) {
+          ChatMessageHeightCache.instance.remember(
+            resolvedMessage,
+            knownHeight,
+          );
+        }
+        _logOutgoingSendOrder(
+          event: 'send_done',
+          convID: storageConvID,
+          message: resolvedMessage,
+          clientId: id,
+          mergePath: 'row_local_stable_identity',
+          existingIndex: targetIndex,
+          reordered: false,
+        );
+        return;
+      }
+      OutgoingVisibleProbe.log(
+        'send_done_row_local_fallback',
+        conversationID: storageConvID,
+        message: resolvedMessage,
+        extras: <String, Object?>{'result': rowResult.name},
+      );
+    }
     // 占位符原位回填：优先保留点击顺序；但必须让展示层按最新时间戳重排。
-    final shouldSort = targetIndex == -1;
-    if (shouldSort) {
+    final insertedRow = targetIndex == -1;
+    var reordered = false;
+    if (insertedRow) {
       currentHistoryMsgList = sortMessagesNewestFirst(currentHistoryMsgList);
+      reordered = true;
     } else if (!isNewestFirstStorageOrderValid(currentHistoryMsgList)) {
       currentHistoryMsgList = sortMessagesNewestFirst(currentHistoryMsgList);
+      reordered = true;
     }
     _messageListMap[storageConvID] = currentHistoryMsgList;
     _chatUiStateStore.bindMessageAlias(
@@ -6593,12 +9872,17 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       ChatMessageHeightCache.instance.remember(resolvedMessage, knownHeight);
     }
     _markMessageRowChanged(storageConvID, resolvedMessage, extraKey: id);
-    // 无论是否整表 sort，都 bump revision 清掉展示缓存，避免旧顺序+新时间戳错乱。
-    _bumpMessageListRevisionFor(
-      storageConvID,
-      reason:
-          shouldSort ? 'send_done_insert_sort' : 'send_done_inplace_invalidate',
-    );
+    final structuralChange = insertedRow || collapsedDuplicate || reordered;
+    if (structuralChange) {
+      _bumpMessageListRevisionFor(
+        storageConvID,
+        reason: insertedRow
+            ? 'send_done_insert_sort'
+            : collapsedDuplicate
+                ? 'send_done_duplicate_collapse'
+                : 'send_done_reorder',
+      );
+    }
     _logOutgoingSendOrder(
       event: 'send_done',
       convID: storageConvID,
@@ -6606,8 +9890,13 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       clientId: id,
       mergePath: targetIndex != -1 ? 'update_replace' : 'update_insert',
       existingIndex: targetIndex,
-      reordered: shouldSort,
+      reordered: reordered,
     );
+    // 同位回执只由 ChatUiStateStore 通知该行；不发全局 notify，
+    // 也不请求贴底，避免用户正在上滑时被拉回底部。
+    if (!structuralChange) {
+      return;
+    }
     // 发送后 350ms suppress 窗口内推迟整表 notify，让 list-push 先播完。
     if (targetIndex != -1 && shouldSuppressOutgoingPinScroll()) {
       Future<void>.delayed(const Duration(milliseconds: 380), () {
@@ -6615,6 +9904,44 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       });
     } else {
       _markNeedsNotify();
+    }
+  }
+
+  /// Marks an optimistic outgoing message as SEND_FAIL when the commit guard
+  /// rejected the send (e.g. conversation switched during async media prep).
+  /// Finds the message by temporary client [id], updates its status, and
+  /// stamps [localCustomData] with guard_dropped so the UI can show a retry.
+  void markOutgoingGuardDropped({
+    required String conversationID,
+    required String clientId,
+    String? localCustomData,
+  }) {
+    final storageConvID = _resolveMessageListStorageKey(conversationID);
+    final list = _messageListMap[storageConvID];
+    if (list == null || list.isEmpty) {
+      return;
+    }
+    final changedKeys = <String>{};
+    var changed = false;
+    _messageListMap[storageConvID] = list.map((item) {
+      if (item.id == clientId) {
+        final cloned = _cloneMessage(item);
+        cloned.status = MessageStatus.V2TIM_MSG_STATUS_SEND_FAIL;
+        if (localCustomData != null) {
+          cloned.localCustomData = localCustomData;
+        }
+        changedKeys.add(ChatUiStateStore.messageKeyOf(item));
+        changedKeys.add(ChatUiStateStore.messageKeyOf(cloned));
+        changed = true;
+        return cloned;
+      }
+      return item;
+    }).toList();
+    if (changed) {
+      _chatUiStateStore.markMessagesChanged(storageConvID, changedKeys);
+      if (storageConvID == currentSelectedConv) {
+        _markNeedsNotify();
+      }
     }
   }
 
@@ -6761,7 +10088,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       return 0;
     }
     final suffix = msgID.substring(colon + 1);
-    if (!_digitsOnlyReg.hasMatch(suffix)) {
+    if (!_isAllAsciiDigits(suffix)) {
       return 0;
     }
     return int.tryParse(suffix) ?? 0;
@@ -6855,6 +10182,18 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     // timestamps can be non-monotonic while seq stays ordered (see logs). In
     // C2C chats seq is per-sender and NOT chronological, so it must not be used
     // here — fall through to timestamp ordering instead.
+    final batchA = readChatMediaBatchId(a);
+    final batchB = readChatMediaBatchId(b);
+    final batchIndexA = readChatMediaBatchIndex(a);
+    final batchIndexB = readChatMediaBatchIndex(b);
+    if (batchA != null &&
+        batchA == batchB &&
+        batchIndexA != null &&
+        batchIndexB != null &&
+        batchIndexA != batchIndexB) {
+      return batchIndexA.compareTo(batchIndexB);
+    }
+
     final aGroupSeq = !aLocalTimeline && _hasGroupSeqOrdering(a);
     final bGroupSeq = !bLocalTimeline && _hasGroupSeqOrdering(b);
     if (aGroupSeq && bGroupSeq) {
@@ -6924,25 +10263,69 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       ..sort(compareMessagesChronological);
   }
 
-  static final RegExp _digitsOnlyReg = RegExp(r'^\d+$');
-  static final RegExp _sdkMsgIdPrefixDigitDashReg = RegExp(r'^\d{6,}-');
-  static final RegExp _sdkUserMsgIdShapeReg =
-      RegExp(r'^[A-Za-z0-9_-]+-\d+-\d+$');
+  /// 缓存 _isLikelyTencentSdkMsgId 结果——控制台日志显示历史拉取后
+  /// 该函数被调用 160 万次。纯函数 + msgID 不变，适合 LRU 缓存。
+  static final LinkedHashMap<String, bool> _likelySdkMsgIdCache =
+      LinkedHashMap<String, bool>();
+  static const int _likelySdkMsgIdCacheCap = 8192;
 
   /// 腾讯 SDK / 端上自消息 msgID（数字 TIM id 或 `userId-ts-random`；非归档 `@TGS#:seq`）。
   static bool _isLikelyTencentSdkMsgId(String? msgID) {
-    return RegExpProbe.measure('msgId.isLikelySdk', () {
-      final id = msgID?.trim() ?? '';
-      if (id.isEmpty) {
-        return false;
-      }
-      if (_sdkMsgIdPrefixDigitDashReg.hasMatch(id)) {
+    final id = msgID?.trim() ?? '';
+    if (id.isEmpty) {
+      return false;
+    }
+    final cached = _likelySdkMsgIdCache[id];
+    if (cached != null) {
+      RegExpProbe.recordCacheHit('msgId.isLikelySdk');
+      _likelySdkMsgIdCache.remove(id);
+      _likelySdkMsgIdCache[id] = cached;
+      return cached;
+    }
+    RegExpProbe.recordCacheMiss('msgId.isLikelySdk');
+    final result = RegExpProbe.measure('msgId.isLikelySdk', () {
+      // These two checks intentionally mirror the old anchored regexes, but
+      // avoid invoking the RegExp interpreter for the high-volume identity
+      // comparator. The prefix check accepts malformed-but-prefixed SDK IDs
+      // exactly as `^\d{6,}-` did.
+      if (_hasDigitDashPrefix(id)) {
         return true;
       }
       // 自消息常见：`q14gkm5swv-1785731054-174908238`
-      return _sdkUserMsgIdShapeReg.hasMatch(id) &&
-          !_isArchiveUnderscoreMsgId(id);
+      return _matchesUserIdDashShape(id) && !_isArchiveUnderscoreMsgId(id);
     });
+    _likelySdkMsgIdCache[id] = result;
+    while (_likelySdkMsgIdCache.length > _likelySdkMsgIdCacheCap) {
+      _likelySdkMsgIdCache.remove(_likelySdkMsgIdCache.keys.first);
+    }
+    return result;
+  }
+
+  static bool _hasDigitDashPrefix(String id) {
+    var index = 0;
+    while (index < id.length) {
+      final code = id.codeUnitAt(index);
+      if (code < 0x30 || code > 0x39) {
+        break;
+      }
+      index++;
+    }
+    return index >= 6 && index < id.length && id.codeUnitAt(index) == 0x2d;
+  }
+
+  /// Fast structural equivalent of `^[A-Za-z0-9_-]+-\d+-\d+$`.
+  static bool _matchesUserIdDashShape(String id) {
+    final last = id.lastIndexOf('-');
+    if (last <= 0 || last == id.length - 1) {
+      return false;
+    }
+    final middle = id.lastIndexOf('-', last - 1);
+    if (middle <= 0 || middle == last - 1) {
+      return false;
+    }
+    return _isUserIdWireHead(id.substring(0, middle)) &&
+        _isAllAsciiDigits(id.substring(middle + 1, last)) &&
+        _isAllAsciiDigits(id.substring(last + 1));
   }
 
   /// `seq_random_ts` 归档 msgID：`^(\d+)_(\d+)_(\d+)$`（结构匹配，对齐旧 hasMatch）。
@@ -7574,27 +10957,20 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if ((aArchive && bSdk) || (bArchive && aSdk)) {
       return true;
     }
-    if (!_isGroupLikeMessage(a) || !_isGroupLikeMessage(b)) {
-      return false;
-    }
-    final tokenA = _normalizedGroupIdForMessage(a);
-    final tokenB = _normalizedGroupIdForMessage(b);
-    if (tokenA.isNotEmpty &&
-        tokenB.isNotEmpty &&
-        _groupIdsEquivalentForDedup(tokenA, tokenB)) {
-      return true;
-    }
-    if (tokenA.isEmpty || tokenB.isEmpty) {
-      return true;
-    }
     return false;
   }
 
   static String messageDedupKey(V2TimMessage message) {
-    // 群聊：seq 为会话内单调序号，SDK 与归档 msgKey 不同但 seq 相同 → 用 seq 去重。
+    // Seq proves group ordering and gap continuity, not exact identity. Keep
+    // different server msgIDs distinct; archive↔SDK copies are correlated by
+    // the explicit cross-source rule above.
     if (_hasGroupSeqOrdering(message)) {
       final groupToken = _normalizedGroupIdForMessage(message);
       final seq = _messageSortSeq(message);
+      final msgID = message.msgID?.trim() ?? '';
+      if (msgID.isNotEmpty) {
+        return 'gmsg:$groupToken:$seq:$msgID';
+      }
       return 'gseq:$groupToken:$seq';
     }
     final msgID = message.msgID?.trim();
@@ -7630,6 +11006,10 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         final existingIdx = correlationToResultIndex[corr];
         if (existingIdx != null &&
             !_areDistinctSdkIdentities(result[existingIdx], message) &&
+            !_areDistinctGroupServerIdentities(
+              result[existingIdx],
+              message,
+            ) &&
             !_areDistinctGroupSequences(result[existingIdx], message)) {
           _applyDedupPreference(
             result,
@@ -7906,8 +11286,33 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         _groupIdsEquivalentForDedup(groupA, groupB);
   }
 
+  /// Same Seq is a protocol conflict when both group rows carry different
+  /// server identities. Preserve both so diagnostics and later authority can
+  /// resolve it. The one allowed exception is a proven archive↔SDK copy.
+  static bool _areDistinctGroupServerIdentities(
+    V2TimMessage a,
+    V2TimMessage b,
+  ) {
+    if (_isC2cConversationMessage(a) || _isC2cConversationMessage(b)) {
+      return false;
+    }
+    final seqA = _messageSortSeq(a);
+    final seqB = _messageSortSeq(b);
+    if (seqA <= 0 || seqA != seqB) return false;
+    final msgIDA = a.msgID?.trim() ?? '';
+    final msgIDB = b.msgID?.trim() ?? '';
+    if (msgIDA.isEmpty || msgIDB.isEmpty || msgIDA == msgIDB) return false;
+    final aArchive = HistoryPaginationAnchor.isArchiveHistoryMessage(a);
+    final bArchive = HistoryPaginationAnchor.isArchiveHistoryMessage(b);
+    final aSdk = _isLikelyTencentSdkMsgId(msgIDA);
+    final bSdk = _isLikelyTencentSdkMsgId(msgIDB);
+    return !((aArchive && bSdk) || (bArchive && aSdk));
+  }
+
   static bool messagesCorrelateForDedup(V2TimMessage a, V2TimMessage b) {
-    if (_areDistinctSdkIdentities(a, b) || _areDistinctGroupSequences(a, b)) {
+    if (_areDistinctSdkIdentities(a, b) ||
+        _areDistinctGroupSequences(a, b) ||
+        _areDistinctGroupServerIdentities(a, b)) {
       return false;
     }
     final seqA = _messageSortSeq(a);
@@ -8278,13 +11683,23 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       ..sort((a, b) => compareMessagesChronological(b, a));
   }
 
+  static List<V2TimMessage> _mergePendingIncomingForDedup({
+    required List<V2TimMessage> pending,
+    required List<V2TimMessage> existing,
+  }) {
+    return sortMessagesNewestFirst(
+      dedupeMessages(<V2TimMessage>[...pending, ...existing]),
+    );
+  }
+
   @visibleForTesting
   static List<V2TimMessage> appendDistinctIncomingBatchForTesting({
     required List<V2TimMessage> existing,
     required List<V2TimMessage> incoming,
   }) {
-    return sortMessagesNewestFirst(
-      <V2TimMessage>[...incoming, ...existing],
+    return _mergePendingIncomingForDedup(
+      pending: incoming,
+      existing: existing,
     );
   }
 
@@ -8326,6 +11741,22 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       intervalSeconds: interval,
     ).reversed.toList();
     _messageListDisplayCache[conversationID] = result;
+    ChatHistoryTrace.log(
+      'visible_projection_built',
+      conversationID: conversationID,
+      extras: <String, Object?>{
+        'authorityCount': authoritative.length,
+        'hiddenCount': hidden?.length ?? 0,
+        'projectedCount': visible.length,
+        'mountedCount': finalList.length,
+        'displayCount':
+            result.where((message) => message.elemType != 11).length,
+        'dividerCount':
+            result.where((message) => message.elemType == 11).length,
+        'listRevision': messageListRevisionFor(conversationID),
+        'projectionRevision': messageProjectionRevisionFor(conversationID),
+      },
+    );
     return result;
   }
 
@@ -8355,7 +11786,11 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         continue;
       }
       final lastAnchor = _lastTimeDividerAnchor(listWithTimestamp);
+      final crossesCalendarDay = lastAnchor?.timestamp != null &&
+          item.timestamp != null &&
+          _isDifferentCalendarDay(lastAnchor!.timestamp!, item.timestamp!);
       final shouldInsertDivider = listWithTimestamp.isEmpty ||
+          crossesCalendarDay ||
           (lastAnchor?.timestamp != null &&
               item.timestamp != null &&
               item.timestamp! - lastAnchor!.timestamp! > intervalSeconds);
@@ -8365,6 +11800,14 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       listWithTimestamp.add(item);
     }
     return stripOrphanTimeDividersForTesting(listWithTimestamp);
+  }
+
+  static bool _isDifferentCalendarDay(int firstTimestamp, int secondTimestamp) {
+    final first = DateTime.fromMillisecondsSinceEpoch(firstTimestamp * 1000);
+    final second = DateTime.fromMillisecondsSinceEpoch(secondTimestamp * 1000);
+    return first.year != second.year ||
+        first.month != second.month ||
+        first.day != second.day;
   }
 
   static V2TimMessage _buildTimeDividerMessage(int? timestamp) {
@@ -8433,9 +11876,20 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
 
   /// 长按消息菜单 / tooltip 打开期间禁止列表上推，新消息先缓冲。
   int _messageContextMenuOverlayDepth = 0;
+  int _messageContextMenuTransactionGeneration = 0;
+  final Set<String> _contextMenuViewportRestoreConversations = <String>{};
+  final Map<String, MessageContextMenuViewportAnchor>
+      _contextMenuViewportAnchors =
+      <String, MessageContextMenuViewportAnchor>{};
+  final Map<String, Timer> _contextMenuViewportRestoreTimers =
+      <String, Timer>{};
   int _pinToBottomRequestSeq = 0;
   String? _pinToBottomRequestConvId;
   bool _pinToBottomForce = false;
+  // A return-to-bottom action is asynchronous (history reload, layout and
+  // animation). Keep the routing gate alive until the caller explicitly ends
+  // the transaction; the timestamp remains only as a stale-call fallback.
+  bool _userScrollToBottomTransactionActive = false;
   String? _userScrollToBottomConvId;
   int _userScrollToBottomUntilMs = 0;
 
@@ -8448,6 +11902,39 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
 
   bool get isMessageContextMenuOverlayOpen =>
       _messageContextMenuOverlayDepth > 0;
+
+  int get messageContextMenuTransactionGeneration =>
+      _messageContextMenuTransactionGeneration;
+
+  bool isContextMenuViewportRestoreActive(String? conversationID) {
+    final convId = _safeConversationId(conversationID);
+    return convId.isNotEmpty &&
+        _contextMenuViewportRestoreConversations.contains(convId);
+  }
+
+  MessageContextMenuViewportAnchor? contextMenuViewportAnchorFor(
+    String? conversationID,
+  ) {
+    final convId = _safeConversationId(conversationID);
+    if (convId.isEmpty ||
+        !_contextMenuViewportRestoreConversations.contains(convId)) {
+      return null;
+    }
+    return _contextMenuViewportAnchors[convId];
+  }
+
+  /// Called by the list after it has restored the selected row, or when the
+  /// row is no longer mounted. This also releases the physics gate.
+  void completeContextMenuViewportRestore(String? conversationID) {
+    final convId = _safeConversationId(conversationID);
+    if (convId.isEmpty) {
+      return;
+    }
+    _contextMenuViewportRestoreConversations.remove(convId);
+    _contextMenuViewportAnchors.remove(convId);
+    _contextMenuViewportRestoreTimers.remove(convId)?.cancel();
+    _markNeedsNotify();
+  }
 
   int get pinToBottomRequestSeq => _pinToBottomRequestSeq;
 
@@ -8463,6 +11950,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (convId.isEmpty) {
       return;
     }
+    _userScrollToBottomTransactionActive = true;
     final nextUntil = DateTime.now().millisecondsSinceEpoch + lockMilliseconds;
     if (_userScrollToBottomConvId == convId &&
         _userScrollToBottomUntilMs >= nextUntil) {
@@ -8477,7 +11965,8 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (convId.isEmpty || _userScrollToBottomConvId != convId) {
       return false;
     }
-    return DateTime.now().millisecondsSinceEpoch < _userScrollToBottomUntilMs;
+    return _userScrollToBottomTransactionActive ||
+        DateTime.now().millisecondsSinceEpoch < _userScrollToBottomUntilMs;
   }
 
   void beginInboundViewportPush(
@@ -8523,6 +12012,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       return;
     }
     _userScrollToBottomConvId = null;
+    _userScrollToBottomTransactionActive = false;
     _userScrollToBottomUntilMs = 0;
   }
 
@@ -8531,6 +12021,20 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (convId.isEmpty) {
       return;
     }
+    debugPrint(
+        '[MessageContextTrace] scroll_mutation type=pin_schedule conv=$convId force=$force menuOpen=$isMessageContextMenuOverlayOpen');
+    ChatHistoryTrace.log(
+      'pin_to_bottom_requested',
+      conversationID: convId,
+      extras: <String, Object?>{
+        'force': force,
+        'position': getMessageListPosition(convId).name,
+        'readingHistory': isReadingHistory(convId),
+        'memorySuppressed': isMemoryWindowSuppressed(convId),
+        'bulkSync': isBulkMessageSyncActive(convId),
+        'chunkedReveal': isChunkedRevealActive(convId),
+      },
+    );
     if (isBulkMessageSyncActive(convId) || isChunkedRevealActive(convId)) {
       _pendingPinAfterBulkByConv[convId] =
           force || (_pendingPinAfterBulkByConv[convId] ?? false);
@@ -8560,16 +12064,50 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     }
   }
 
-  void beginMessageContextMenuOverlay() {
+  void beginMessageContextMenuOverlay({
+    String? conversationID,
+    String? anchorMessageID,
+    String? anchorSeq,
+    double? anchorViewportTop,
+  }) {
+    if (_messageContextMenuOverlayDepth == 0) {
+      _messageContextMenuTransactionGeneration++;
+    }
+    final convId = _safeConversationId(conversationID ?? currentSelectedConv);
+    if (_messageContextMenuOverlayDepth == 0 && convId.isNotEmpty) {
+      _contextMenuViewportRestoreConversations.remove(convId);
+      _contextMenuViewportAnchors.remove(convId);
+      _contextMenuViewportRestoreTimers.remove(convId)?.cancel();
+      _syncHistoryPositionFromActiveScroll(convId);
+      final identity = anchorMessageID?.trim();
+      final seq = anchorSeq?.trim();
+      if (((identity?.isNotEmpty ?? false) || (seq?.isNotEmpty ?? false)) &&
+          anchorViewportTop != null &&
+          anchorViewportTop.isFinite) {
+        _contextMenuViewportAnchors[convId] = MessageContextMenuViewportAnchor(
+          identity: identity,
+          seq: seq?.isNotEmpty == true ? seq : null,
+          viewportTop: anchorViewportTop,
+        );
+      }
+      debugPrint('[MessageContextTrace] global_open conv=$convId '
+          'identity=$identity seq=$seq anchorTop=$anchorViewportTop '
+          'depth=$_messageContextMenuOverlayDepth');
+    }
     _messageContextMenuOverlayDepth++;
+    _markNeedsNotify();
   }
 
   final List<VoidCallback> _contextMenuOverlayDismissers = <VoidCallback>[];
 
   void registerContextMenuOverlayDismisser(VoidCallback dismiss) {
-    if (!_contextMenuOverlayDismissers.contains(dismiss)) {
-      _contextMenuOverlayDismissers.add(dismiss);
-    }
+    // There is only one context menu in the app. Keeping callbacks from every
+    // mounted message row caused dismissAllContextMenuOverlays to broadcast
+    // closeTooltip to the entire list, triggering hundreds of stale cleanup
+    // calls and unnecessary rebuilds. Replace the previous owner atomically.
+    _contextMenuOverlayDismissers
+      ..clear()
+      ..add(dismiss);
   }
 
   void unregisterContextMenuOverlayDismisser(VoidCallback dismiss) {
@@ -8585,10 +12123,22 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       } catch (_) {}
     }
     _contextMenuOverlayDismissers.clear();
-    if (_messageContextMenuOverlayDepth > 0) {
-      _messageContextMenuOverlayDepth = 0;
-      _markNeedsNotify();
+    // A dismisser normally calls endMessageContextMenuOverlay first, which
+    // reduces depth to zero and starts viewport restoration. Route teardown
+    // must clear that newly-created restore transaction as well, so cleanup
+    // cannot be conditional on depth still being positive here.
+    _messageContextMenuOverlayDepth = 0;
+    _contextMenuViewportRestoreConversations.clear();
+    _contextMenuViewportAnchors.clear();
+    for (final timer in _contextMenuViewportRestoreTimers.values) {
+      timer.cancel();
     }
+    _contextMenuViewportRestoreTimers.clear();
+    // A long press can win while a scroll gesture is being cancelled. Flutter
+    // does not guarantee a later ScrollEndNotification for that cancelled
+    // gesture, so never carry the scrolling latch past overlay teardown.
+    setChatListUserScrolling(false);
+    _markNeedsNotify();
   }
 
   void endMessageContextMenuOverlay({String? conversationID}) {
@@ -8599,28 +12149,36 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (!wasOpen || _messageContextMenuOverlayDepth > 0) {
       return;
     }
+    // The overlay absorbed/cancelled the pointer sequence. Clear a stale
+    // scrolling latch before rebuilding physics, otherwise automatic scroll
+    // coordination may continue treating the list as gesture-owned.
+    setChatListUserScrolling(false);
+    _messageContextMenuTransactionGeneration++;
     final convId = _safeConversationId(
       conversationID ?? currentSelectedConv,
     );
+    debugPrint('[MessageContextTrace] global_close conv=$convId '
+        'depth=$_messageContextMenuOverlayDepth '
+        'buffered=${deferredIncomingBufferedCount(convId)}');
     if (convId.isNotEmpty) {
-      // 关菜单当帧不要灌列表 / 贴底，避免复制、转文字、确认框被 flush 拖慢。
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_messageContextMenuOverlayDepth > 0) {
-          return;
-        }
-        flushDeferredIncomingMessages(
-          convId,
-          notify: true,
-          userInitiated: true,
-        );
-        if (_isActiveChatNearBottom(convId)) {
-          clearReceivedUnreadState(
-            conversationID: convId,
-            notify: false,
-          );
-          requestPinToBottom(convId);
-        }
-      });
+      _contextMenuViewportRestoreConversations.add(convId);
+      final before = deferredIncomingBufferedCount(convId);
+      // Closing a context menu must not also be a "return to latest" action.
+      // Flushing here combines a newest-edge insert with the overlay removal;
+      // on a reverse, virtualized list that can evict the selected row before
+      // its viewport anchor is measured. Keep these rows in the unread queue
+      // until the user explicitly returns to bottom or taps the unread tongue.
+      debugPrint('[MessageContextTrace] close_defer conv=$convId '
+          'buffered=$before');
+      _markNeedsNotify();
+      debugPrint('[MessageContextTrace] close_restore_scheduled conv=$convId');
+      _contextMenuViewportRestoreTimers[convId]?.cancel();
+      // Watchdog only. Normal completion is reported by the list after the
+      // identity anchor is geometrically stable for consecutive frames.
+      _contextMenuViewportRestoreTimers[convId] = Timer(
+        const Duration(seconds: 5),
+        () => completeContextMenuViewportRestore(convId),
+      );
     } else {
       _markNeedsNotify();
     }
@@ -8749,6 +12307,32 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     return getMessageListPosition(convId) == HistoryMessagePosition.bottom;
   }
 
+  /// During a reverse-list prepend Flutter can briefly expose the minimum
+  /// pixels while the new sliver tree is laid out. This is geometry, not a
+  /// user return-to-latest gesture. Expose the predicate so the tongue and
+  /// other position observers share the same gate as the active list.
+  bool isPaginationRestoreTransientNearBottom(
+    String convId,
+    ScrollPosition position,
+  ) {
+    final logicalPosition = getMessageListPosition(convId);
+    final physicalDistance = position.pixels - position.minScrollExtent;
+    return isMemoryWindowSuppressed(convId) &&
+        !isChatListUserScrolling &&
+        !isUserScrollToBottomInProgress(convId) &&
+        (logicalPosition == HistoryMessagePosition.awayTwoScreen ||
+            logicalPosition == HistoryMessagePosition.notShowLatest) &&
+        physicalDistance <= 80.0;
+  }
+
+  // Kept as a private alias for existing diagnostics/tests; all production
+  // callers use the public predicate above so the gate is shared cross-widget.
+  bool _isPaginationRestoreTransientNearBottom(
+    String convId,
+    ScrollPosition position,
+  ) =>
+      isPaginationRestoreTransientNearBottom(convId, position);
+
   void _syncHistoryPositionFromActiveScroll(String convId) {
     if (isInboundPresentationBottomLocked(convId)) {
       _storeHistoryMessagePosition(convId, HistoryMessagePosition.bottom);
@@ -8784,6 +12368,31 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (position != null &&
         position.hasPixels &&
         position.hasContentDimensions) {
+      // A reverse history prepend can transiently report pixels==0 while the
+      // new sliver tree is being laid out. During the protected memory-window
+      // transaction that value is not a real return-to-bottom gesture. If we
+      // promote it to bottom here, realtime messages are committed into the
+      // visible list and their pin/rebuild path races the pagination anchor
+      // (the observed awayTwoScreen -> bottom -> old offset oscillation).
+      final logicalPosition = getMessageListPosition(convId);
+      final physicalDistance = position.pixels - position.minScrollExtent;
+      if (isPaginationRestoreTransientNearBottom(convId, position)) {
+        ChatHistoryTrace.log(
+          'logical_position_sync_ignored_pagination_restore',
+          conversationID: convId,
+          extras: <String, Object?>{
+            'logicalPosition': logicalPosition.name,
+            'pixels': position.pixels.toStringAsFixed(1),
+            'minExtent': position.minScrollExtent.toStringAsFixed(1),
+            'maxExtent': position.maxScrollExtent.toStringAsFixed(1),
+            'distance': physicalDistance.toStringAsFixed(1),
+            'userScrolling': isChatListUserScrolling,
+            'userScrollToBottom': isUserScrollToBottomInProgress(convId),
+            'memorySuppressed': true,
+          },
+        );
+        return;
+      }
       const nearThreshold = 80.0;
       final viewport = position.viewportDimension;
       final distance = position.pixels - position.minScrollExtent;
@@ -8831,8 +12440,17 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (!position.hasPixels || !position.hasContentDimensions) {
       return false;
     }
+    if (isPaginationRestoreTransientNearBottom(convId, position)) {
+      return false;
+    }
     return position.pixels <= position.minScrollExtent + threshold;
   }
+
+  /// Shared physical near-bottom decision for message routing and list-push.
+  /// Logical `bottom` alone is not sufficient because it can lag behind a
+  /// short user scroll or an in-flight geometry change.
+  bool isActiveChatNearBottom(String conversationID) =>
+      _isActiveChatNearBottom(_safeConversationId(conversationID));
 
   /// 物理滚动已离开底部超过约一屏（与「回到底部」出现阈值对齐）。
   bool _isActiveChatAwayOneScreen(String convId) {
@@ -9112,10 +12730,9 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
   HistoryMessagePosition getMessageListPosition(String? conversationID) {
     final convId = _safeConversationId(conversationID);
     if (hasPendingScrollRestore(convId)) {
-      _storeHistoryMessagePosition(
-        convId,
-        HistoryMessagePosition.notShowLatest,
-      );
+      // During scroll restore lock, return notShowLatest temporarily
+      // WITHOUT persisting it. The previous stored position is preserved
+      // and will be read again once the lock clears.
       return HistoryMessagePosition.notShowLatest;
     }
     final page = _openPageHistoryPosition;
@@ -9171,6 +12788,34 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     final convId = _safeConversationId(conversationID);
     final previous = getMessageListPosition(convId);
     HistoryMessagePosition next = position;
+    final controller = _activeChatScrollControllerMap[convId];
+    final activeScrollPosition =
+        controller == null ? null : _singleScrollPositionOrNull(controller);
+    if (position == HistoryMessagePosition.bottom &&
+        activeScrollPosition != null &&
+        activeScrollPosition.hasPixels &&
+        activeScrollPosition.hasContentDimensions &&
+        isPaginationRestoreTransientNearBottom(
+          convId,
+          activeScrollPosition,
+        )) {
+      // A tongue/overlay/background callback can observe the transient zero
+      // pixels before the pagination anchor is restored. Keep the prior
+      // logical position authoritative; accepting bottom here starts the
+      // realtime pin/rebuild path and recreates the 0 -> oldOffset oscillation.
+      next = previous;
+      ChatHistoryTrace.log(
+        'message_list_position_bottom_blocked_pagination_restore',
+        conversationID: convId,
+        extras: <String, Object?>{
+          'previous': previous.name,
+          'pixels': activeScrollPosition.pixels.toStringAsFixed(1),
+          'minExtent': activeScrollPosition.minScrollExtent.toStringAsFixed(1),
+          'maxExtent': activeScrollPosition.maxScrollExtent.toStringAsFixed(1),
+          'memorySuppressed': true,
+        },
+      );
+    }
     if (position == HistoryMessagePosition.bottom &&
         _deferredUntilUserBottomConversations.contains(
           _inboundStateKey(convId),
@@ -9181,6 +12826,21 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       next = HistoryMessagePosition.notShowLatest;
     }
     _storeHistoryMessagePosition(convId, next);
+    if (previous != next) {
+      ChatHistoryTrace.log(
+        'message_list_position_changed',
+        conversationID: convId,
+        extras: <String, Object?>{
+          'previous': previous.name,
+          'requested': position.name,
+          'next': next.name,
+          'notify': notify,
+          'pendingScrollRestore': hasPendingScrollRestore(convId),
+          'readingHistory': isReadingHistory(convId),
+          'memorySuppressed': isMemoryWindowSuppressed(convId),
+        },
+      );
+    }
     // Scroll-position churn must not fan out to every Global listener when
     // the logical value is unchanged (page-local UI is SSOT while attached).
     if (notify && previous != next) {

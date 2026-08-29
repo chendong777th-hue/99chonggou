@@ -1,5 +1,9 @@
 // ignore_for_file: implementation_imports, unused_element
 
+// Deprecated: chewie 旧控制条路径。移动端全屏视频播放已统一到
+// awesome_video_player (AVP) + video_player texture（见
+// tim_uikit_chat_videoplayer.dart 和 video_screen.dart）。
+// 本文件仅保留供 wide_popup.dart 宽屏弹窗预览使用，后续应迁移到 AVP。
 import 'dart:async';
 
 import 'package:chewie/chewie.dart';

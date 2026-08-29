@@ -107,11 +107,6 @@ class _AtTextState extends TIMUIKitState<AtText> {
       guard++;
       await _loadMoreMembers();
     }
-    // ignore: avoid_print
-    print(
-      '[AtMemberDiag] drain done pages=$guard total=${_members.length} '
-      'nextSeq=$_nextSeq',
-    );
   }
 
   Future<void> _hydrateFromCache(String groupID) async {
@@ -203,11 +198,6 @@ class _AtTextState extends TIMUIKitState<AtText> {
       );
       final page = res.data;
       if (res.code != 0 || page == null) {
-        // ignore: avoid_print
-        print(
-          '[AtMemberDiag] page fail isFirst=$isFirst code=${res.code} '
-          'desc=${res.desc} seq=$seq',
-        );
         return;
       }
       final pageMembers = page.memberInfoList ?? const [];
@@ -232,11 +222,6 @@ class _AtTextState extends TIMUIKitState<AtText> {
           _nextSeq = '0';
         }
       });
-      // ignore: avoid_print
-      print(
-        '[AtMemberDiag] page isFirst=$isFirst count=${pageMembers.length} '
-        'total=${_members.length} nextSeq=$_nextSeq',
-      );
     } finally {
       if (isFirst && mounted && _loadingFirst) {
         setState(() => _loadingFirst = false);

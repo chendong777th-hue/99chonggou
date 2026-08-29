@@ -25,9 +25,12 @@ import 'package:tencent_cloud_chat_uikit/data_services/profile/user_profile_loca
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 
 class TUIProfileViewModel extends ChangeNotifier {
-  final ConversationService _conversationService = serviceLocator<ConversationService>();
-  final FriendshipServices _friendshipServices = serviceLocator<FriendshipServices>();
-  final TUIFriendShipViewModel _friendShipViewModel = serviceLocator<TUIFriendShipViewModel>();
+  final ConversationService _conversationService =
+      serviceLocator<ConversationService>();
+  final FriendshipServices _friendshipServices =
+      serviceLocator<FriendshipServices>();
+  final TUIFriendShipViewModel _friendShipViewModel =
+      serviceLocator<TUIFriendShipViewModel>();
   final CoreServicesImpl _coreServices = serviceLocator<CoreServicesImpl>();
   final MessageService _messageService = serviceLocator<MessageService>();
 
@@ -102,19 +105,19 @@ class TUIProfileViewModel extends ChangeNotifier {
       }
     }
 
-    V2TimConversation? conversation;
-    if (isNeedConversation) {
-      conversation = await _conversationService.getConversation(
-        conversationID: "c2c_$userID",
-      );
-      _isDisturb = conversation?.recvOpt == 2;
-    }
+    final conversationFuture = isNeedConversation
+        ? _conversationService.getConversation(
+            conversationID: "c2c_$userID",
+          )
+        : Future<V2TimConversation?>.value(null);
 
     final localFriend = await UserProfileLocalBridge.loadLocal(userID);
     if (localFriend != null) {
       _userProfile = UserProfile(
         friendInfo: localFriend,
-        conversation: conversation,
+        // The profile card does not need conversation metadata to render.
+        // Publish the local card before waiting for the SDK conversation query.
+        conversation: null,
       );
       if (_friendShipViewModel.friendList
               ?.any((element) => element.userID == userID) ??
@@ -125,6 +128,9 @@ class TUIProfileViewModel extends ChangeNotifier {
       }
       notifyListeners();
     }
+
+    var conversation = await conversationFuture;
+    _isDisturb = conversation?.recvOpt == 2;
 
     V2TimFriendInfo? friendUserInfo;
     final userInfoList =
@@ -152,7 +158,8 @@ class TUIProfileViewModel extends ChangeNotifier {
       _isDisturb = conversation?.recvOpt == 2;
     }
 
-    final imUsersFuture = _friendshipServices.getUsersInfo(userIDList: [userID]);
+    final imUsersFuture =
+        _friendshipServices.getUsersInfo(userIDList: [userID]);
     var friendInfo =
         await _lifeCycle?.didGetFriendInfo(friendUserInfo) ?? friendUserInfo;
     friendInfo = await UserProfileLocalBridge.mergeHostedFriendRemark(
@@ -186,25 +193,30 @@ class TUIProfileViewModel extends ChangeNotifier {
       conversation: conversation,
     );
 
-    _shouldAddToBlackList =
-        _friendShipViewModel.blockList.indexWhere((element) => element.userID == userID) > -1;
+    _shouldAddToBlackList = _friendShipViewModel.blockList
+            .indexWhere((element) => element.userID == userID) >
+        -1;
 
     notifyListeners();
   }
 
   Future<V2TimCallback> pinedConversation(bool isPined, String convID) async {
-    final res = await _conversationService.pinConversation(conversationID: convID, isPinned: isPined);
+    final res = await _conversationService.pinConversation(
+        conversationID: convID, isPinned: isPined);
     _userProfile?.conversation!.isPinned = isPined;
     notifyListeners();
     return res;
   }
 
-  Future<List<V2TimFriendOperationResult>?> addToBlackList(bool shouldAdd, String userID) async {
-    if (_lifeCycle?.shouldAddToBlockList != null && await _lifeCycle!.shouldAddToBlockList(userID) == false) {
+  Future<List<V2TimFriendOperationResult>?> addToBlackList(
+      bool shouldAdd, String userID) async {
+    if (_lifeCycle?.shouldAddToBlockList != null &&
+        await _lifeCycle!.shouldAddToBlockList(userID) == false) {
       return null;
     }
     if (shouldAdd) {
-      final res = await _friendshipServices.addToBlackList(userIDList: [userID]);
+      final res =
+          await _friendshipServices.addToBlackList(userIDList: [userID]);
       if (res != null && res.isNotEmpty) {
         final result = res.first;
         if (result.resultCode == 0) {
@@ -215,13 +227,15 @@ class TUIProfileViewModel extends ChangeNotifier {
       notifyListeners();
       return res;
     } else {
-      final res = await _friendshipServices.deleteFromBlackList(userIDList: [userID]);
+      final res =
+          await _friendshipServices.deleteFromBlackList(userIDList: [userID]);
       if (res != null && res.isNotEmpty) {
         final result = res.first;
         if (result.resultCode == 0) {
           _shouldAddToBlackList = false;
-          final checkFriend = await _friendshipServices
-              .checkFriend(userIDList: [userID], checkType: FriendTypeEnum.V2TIM_FRIEND_TYPE_SINGLE);
+          final checkFriend = await _friendshipServices.checkFriend(
+              userIDList: [userID],
+              checkType: FriendTypeEnum.V2TIM_FRIEND_TYPE_SINGLE);
           if (checkFriend != null) {
             final res = checkFriend.first;
             _friendType = res.resultType;
@@ -234,12 +248,15 @@ class TUIProfileViewModel extends ChangeNotifier {
     }
   }
 
-  Future<V2TimFriendOperationResult?> deleteFriend(String userID, {bool needUpdateData = true}) async {
-    if (_lifeCycle?.shouldDeleteFriend != null && await _lifeCycle!.shouldDeleteFriend(userID) == false) {
+  Future<V2TimFriendOperationResult?> deleteFriend(String userID,
+      {bool needUpdateData = true}) async {
+    if (_lifeCycle?.shouldDeleteFriend != null &&
+        await _lifeCycle!.shouldDeleteFriend(userID) == false) {
       return null;
     }
-    final res = await _friendshipServices
-        .deleteFromFriendList(userIDList: [userID], deleteType: FriendTypeEnum.V2TIM_FRIEND_TYPE_BOTH);
+    final res = await _friendshipServices.deleteFromFriendList(
+        userIDList: [userID],
+        deleteType: FriendTypeEnum.V2TIM_FRIEND_TYPE_BOTH);
     if (res != null) {
       _conversationService.deleteConversation(conversationID: "c2c_$userID");
       if (needUpdateData) {
@@ -266,7 +283,8 @@ class TUIProfileViewModel extends ChangeNotifier {
     String userID, {
     String? addSource,
   }) async {
-    if (_lifeCycle?.shouldAddFriend != null && await _lifeCycle!.shouldAddFriend(userID) == false) {
+    if (_lifeCycle?.shouldAddFriend != null &&
+        await _lifeCycle!.shouldAddFriend(userID) == false) {
       return null;
     }
     final res = await _friendshipServices.addFriend(
@@ -283,11 +301,13 @@ class TUIProfileViewModel extends ChangeNotifier {
   }
 
   Future<V2TimCallback> updateRemarks(String userID, String remark) async {
-    final res = await _friendshipServices.setFriendInfo(userID: userID, friendRemark: remark);
+    final res = await _friendshipServices.setFriendInfo(
+        userID: userID, friendRemark: remark);
 
     if (res.code == 0) {
       _userProfile?.friendInfo!.friendRemark = remark;
-      final nickName = _userProfile?.friendInfo?.userProfile?.nickName?.trim() ?? '';
+      final nickName =
+          _userProfile?.friendInfo?.userProfile?.nickName?.trim() ?? '';
       final fallback = nickName.isNotEmpty ? nickName : userID;
       final showName = remark.trim().isNotEmpty ? remark.trim() : fallback;
       _friendShipViewModel.updateFriendRemarkLocal(userID, remark);
@@ -301,7 +321,9 @@ class TUIProfileViewModel extends ChangeNotifier {
   Future<V2TimCallback> setMessageDisturb(String userID, bool isDisturb) async {
     final res = await _messageService.setC2CReceiveMessageOpt(
         userIDList: [userID],
-        opt: isDisturb ? ReceiveMsgOptEnum.V2TIM_RECEIVE_NOT_NOTIFY_MESSAGE : ReceiveMsgOptEnum.V2TIM_RECEIVE_MESSAGE);
+        opt: isDisturb
+            ? ReceiveMsgOptEnum.V2TIM_RECEIVE_NOT_NOTIFY_MESSAGE
+            : ReceiveMsgOptEnum.V2TIM_RECEIVE_MESSAGE);
     if (res.code == 0) {
       _isDisturb = isDisturb;
     }
@@ -317,7 +339,8 @@ class TUIProfileViewModel extends ChangeNotifier {
       _userProfile?.friendInfo!.userProfile?.faceUrl = userFullInfo.faceUrl;
     }
     if (userFullInfo.selfSignature != null) {
-      _userProfile?.friendInfo!.userProfile?.selfSignature = userFullInfo.selfSignature;
+      _userProfile?.friendInfo!.userProfile?.selfSignature =
+          userFullInfo.selfSignature;
     }
     if (userFullInfo.gender != null) {
       _userProfile?.friendInfo!.userProfile?.gender = userFullInfo.gender;
@@ -326,7 +349,8 @@ class TUIProfileViewModel extends ChangeNotifier {
       _userProfile?.friendInfo!.userProfile?.allowType = userFullInfo.allowType;
     }
     if (userFullInfo.customInfo != null) {
-      _userProfile?.friendInfo!.userProfile?.customInfo = userFullInfo.customInfo;
+      _userProfile?.friendInfo!.userProfile?.customInfo =
+          userFullInfo.customInfo;
     }
     if (userFullInfo.role != null) {
       _userProfile?.friendInfo!.userProfile?.role = userFullInfo.role;

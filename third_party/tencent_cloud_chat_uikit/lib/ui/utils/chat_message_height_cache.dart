@@ -228,8 +228,9 @@ class ChatMessageHeightCache {
     Iterable<V2TimMessage?> messages, {
     double screenWidth = defaultScreenWidth,
   }) {
-    final width =
-        screenWidth.isFinite && screenWidth > 0 ? screenWidth : defaultScreenWidth;
+    final width = screenWidth.isFinite && screenWidth > 0
+        ? screenWidth
+        : defaultScreenWidth;
     for (final message in messages) {
       if (message == null) {
         continue;
@@ -347,13 +348,7 @@ class ChatMessageHeightCache {
         fontSize: textBodyFontSize,
         lineHeight: textBodyLineHeight,
       ).copyWith(
-        fontWeight: null,
-        fontVariations: const [
-          FontVariation(
-            'wght',
-            MessageBubbleTextColor.messageBodyFontVariationWeight,
-          ),
-        ],
+        fontWeight: MessageBubbleTextColor.messageBodyFontWeight,
       );
       final painter = TextPainter(
         text: TextSpan(text: raw, style: style),

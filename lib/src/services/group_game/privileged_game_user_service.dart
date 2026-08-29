@@ -9,13 +9,16 @@ import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 class PrivilegedGameUserService {
   PrivilegedGameUserService._();
 
-  static final PrivilegedGameUserService instance = PrivilegedGameUserService._();
+  static final PrivilegedGameUserService instance =
+      PrivilegedGameUserService._();
 
   final ValueNotifier<bool> gameEnabled = ValueNotifier<bool>(false);
 
   String? _activeOwner;
   bool _hydrated = false;
   Future<GroupGameStatus>? _inflightRefresh;
+  DateTime? _lastRefreshAt;
+  static const Duration _refreshTtl = Duration(minutes: 5);
 
   bool get isPrivileged => gameEnabled.value;
 
@@ -49,6 +52,7 @@ class PrivilegedGameUserService {
     _activeOwner = null;
     _hydrated = false;
     _inflightRefresh = null;
+    _lastRefreshAt = null;
     _applyEnabled(false, notify: true);
   }
 
@@ -57,6 +61,13 @@ class PrivilegedGameUserService {
     final running = _inflightRefresh;
     if (running != null) {
       return running;
+    }
+    final lastRefresh = _lastRefreshAt;
+    if (lastRefresh != null &&
+        DateTime.now().difference(lastRefresh) < _refreshTtl) {
+      return Future<GroupGameStatus>.value(
+        GroupGameStatus(gameEnabled: gameEnabled.value),
+      );
     }
     final task = _refreshFromNetworkCore();
     _inflightRefresh = task.whenComplete(() {
@@ -70,6 +81,7 @@ class PrivilegedGameUserService {
   Future<GroupGameStatus> _refreshFromNetworkCore() async {
     try {
       final status = await GroupGameApi.instance.fetch();
+      _lastRefreshAt = DateTime.now();
       final owner = _activeOwner ?? _resolveOwner(null);
       if (owner.isNotEmpty) {
         await PrivilegedGameUserStore.instance.write(

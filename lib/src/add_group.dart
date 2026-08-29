@@ -52,9 +52,7 @@ class AddGroup extends StatelessWidget {
           ),
           body: SelfHostedAddGroup(
             onTapExistGroup: (groupID, conversation) {
-              Navigator.push(
-                  context,
-                  appChatRoute(conversation));
+              openOrReuseAppChat(context, conversation);
             },
           ),
         ));

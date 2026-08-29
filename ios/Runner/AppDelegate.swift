@@ -3,6 +3,15 @@ import Flutter
 import UserNotifications
 import PushKit
 
+// Module-wide shadow for project-owned Swift.print calls. Diagnostics remain
+// available through state and callbacks without writing to the Xcode console.
+@inline(__always)
+func print(
+    _ items: Any...,
+    separator: String = " ",
+    terminator: String = "\n"
+) {}
+
 @main
 @objc class AppDelegate: FlutterAppDelegate, PKPushRegistryDelegate {
     private var pushChannel: FlutterMethodChannel?
@@ -473,6 +482,18 @@ import PushKit
                 let payload = self.pendingNotificationTap
                 self.pendingNotificationTap = nil
                 result(payload)
+            case "setAppBadge":
+                let count = max(0, (call.arguments as? [String: Any])?["count"] as? Int ?? 0)
+                if #available(iOS 16.0, *) {
+                    UNUserNotificationCenter.current().setBadgeCount(count) { error in
+                        result(error == nil)
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        UIApplication.shared.applicationIconBadgeNumber = count
+                        result(true)
+                    }
+                }
             case "cancelAll":
                 UNUserNotificationCenter.current().removeAllDeliveredNotifications()
                 UNUserNotificationCenter.current().removeAllPendingNotificationRequests()

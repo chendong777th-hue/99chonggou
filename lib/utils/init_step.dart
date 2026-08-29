@@ -18,8 +18,12 @@ import 'package:tencent_cloud_chat_demo/src/provider/local_setting.dart';
 import 'package:tencent_cloud_chat_demo/src/services/device_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/platform/listener_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/login_coordinator.dart';
+import 'package:tencent_cloud_chat_demo/src/services/auth_bootstrap_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/login_error.dart';
 import 'package:tencent_cloud_chat_demo/src/services/auth_session_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/account_session_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_diagnostics.dart';
 import 'package:tencent_cloud_chat_demo/src/services/notification_settings_service.dart';
 import 'package:tencent_cloud_chat_demo/src/navigation/app_page_transitions.dart';
 import 'package:tencent_cloud_chat_demo/src/services/platform_official_account_service.dart';
@@ -34,11 +38,8 @@ import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/screen_utils.dart';
 
 class InitStep {
-  static const bool _sessionLogEnabled = false;
-
   static void _sessionLog(String message) {
-    if (!_sessionLogEnabled) return;
-    print(message);
+    SessionDiagnostics.log(message);
   }
 
   static Future<void>? _activeCheckLogin;
@@ -127,9 +128,8 @@ class InitStep {
           AppMaterialPageRoute(
             settings: const RouteSettings(name: '/login'),
             enableFullScreenBackGesture: false,
-            transitionDuration: kIsWeb
-                ? Duration.zero
-                : const Duration(milliseconds: 300),
+            transitionDuration:
+                kIsWeb ? Duration.zero : const Duration(milliseconds: 300),
             routeVisibilityDeferredFrames: kIsWeb ? 0 : 1,
             builder: (_) => LoginPage(initIMSDK: initIMSDK),
           ),
@@ -189,11 +189,11 @@ class InitStep {
   }
 
   /// Cold start: online auth + IM login before home (same order as password login).
-  static void checkLogin(
+  static Future<void> checkLogin(
     BuildContext context,
     Future<void> Function() initIMSDKAndAddIMListeners,
   ) {
-    unawaited(_checkLoginGuarded(context, initIMSDKAndAddIMListeners));
+    return _checkLoginGuarded(context, initIMSDKAndAddIMListeners);
   }
 
   static Future<void> _checkLoginGuarded(
@@ -222,9 +222,34 @@ class InitStep {
     } catch (e, st) {
       _sessionLog('InitStep.checkLogin error: $e\n$st');
       final navContext = AppNavigator.context ?? context;
-      if (navContext.mounted || AppNavigator.key.currentState != null) {
-        _safeDirectToLogin(navContext, initIMSDKAndAddIMListeners);
+      if (!navContext.mounted && AppNavigator.key.currentState == null) {
+        return;
       }
+      final token = ApiClient.instance.token;
+      final owner = ApiClient.instance.authenticatedUserId.trim();
+      if (ApiClient.isValidJwt(token) && owner.isNotEmpty) {
+        _sessionLog(
+          'SESSION_LOG InitStep unexpected restore error -> degraded home '
+          'owner=$owner',
+        );
+        LoginCoordinator.instance.markFailed(
+          LoginErrorType.restoreFailed,
+          message: 'Cold start local restore temporarily unavailable',
+          userId: owner,
+          isBusinessAuthenticated: true,
+          isHomeEntered: true,
+          isImReady: false,
+          isRecovering: true,
+        );
+        ImConnectStatusService.applyForColdStartHome(navContext);
+        NotificationSettingsService.instance.endColdStartBannerSuppression();
+        leaveLaunchScreen(toHome: true, context: navContext);
+        unawaited(
+          AuthBootstrapService.instance.syncImSessionAfterBusinessLogin(),
+        );
+        return;
+      }
+      _safeDirectToLogin(navContext, initIMSDKAndAddIMListeners);
     }
   }
 
@@ -276,9 +301,18 @@ class InitStep {
         }
         return;
       case LoginRecoveryAction.goLogin:
-      case LoginRecoveryAction.restartColdStart:
-      case LoginRecoveryAction.stayOnHome:
         _safeDirectToLogin(context, initIMSDKAndAddIMListeners);
+        return;
+      case LoginRecoveryAction.stayOnHome:
+        _sessionLog('SESSION_LOG InitStep recovery -> stayOnHome');
+        return;
+      case LoginRecoveryAction.restartColdStart:
+        // A foreground identity check can ask for a cold-start retry. Keep the
+        // valid business session and retry the restore; it is not a logout.
+        _sessionLog('SESSION_LOG InitStep recovery -> restartColdStart');
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        if (!context.mounted) return;
+        await _checkLoginCore(context, initIMSDKAndAddIMListeners);
         return;
     }
   }
@@ -287,18 +321,24 @@ class InitStep {
     BuildContext context,
     MeResult me,
   ) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
     try {
-      await ListenerStore.afterLogin().timeout(const Duration(seconds: 6));
+      await ListenerStore.afterLogin(expectedIdentity: identity)
+          .timeout(const Duration(seconds: 6));
     } catch (_) {}
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
 
     try {
       await UserAvatarHelper.syncSelfAvatarFromBackend(me.avatarUrl).timeout(
         const Duration(seconds: 5),
       );
+      if (!SessionIdentityService.instance.isCurrent(identity)) return;
       await PushIdentityCache.instance.refreshSelf().timeout(
             const Duration(seconds: 5),
           );
     } catch (_) {}
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
 
     if (context.mounted) {
       await _syncLoginUserProfile(context).timeout(const Duration(seconds: 8));
@@ -311,26 +351,37 @@ class InitStep {
     }
 
     if (context.mounted) {
-      unawaited(_runPostLoginSideEffects(context));
+      unawaited(_runPostLoginSideEffects(context, identity));
     }
   }
 
   static Future<void> _syncLoginUserProfile(BuildContext context) async {
     if (!context.mounted) return;
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
     final loginRes = await TencentImSDKPlugin.v2TIMManager.getLoginUser();
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     final userId = loginRes.data?.trim() ?? '';
-    if (userId.isEmpty) return;
+    if (userId.isEmpty || userId != identity.ownerUserId) return;
 
     final result = await TencentImSDKPlugin.v2TIMManager
         .getUsersInfo(userIDList: [userId]);
-    if (!context.mounted) return;
-    if (result.code == 0 && result.data != null && result.data!.isNotEmpty) {
+    if (!context.mounted ||
+        !SessionIdentityService.instance.isCurrent(identity)) return;
+    if (result.code == 0 &&
+        result.data != null &&
+        result.data!.isNotEmpty &&
+        result.data!.first.userID?.trim() == identity.ownerUserId) {
       Provider.of<LoginUserInfo>(context, listen: false)
           .setLoginUserInfo(result.data![0]);
     }
   }
 
-  static Future<void> _runPostLoginSideEffects(BuildContext context) async {
+  static Future<void> _runPostLoginSideEffects(
+    BuildContext context,
+    SessionIdentity identity,
+  ) async {
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     PlatformOfficialAccountService.resetSessionState();
     unawaited(
       PlatformOfficialAccountService.ensureSubscribed()
@@ -341,6 +392,7 @@ class InitStep {
           .catchError((_) => false),
     );
     DeviceSyncService.instance.scheduleSyncAfterLogin();
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     try {
       StarredFriendProvider.shared.refresh(force: true);
     } catch (_) {}
@@ -348,6 +400,7 @@ class InitStep {
     if (kIsWeb) {
       try {
         await UserStickerProvider.shared.refresh(force: true);
+        if (!SessionIdentityService.instance.isCurrent(identity)) return;
         if (context.mounted) {
           await publishStickerPackages(context);
         }

@@ -1,9 +1,122 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_history_peek_bootstrap.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_history_coverage.dart';
 import 'package:tencent_cloud_chat_uikit/ui/constants/history_message_constant.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/history_pagination_anchor.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart';
 
 void main() {
+  group('ChatHistoryPeekBootstrap local snapshot source policy', () {
+    test('C2C cloud verification yields to the first local frame', () {
+      expect(
+        ChatHistoryPeekBootstrap.c2cCloudVerifyAfterLocalFirst,
+        const Duration(milliseconds: 120),
+      );
+    });
+
+    test('ordinary C2C and group allow local first paint', () {
+      expect(
+        ChatHistoryPeekBootstrap.allowsLocalSnapshotFirst(
+          V2TimConversation(
+            conversationID: 'c2c_alice',
+            userID: 'alice',
+            type: 1,
+          ),
+        ),
+        isTrue,
+      );
+      expect(
+        ChatHistoryPeekBootstrap.allowsLocalSnapshotFirst(
+          V2TimConversation(
+            conversationID: 'group_@TGS#room',
+            groupID: '@TGS#room',
+            type: 2,
+          ),
+        ),
+        isTrue,
+      );
+    });
+  });
+
+  group('ChatHistoryPeekBootstrap empty cloud result policy', () {
+    MessageHistoryCoverage coverage(MessageHistoryCoverageStatus status) {
+      return MessageHistoryCoverage(
+        conversationKey: 'c2c_alice',
+        isGroup: false,
+        clearEpoch: 0,
+        coverageRevision: 1,
+        status: status,
+        olderExhausted: false,
+        newerHasMore: false,
+        holes: const <MessageHistoryHole>[],
+        ranges: status == MessageHistoryCoverageStatus.verified
+            ? const <MessageHistoryCoverageRange>[
+                MessageHistoryCoverageRange(
+                  key: 'latest:closed',
+                  direction: MessageHistoryCoverageDirection.latest,
+                  closed: true,
+                  proofKind: MessageHistoryProofKind.serverContinuity,
+                ),
+              ]
+            : const <MessageHistoryCoverageRange>[],
+        cloudVerifiedAtMs:
+            status == MessageHistoryCoverageStatus.verified ? 1 : 0,
+        updatedAtMs: 1,
+      );
+    }
+
+    test('provisional local window never stops cloud retry', () {
+      expect(
+        ChatHistoryPeekBootstrap.canAcceptEmptyCloudWindow(
+          warmMessageCount: 20,
+          coverage: coverage(MessageHistoryCoverageStatus.provisional),
+        ),
+        isFalse,
+      );
+    });
+
+    test('verified warm window may accept an empty refresh', () {
+      expect(
+        ChatHistoryPeekBootstrap.canAcceptEmptyCloudWindow(
+          warmMessageCount: 20,
+          coverage: coverage(MessageHistoryCoverageStatus.verified),
+        ),
+        isTrue,
+      );
+    });
+
+    test('holes or newer continuation keep retry enabled', () {
+      final withHole = coverage(MessageHistoryCoverageStatus.verified).copyWith(
+        holes: const <MessageHistoryHole>[
+          MessageHistoryHole(
+            key: 'c2c:local:cloud',
+            kind: MessageHistoryHoleKind.c2cBoundary,
+            status: MessageHistoryHoleStatus.open,
+            olderMsgID: 'local',
+            newerMsgID: 'cloud',
+          ),
+        ],
+      );
+      final withNewer = coverage(MessageHistoryCoverageStatus.verified)
+          .copyWith(newerHasMore: true);
+
+      expect(
+        ChatHistoryPeekBootstrap.canAcceptEmptyCloudWindow(
+          warmMessageCount: 20,
+          coverage: withHole,
+        ),
+        isFalse,
+      );
+      expect(
+        ChatHistoryPeekBootstrap.canAcceptEmptyCloudWindow(
+          warmMessageCount: 20,
+          coverage: withNewer,
+        ),
+        isFalse,
+      );
+    });
+  });
+
   group('ChatHistoryPeekBootstrap local-first mayHaveOlder', () {
     test('thin local window always keeps mayHaveOlder even if SDK finished',
         () {

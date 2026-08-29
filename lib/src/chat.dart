@@ -3,7 +3,6 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter_svg/flutter_svg.dart';
 import 'package:bitsdojo_window/bitsdojo_window.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
@@ -68,10 +67,10 @@ import 'package:tencent_cloud_chat_demo/src/chat_page/chat_draft_controller.dart
 import 'package:tencent_cloud_chat_demo/src/chat_page/chat_group_page_side_controller.dart';
 import 'package:tencent_cloud_chat_demo/src/chat_page/chat_header_state_controller.dart';
 import 'package:tencent_cloud_chat_demo/src/chat_page/chat_open_lifecycle.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/mobile_async_commit_guard.dart';
 import 'package:tencent_cloud_chat_demo/src/chat_page/chat_post_open_scheduler.dart';
 import 'package:tencent_cloud_chat_demo/src/chat_page/chat_top_fix_state_controller.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_open_perf_log.dart';
-import 'package:tencent_cloud_chat_demo/src/models/chat_entry_snapshot.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_open_viewport_coordinator.dart';
 import 'package:tencent_cloud_chat_demo/src/chat_page/wallet_card_outbound_sidecar.dart';
 import 'package:tencent_cloud_chat_demo/src/pages/group_live/group_live_navigator.dart';
@@ -98,7 +97,6 @@ import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversa
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_flags.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
-import 'package:tencent_cloud_chat_demo/src/services/conversation_unread_trace.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_unread_clear_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_history_peek_bootstrap.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_history_recovery_coordinator.dart';
@@ -166,6 +164,7 @@ import 'package:tencent_cloud_chat_demo/src/services/archive_im_local_persist_se
 import 'package:tencent_cloud_chat_demo/src/utils/conversation_preview_history_sync.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/web_chat_open_policy.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/chat_history_recovery_satisfaction.dart';
+import 'package:tencent_cloud_chat_demo/src/utils/chat_time_divider_formatter.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/chat_warm_resume_catchup.dart'
     as warm_resume;
 import 'package:tencent_cloud_chat_demo/src/utils/message_conversation_id.dart';
@@ -199,7 +198,6 @@ import 'package:tencent_cloud_chat_uikit/ui/utils/message_anchor.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/platform.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_jitter_diag.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/outgoing_visible_probe.dart';
-import 'package:tencent_cloud_chat_uikit/ui/utils/regexp_probe.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_resource_sample.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_inbound_scroll_follow.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/sound_record.dart';
@@ -210,12 +208,11 @@ import 'package:tencent_cloud_chat_uikit/ui/widgets/link_preview/common/utils.da
 import 'package:tencent_cloud_chat_uikit/ui/widgets/wide_popup.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_history_open_layout_ready.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_main_thread_perf.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/regexp_probe.dart';
 import 'package:tencent_cloud_chat_uikit/ui/constants/history_message_constant.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKItMessageList/tim_uikit_chat_history_message_list_config.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKItMessageList/TIMUIKitTongue/unread_tongue_policy.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/tim_uikit_chat_background_registry.dart';
-import 'package:tencent_cloud_chat_uikit/ui/utils/tim_uikit_local_image_provider.dart';
-import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKitTextField/tim_uikit_text_field_layout/narrow.dart';
 import 'package:tencent_cloud_chat_demo/utils/friend_add_source.dart';
 import 'package:tencent_cloud_chat_demo/utils/group_at_mention.dart';
 import 'package:tencent_cloud_chat_demo/utils/profile_page_nav.dart';
@@ -317,7 +314,15 @@ class _LocalCallBubbleMarker {
   final String conversationId;
 }
 
-class _ChatState extends State<Chat> {
+enum _ChatOpenInitStage {
+  sdkReady,
+  historyReady,
+  localMetadataReady,
+  backgroundEnrichment,
+}
+
+class _ChatState extends State<Chat> with WidgetsBindingObserver {
+  final int _externalEntrySourceToken = identityHashCode(Object());
   final TIMUIKitChatController _chatController = TIMUIKitChatController();
   final TUIConversationViewModel _conversationViewModel =
       serviceLocator<TUIConversationViewModel>();
@@ -330,7 +335,7 @@ class _ChatState extends State<Chat> {
   final C2cSendPermissionController _c2cPermission =
       C2cSendPermissionController();
   final ChatDraftController _draft = ChatDraftController();
-  Future<void> _draftWriteTail = Future<void>.value();
+  final ChatDraftWriteQueue _draftWrites = ChatDraftWriteQueue();
   final ChatGroupPageSideController _groupSide = ChatGroupPageSideController();
   final GroupLiveChatState _groupLiveState = GroupLiveChatState();
   bool _watchingGroupLive = false;
@@ -338,15 +343,24 @@ class _ChatState extends State<Chat> {
   /// 群聊打开期间兜底拉 `/live/current`：主播 CSS 确认推流后若 TCP 丢失，
   /// 群 Tab 轮询已停，不靠杀进程重进也能看到 LIVE / 可播。
   Timer? _groupLiveCurrentPollTimer;
+  bool _groupLiveCurrentPollInFlight = false;
   static const Duration _groupLiveCurrentPollInterval = Duration(seconds: 12);
   String? _groupLiveIndexFingerprint;
   final ChatHeaderStateController _headerState = ChatHeaderStateController();
   final ChatTopFixStateController _topFixState = ChatTopFixStateController();
   final ChatOpenLifecycle _openLifecycle = ChatOpenLifecycle();
   final ChatPostOpenScheduler _postOpenScheduler = ChatPostOpenScheduler();
+  int _chatOpenPhaseGeneration = 0;
+  final Stopwatch _chatOpenInitStopwatch = Stopwatch();
+  final Set<_ChatOpenInitStage> _chatOpenCompletedStages =
+      <_ChatOpenInitStage>{};
+  final Set<String> _chatOpenBackgroundParts = <String>{};
+  Future<void>? _openGroupMetadataEnrichmentInFlight;
+  Future<void>? _openGroupGameEnrichmentInFlight;
+  List<V2TimMessage>? _pendingOpenHistoryMediaEnrichment;
+  int _chatOpenGeneration = 0;
+  final MobileAsyncCommitGuard _mobileCommitGuard = MobileAsyncCommitGuard();
 
-  /// 转场期间只画轻壳；动画结束后再挂 TIMUIKitChat + 开 history gate。
-  bool _heavyChatBodyMounted = false;
   final Map<Animation<double>, Set<AnimationStatusListener>>
       _routeTransitionListeners =
       <Animation<double>, Set<AnimationStatusListener>>{};
@@ -414,8 +428,23 @@ class _ChatState extends State<Chat> {
     required int stickerPackCount,
     required bool isDarkTheme,
   }) {
-    return '${_resolvedConversationID()}_'
-        '${showReadingStatus}_${stickerPackCount}_$isDarkTheme';
+    return '${_resolvedConversationID()}_${showReadingStatus}_'
+        '${stickerPackCount}_${isDarkTheme}_'
+        '${AppI18n.current.locale.languageTag}';
+  }
+
+  int _beginChatOpenGeneration() => ++_chatOpenGeneration;
+
+  bool _isChatOpenGenerationCurrent(
+    int generation,
+    String conversationID,
+  ) {
+    return mounted &&
+        generation == _chatOpenGeneration &&
+        MessageConversationId.sameConversation(
+          _resolvedConversationID(),
+          conversationID,
+        );
   }
 
   String _searchJumpMessageKey(V2TimMessage? message) {
@@ -464,30 +493,22 @@ class _ChatState extends State<Chat> {
       return backRemark!;
     }
     if (_getConvType() == ConvType.group) {
-      // 与会话列表一致：优先群资料库，避免把群 ID / 展示别名当头部昵称。
+      // 群聊头部只读取 GroupLocalStore。SDK groupList/showName 不是群资料
+      // 权威源，缓存未准备好时等待群详情提交后再刷新。
       final groupId = _conversation.groupID?.trim() ?? '';
       final localGroupName = groupId.isEmpty
-          ? null
-          : GroupLocalStore.instance.readCached(groupId: groupId)?.groupName;
-      final resolved = GroupDisplayResolver.resolveShowName(
-        conversation: _conversation,
-        groupList: serviceLocator<TUIFriendShipViewModel>().groupList,
-        localGroupName: localGroupName,
-      );
-      if (resolved.trim().isNotEmpty &&
+          ? ''
+          : GroupLocalStore.instance
+                  .readCached(groupId: groupId)
+                  ?.groupName
+                  .trim() ??
+              '';
+      if (localGroupName.isNotEmpty &&
           !GroupDisplayResolver.looksLikeGroupIdLabel(
-            resolved,
+            localGroupName,
             groupId: _conversation.groupID,
           )) {
-        return resolved;
-      }
-      final cached = _conversation.showName?.trim() ?? '';
-      if (cached.isNotEmpty &&
-          !GroupDisplayResolver.looksLikeGroupIdLabel(
-            cached,
-            groupId: _conversation.groupID,
-          )) {
-        return cached;
+        return localGroupName;
       }
       return 'Chat';
     }
@@ -604,9 +625,11 @@ class _ChatState extends State<Chat> {
     if (!mounted || _getConvType() != ConvType.c2c) {
       return;
     }
+    final generation = _chatOpenGeneration;
+    final conversationID = _resolvedConversationID();
     _peerPermissionSyncDebounce?.cancel();
     _peerPermissionSyncDebounce = Timer(delay, () {
-      if (!mounted) {
+      if (!_isChatOpenGenerationCurrent(generation, conversationID)) {
         return;
       }
       unawaited(_syncPeerMessagePermission(forceNetwork: forceNetwork));
@@ -813,15 +836,26 @@ class _ChatState extends State<Chat> {
   }
 
   void _scheduleReconnectHistoryRecovery() {
+    final generation = _chatOpenGeneration;
+    final scheduledConversationID = _resolvedConversationID();
     _reconnectRecoveryTimer?.cancel();
     _reconnectRecoveryTimer = Timer(const Duration(milliseconds: 350), () {
-      if (!mounted) {
+      if (!_isChatOpenGenerationCurrent(
+        generation,
+        scheduledConversationID,
+      )) {
         return;
       }
       final conversationId = _resolvedConversationID();
       if (conversationId.isEmpty) {
         return;
       }
+      unawaited(
+        serviceLocator<TUIChatGlobalModel>().reconcileConversationCloud(
+          conversationId,
+          reason: 'im_reconnected',
+        ),
+      );
       ChatHistoryRefreshBus.instance.requestRefresh(
         conversationId: conversationId,
         reason: 'im_reconnected',
@@ -838,8 +872,11 @@ class _ChatState extends State<Chat> {
     if (raw.isEmpty) {
       return;
     }
+    final generation = _chatOpenGeneration;
+    final conversationID = _resolvedConversationID();
     final resolved = await GroupLocalStore.instance.resolveImGroupId(raw);
-    if (!mounted || resolved.isEmpty) {
+    if (!_isChatOpenGenerationCurrent(generation, conversationID) ||
+        resolved.isEmpty) {
       return;
     }
     final current = ChatIdFormat.normalizeGroupId(raw);
@@ -847,7 +884,6 @@ class _ChatState extends State<Chat> {
       return;
     }
     // 仅当解析出不同真源（常见：m2 短码 → @TGS#_mc…）时改写。
-    debugPrint('Chat: resolve im groupId $current -> $resolved');
     setState(() {
       _conversation.groupID = resolved;
       _conversation.conversationID = 'group_$resolved';
@@ -1120,12 +1156,13 @@ class _ChatState extends State<Chat> {
     if (conversationId.isEmpty) {
       return;
     }
+    final loadRevision = _draft.stateRevision;
     final text = await ConversationDraftService.instance.loadDraftText(
       conversationID: conversationId,
     );
-    print('[ChatInputDiag] host=load_draft conv=$conversationId '
-        'len=${text?.length ?? 0}');
-    if (!mounted) {
+    if (!mounted ||
+        !_isCurrentConversation(conversationId) ||
+        !_draft.canApplyLoadedDraft(loadRevision)) {
       return;
     }
     _draft.text = text;
@@ -1135,7 +1172,7 @@ class _ChatState extends State<Chat> {
     if (inputController != null && editingController != null) {
       final current = editingController.text;
       if (loaded.isNotEmpty && current.trim().isEmpty) {
-        inputController.setTextField(text!);
+        inputController.setTextField(text!, notifyChanged: false);
       }
       return;
     }
@@ -1144,38 +1181,39 @@ class _ChatState extends State<Chat> {
     }
   }
 
-  Future<void> _persistChatLocalDraftText(String text, int generation) async {
-    final conversationId = _resolvedConversationID();
+  Future<void> _persistChatLocalDraftText(
+    String text,
+    int generation, {
+    String? conversationID,
+    bool enforceCurrentGeneration = true,
+  }) async {
+    final conversationId = (conversationID ?? _resolvedConversationID()).trim();
     if (conversationId.isEmpty) {
       return;
     }
-    _draftWriteTail = _draftWriteTail.then((_) async {
-      if (generation != _draft.writeGeneration) {
-        print(
-            '[ChatInputDiag] draft=queued_write_stale_drop conv=$conversationId '
-            'generation=$generation current=${_draft.writeGeneration}');
+    await _draftWrites.enqueue(() async {
+      if (enforceCurrentGeneration && _draft.shouldSuppressLifecyclePersist) {
         return;
       }
-      _draft.text = text.trim().isEmpty ? null : text;
-      print(
-          '[ChatInputDiag] draft=persist_start conv=$conversationId len=${text.length}');
+      if (enforceCurrentGeneration && generation != _draft.writeGeneration) {
+        return;
+      }
+      if (_isCurrentConversation(conversationId)) {
+        _draft.text = text.trim().isEmpty ? null : text;
+      }
       await ConversationDraftService.instance.persistDraft(
         conversationID: conversationId,
         rawInputText: text,
       );
-      print(
-          '[ChatInputDiag] draft=persist_done conv=$conversationId len=${text.length}');
+    }, onError: (error, stackTrace) {
+      debugPrint(
+        '[ChatDraft] persist failed conv=$conversationId error=$error\n'
+        '$stackTrace',
+      );
     });
-    await _draftWriteTail;
   }
 
   void _onChatDraftTextChanged(String text) {
-    final clipped = text.length > 120 ? '${text.substring(0, 120)}…' : text;
-    final codes = clipped.runes
-        .map((r) => 'U+${r.toRadixString(16).toUpperCase().padLeft(4, '0')}')
-        .join(',');
-    print('[ChatInputDiag] host=on_changed conv=${_resolvedConversationID()} '
-        'len=${text.length} text="${clipped.replaceAll('\n', '\\n')}" codes=[$codes]');
     _draft.onChanged(
       text,
       persist: (raw, generation) =>
@@ -1184,10 +1222,18 @@ class _ChatState extends State<Chat> {
   }
 
   Future<void> _persistChatLocalDraft() async {
+    if (_draft.shouldSuppressLifecyclePersist) {
+      return;
+    }
     _draft.cancelDebounce();
     final text =
         _chatController.textFieldController?.textEditingController?.text ?? '';
-    await _persistChatLocalDraftText(text, _draft.writeGeneration);
+    final conversationId = _resolvedConversationID();
+    await _persistChatLocalDraftText(
+      text,
+      _draft.writeGeneration,
+      conversationID: conversationId,
+    );
   }
 
   Future<void> _clearChatLocalDraftAfterSend(String conversationId) async {
@@ -1197,17 +1243,24 @@ class _ChatState extends State<Chat> {
     }
     // 发送成功后使发送前排队的 debounce 保存失效，否则旧草稿可能在清理后
     // 又被异步写回本地库，表现为“消息已发出但草稿仍出现”。
-    _draft.clear();
-    print('[ChatInputDiag] host=clear_after_send conv=$id');
+    _draft.markSendCompleted();
     if (mounted) {
       _draft.text = null;
     }
-    _draftWriteTail = _draftWriteTail.then((_) async {
-      print('[ChatInputDiag] draft=clear_start conv=$id');
-      await ConversationDraftService.instance.clearDraft(conversationID: id);
-      print('[ChatInputDiag] draft=clear_done conv=$id');
+    final ids = <String>{id, _conversation.conversationID.trim()};
+    final groupId = _conversation.groupID?.trim() ?? '';
+    if (_getConvType() == ConvType.group && groupId.isNotEmpty) {
+      ids.add(groupId);
+      ids.add('group_$groupId');
+    }
+    await _draftWrites.enqueue(() async {
+      await ConversationDraftService.instance.clearDraftForConversationIds(ids);
+    }, onError: (error, stackTrace) {
+      debugPrint(
+        '[ChatDraft] clear-after-send failed conv=$id error=$error\n'
+        '$stackTrace',
+      );
     });
-    await _draftWriteTail;
   }
 
   void _mentionMemberInGroup({required String userId, String? nickName}) {
@@ -2941,15 +2994,16 @@ class _ChatState extends State<Chat> {
         PlatformOfficialAccountService.isPlatformOfficialAccount(peerId)) {
       return;
     }
+    final convId = _resolvedConversationID();
+    final generation = _chatOpenGeneration;
     final resolved = await UserAvatarHelper.resolveChatPeerFaceUrl(
       peerUserId: peerId,
       conversationFaceUrl: _conversation.faceUrl,
       preferLiveProfile: true,
     );
-    if (!mounted) {
-      return;
-    }
-    if (_getConvType() != ConvType.c2c ||
+    // Plan 095：await 后校验当前会话/代次，防止切会话后旧 C2C 对端头像写新会话。
+    if (!_isChatOpenGenerationCurrent(generation, convId) ||
+        _getConvType() != ConvType.c2c ||
         widget.selectedConversation.userID?.trim() != peerId) {
       return;
     }
@@ -2976,11 +3030,12 @@ class _ChatState extends State<Chat> {
     if (peerId.isEmpty) {
       return;
     }
+    final convId = _resolvedConversationID();
+    final generation = _chatOpenGeneration;
     final record = await UserProfileLocalService.instance.read(peerId);
-    if (!mounted) {
-      return;
-    }
-    if (_getConvType() != ConvType.c2c ||
+    // Plan 095：await 后校验当前会话/代次，防止切会话后旧 C2C 对端资料写新会话。
+    if (!_isChatOpenGenerationCurrent(generation, convId) ||
+        _getConvType() != ConvType.c2c ||
         widget.selectedConversation.userID?.trim() != peerId) {
       return;
     }
@@ -3103,6 +3158,8 @@ class _ChatState extends State<Chat> {
     if (!mounted || _getConvType() != ConvType.group) {
       return;
     }
+    final convId = _resolvedConversationID();
+    final generation = _chatOpenGeneration;
     if (widget.selectedConversation.groupID?.trim() != groupId) {
       return;
     }
@@ -3118,7 +3175,10 @@ class _ChatState extends State<Chat> {
         continue;
       }
       final record = await UserProfileLocalService.instance.read(uid);
-      if (!mounted || _getConvType() != ConvType.group) {
+      // Plan 095：await 后仍须校验当前会话/代次，防止切会话后旧群头像写新会话。
+      if (!_isChatOpenGenerationCurrent(generation, convId) ||
+          _getConvType() != ConvType.group ||
+          widget.selectedConversation.groupID?.trim() != groupId) {
         return;
       }
       GroupMemberStore.instance.putProfileForUser(
@@ -3131,7 +3191,8 @@ class _ChatState extends State<Chat> {
         record?.friendRemark ?? '',
       );
     }
-    if (!mounted || _getConvType() != ConvType.group) {
+    if (!_isChatOpenGenerationCurrent(generation, convId) ||
+        _getConvType() != ConvType.group) {
       return;
     }
     // 补 faceUrl 快照后只通知真实发生变化的发送者头像。
@@ -3179,6 +3240,9 @@ class _ChatState extends State<Chat> {
         AndroidPerformanceProfile.instance.reduceHeavyVisualEffects;
     return TIMUIKitChatConfig(
       stickerPanelConfig: stickerPanelConfig,
+      timeDividerConfig: TimeDividerConfig(
+        timestampParser: formatChatTimeDivider,
+      ),
       onTapLink: PlatformUtils().isWeb
           ? (link) {
               LinkUtils.launchURL(
@@ -3235,13 +3299,15 @@ class _ChatState extends State<Chat> {
       isUseMessageReaction: false,
       messageEnterAnimationStyle: MessageEnterAnimationStyle.wechat,
       messageEnterAnimationThrottleMs: androidLightUi ? 480 : 320,
-      messageEnterAnimationListPushEnabled: !androidLightUi,
+      // Android 也开启新消息列表上推动画，与 iOS 保持一致；用户主动上滑时
+      // 仍由列表侧的 near-bottom / user-scrolling 保护阻止抢占手势。
+      messageEnterAnimationListPushEnabled: true,
       inboundChunkRevealEnabled: true,
       // Android 更快揭示，减少队列积压导致的连续 rebuild。
       inboundChunkRevealIntervalMs: androidLightUi ? 60 : 160,
       inboundChunkRevealMaxChunk: androidLightUi ? 4 : 1,
-      inboundScrollFollowEnabled: false,
-      inboundScrollFollowMode: InboundScrollFollowMode.instant,
+      inboundScrollFollowEnabled: true,
+      inboundScrollFollowMode: InboundScrollFollowMode.smooth,
       inboundScrollFollowDurationMs: 240,
       sendFlyOverlayEnabled: false,
       keyboardInsetAnimationEnabled: false,
@@ -3593,7 +3659,15 @@ class _ChatState extends State<Chat> {
         if (!mounted || _getConvType() != ConvType.group) {
           return;
         }
-        unawaited(_loadGroupLiveCurrent());
+        if (_groupLiveCurrentPollInFlight) {
+          return;
+        }
+        _groupLiveCurrentPollInFlight = true;
+        unawaited(
+          _loadGroupLiveCurrent().whenComplete(() {
+            _groupLiveCurrentPollInFlight = false;
+          }),
+        );
       },
     );
   }
@@ -3601,6 +3675,7 @@ class _ChatState extends State<Chat> {
   void _stopGroupLiveCurrentPoll() {
     _groupLiveCurrentPollTimer?.cancel();
     _groupLiveCurrentPollTimer = null;
+    _groupLiveCurrentPollInFlight = false;
   }
 
   /// live-index 被 TCP / 列表侧 patch 后，同步当前群聊天顶栏（不等下次进页）。
@@ -3627,6 +3702,18 @@ class _ChatState extends State<Chat> {
     unawaited(_loadGroupLiveCurrent());
   }
 
+  /// T3: 群直播状态指纹——refresh 前后比较，不变时跳过 setState。
+  String _groupLiveStateFingerprint() {
+    final snap = _groupLiveState.snapshot;
+    final session = _groupLiveState.activeSession;
+    return '${snap?.active ?? false}'
+        '|${session?.liveSessionId ?? ''}'
+        '|${session?.status.index ?? -1}'
+        '|${session?.roomName ?? ''}'
+        '|${session?.anchorUserId ?? ''}'
+        '|${_groupLiveState.loading ? 1 : 0}';
+  }
+
   Future<void> _loadGroupLiveCurrent() async {
     if (_getConvType() != ConvType.group) {
       _watchingGroupLive = false;
@@ -3640,11 +3727,23 @@ class _ChatState extends State<Chat> {
     if (groupId.isEmpty) {
       return;
     }
+    final convId = _resolvedConversationID();
+    final generation = _chatOpenGeneration;
+    // T3: 记录 refresh 前的指纹，状态不变时跳过 setState。
+    final fingerprintBefore = _groupLiveStateFingerprint();
     await _groupLiveState.refresh(groupId);
-    if (!mounted) {
+    // Plan 095：轮询任务 await 后校验当前会话/代次，防止切会话后旧群 live 状态写新会话。
+    if (!_isChatOpenGenerationCurrent(generation, convId) ||
+        _getConvType() != ConvType.group ||
+        ChatIdFormat.normalizeGroupId(widget.selectedConversation.groupID) !=
+            groupId) {
       return;
     }
     _syncChatTopFixState();
+    // T3: fingerprint 不变时跳过 setState，避免 12s 轮询的无谓整页重建。
+    if (_groupLiveStateFingerprint() == fingerprintBefore) {
+      return;
+    }
     // Parent must rebuild so topFixWidget keeps a non-stale onTap closure.
     setState(() {});
   }
@@ -4137,28 +4236,59 @@ class _ChatState extends State<Chat> {
       return;
     }
     if (loaded) {
-      final messages = globalModel.getMessageList(convKey);
-      if (messages != null && messages.isNotEmpty) {
-        ChatMainThreadPerf.measure(
-          ChatMainThreadPerf.imageDecodeMs,
-          () => ChatImageMessagePrefetch.fromMessages(messages),
-          count: messages.length,
-          source: 'open_prefetch',
-          conversationType: _getConvType().name,
-        );
-        // 与历史上屏并行补 URL 并预热，气泡首帧即可挂网图。
-        unawaited(
-          ChatImageMessagePrefetch.resolveOnlineUrlsForMessages(messages).then(
-            (_) {
-              ChatImageMessagePrefetch.fromMessages(messages);
-            },
-          ),
+      _clearMountedDisplayListCache();
+    }
+    _markChatOpenHistoryReady();
+    ChatOpenPerfLog.mark('prepare_gate_complete', conversationID: convKey);
+  }
+
+  Future<void> _runOpenHistoryEnrichment(
+    String convKey, {
+    required bool Function() canRun,
+  }) async {
+    if (!canRun()) return;
+    final chatModel = _chatController.model;
+    if (chatModel != null) {
+      await chatModel.runPostOpenProfileEnrichment();
+      if (!canRun()) return;
+    }
+    final pendingMedia = _pendingOpenHistoryMediaEnrichment;
+    _pendingOpenHistoryMediaEnrichment = null;
+    if (pendingMedia != null && pendingMedia.isNotEmpty) {
+      await MessageMediaMetadataStore.instance.hydrateMessages(pendingMedia);
+      if (!canRun()) return;
+      final globalModel = serviceLocator<TUIChatGlobalModel>();
+      if (_getConvType() == ConvType.c2c) {
+        ChatImageMessagePrefetch.prefetchThumbnailsForFirstWindow(
+          pendingMedia,
         );
       }
-      _clearMountedDisplayListCache();
+      for (final message in pendingMedia) {
+        globalModel.mergeMessageMediaMetadata(message);
+      }
+      unawaited(
+        MessageMediaMetadataStore.instance.persistFromMessages(pendingMedia),
+      );
+      StickerMessagePrefetch.fromMessages(pendingMedia);
+      ChatImageMessagePrefetch.fromHistoricalBatch(pendingMedia);
+      unawaited(
+        ChatImageMessagePrefetch.resolveOnlineUrlsForMessages(
+          pendingMedia,
+          onMessageResolved: globalModel.mergeMessageMediaMetadata,
+        ).then((_) {
+          if (!canRun()) return;
+          unawaited(
+            MessageMediaMetadataStore.instance.persistFromMessages(
+              pendingMedia,
+            ),
+          );
+          ChatImageMessagePrefetch.fromHistoricalBatch(pendingMedia);
+        }).catchError((_) {}),
+      );
     }
     final seedSw = Stopwatch()..start();
     await _seedSelfMemberFromLocalStore();
+    if (!canRun()) return;
     ChatOpenPerfLog.mark(
       'prepare_gate_self_member_seeded',
       conversationID: convKey,
@@ -4167,24 +4297,37 @@ class _ChatState extends State<Chat> {
         'isGroup': _getConvType() == ConvType.group,
       },
     );
-    // 群头像本地灌入不挡首屏；完成后 store notify 会补齐气泡脸。
+    final messages = serviceLocator<TUIChatGlobalModel>().getMessageList(
+      convKey,
+    );
+    if (messages != null && messages.isNotEmpty) {
+      final globalModel = serviceLocator<TUIChatGlobalModel>();
+      ChatMainThreadPerf.measure(
+        ChatMainThreadPerf.imageDecodeMs,
+        () => ChatImageMessagePrefetch.fromMessages(messages),
+        count: messages.length,
+        source: 'open_enrichment_prefetch',
+        conversationType: _getConvType().name,
+      );
+      await ChatImageMessagePrefetch.resolveOnlineUrlsForMessages(messages);
+      for (final message in messages) {
+        globalModel.mergeMessageMediaMetadata(message);
+      }
+      if (!canRun()) return;
+      ChatImageMessagePrefetch.fromMessages(messages);
+    }
     if (_getConvType() == ConvType.group) {
-      unawaited(
-        _hydrateGroupMessageAvatarsFromLocal().then((_) {
-          ChatOpenPerfLog.mark(
-            'group_avatar_hydrate_done',
-            conversationID: convKey,
-          );
-        }),
+      await _hydrateGroupMessageAvatarsFromLocal();
+      if (!canRun()) return;
+      ChatOpenPerfLog.mark(
+        'group_avatar_hydrate_done',
+        conversationID: convKey,
       );
     }
-    unawaited(
-      _warmAvatarsOnChatOpen().then((_) {
-        ChatOpenPerfLog.mark('avatar_warm_done', conversationID: convKey);
-      }),
-    );
+    await _warmAvatarsOnChatOpen();
+    if (!canRun()) return;
+    ChatOpenPerfLog.mark('avatar_warm_done', conversationID: convKey);
     await _runPostOpenHistorySideEffects(convKey);
-    ChatOpenPerfLog.mark('prepare_gate_complete', conversationID: convKey);
   }
 
   /// 进聊首屏前合并本地群灰字并过滤占位 IM tip（设/取消管理员等）。
@@ -4223,22 +4366,10 @@ class _ChatState extends State<Chat> {
   }
 
   Widget _wrapChatWithOpenHistoryGate(Widget chatWidget) {
-    final convKey = _getConvID()?.trim() ?? '';
-    // 暖开若已挂 tip-merge gate（群自托管），仍须等 FutureBuilder，不能因 warm 短路。
-    if (convKey.isEmpty ||
-        _openLifecycle.openHistoryGate == null ||
-        _openLifecycle.openHistoryGateConvKey != convKey) {
-      return chatWidget;
-    }
-    return FutureBuilder<void>(
-      future: _openLifecycle.openHistoryGate,
-      builder: (context, snapshot) {
-        final ready = snapshot.connectionState == ConnectionState.done;
-        // 始终显示同一棵真实聊天树，只在历史准备期间锁住交互。
-        // 避免骨架 Scaffold 揭开时整页视觉替换造成首次进入闪烁。
-        return AbsorbPointer(absorbing: !ready, child: chatWidget);
-      },
-    );
+    // History readiness remains a lifecycle/scheduling gate, not a page-wide
+    // interaction gate. The stable TIMUIKitChat tree owns its loading state,
+    // while the app bar and input stay responsive during a cold history load.
+    return chatWidget;
   }
 
   Future<void> _seedSelfMemberFromLocalStore() async {
@@ -4451,88 +4582,17 @@ class _ChatState extends State<Chat> {
     });
   }
 
-  void _scheduleHeavyChatBodyMount(String openConvKey) {
-    // 仅冷开 / 超时 miss：转场后再挂，避免空列表跟手 relayout。
-    // Ready 路径走 [_mountHeavyChatBodyOrReady]，首帧就是完整记录。
-    _scheduleAfterRouteTransition(() {
-      _mountHeavyChatBody(
-        openConvKey: openConvKey,
-        reason: 'route_settled',
-      );
-    });
-    // 转场异常/无 animation 时兜底，避免永久轻壳。
-    Future<void>.delayed(const Duration(milliseconds: 360), () {
-      if (!mounted || _heavyChatBodyMounted) {
-        return;
-      }
-      _mountHeavyChatBody(
-        openConvKey: openConvKey,
-        reason: 'transition_timeout',
-      );
-    });
-  }
-
-  bool _liveOpenViewportIsReady(String conversationKey) {
-    final key = conversationKey.trim();
-    if (key.isEmpty) {
-      return false;
-    }
-    final snap = ChatEntrySnapshot.capture(
-      globalModel: serviceLocator<TUIChatGlobalModel>(),
-      conversationKey: key,
-      conversationID: _resolvedConversationID(),
-      requestId: 0,
-      tip: widget.selectedConversation.lastMessage,
-    );
-    return snap.isViewportReady;
-  }
-
-  void _mountHeavyChatBodyOrReady({required String openConvKey}) {
+  void _mountStableChatBody({required String openConvKey}) {
     final key = openConvKey.trim();
-    final coordinatorReady = key.isNotEmpty &&
-        ChatOpenViewportCoordinator.instance.takeOpenWasViewportReady(key);
-    final liveReady = key.isNotEmpty && _liveOpenViewportIsReady(key);
-    final ready = coordinatorReady || liveReady;
-    if (ready) {
-      // initState 内不能 setState；直接标记，首帧 build 即走 TIMUIKitChat。
-      _heavyChatBodyMounted = true;
-      if (key.isNotEmpty) {
-        _startOpenHistoryGate(key);
-      }
-      ChatOpenPerfLog.mark(
-        'heavy_chat_body_mounted',
-        conversationID: key,
-        extras: <String, Object?>{
-          'reason': coordinatorReady ? 'viewport_ready' : 'live_viewport_ready',
-        },
-      );
-      ChatOpenViewportCoordinator.instance.markVisible(key);
-      return;
-    }
-    _scheduleHeavyChatBodyMount(key);
-  }
-
-  void _mountHeavyChatBody({
-    required String openConvKey,
-    required String reason,
-  }) {
-    if (!mounted || _heavyChatBodyMounted) {
-      return;
-    }
-    setState(() {
-      _heavyChatBodyMounted = true;
-    });
-    final key = openConvKey.trim().isNotEmpty
-        ? openConvKey.trim()
-        : (_getConvID()?.trim() ?? '');
     if (key.isNotEmpty) {
       _startOpenHistoryGate(key);
     }
     ChatOpenPerfLog.mark(
-      'heavy_chat_body_mounted',
+      'stable_chat_body_mounted',
       conversationID: key,
-      extras: <String, Object?>{'reason': reason},
+      extras: const <String, Object?>{'firstFrame': true},
     );
+    ChatOpenViewportCoordinator.instance.markVisible(key);
   }
 
   final GlobalKey _chatHeaderTitleKey =
@@ -4581,209 +4641,9 @@ class _ChatState extends State<Chat> {
     );
   }
 
-  Widget _buildChatTransitionShell(TUITheme theme) {
-    // 与真实页共用 [_buildChatAppBar] / 消息区背景 / 窄屏输入栏，避免转场换皮。
-    final inputBarColor = theme.weakBackgroundColor ?? hexToColor('f5f5f6');
-    final inputFillColor = theme.inputFillColor ?? Colors.white;
-    final inputIconColor =
-        theme.darkTextColor ?? const Color.fromRGBO(68, 68, 68, 1);
-    final hintColor = theme.weakTextColor ?? const Color(0xffAEA4A3);
-    final draftText = _draft.text?.trim() ?? '';
-
-    return Scaffold(
-      resizeToAvoidBottomInset: false,
-      backgroundColor: theme.chatBgColor,
-      appBar: _buildChatAppBar(theme, headerInteractive: false),
-      body: Column(
-        children: [
-          Expanded(
-            child: DecoratedBox(
-              decoration: _shellMessageAreaDecoration(theme),
-              child: const SizedBox.expand(),
-            ),
-          ),
-          IgnorePointer(
-            child: _isC2cMessageBlocked()
-                ? C2cFriendMessageBlockedBar(
-                    peerUserId: _c2cPeerUserId() ?? '',
-                    theme: theme,
-                  )
-                : DecoratedBox(
-                    decoration: BoxDecoration(
-                      color: inputBarColor,
-                      border: Border(
-                        top: BorderSide(
-                          color:
-                              theme.weakDividerColor ?? const Color(0xFFEAEAEA),
-                          width: 0.5,
-                        ),
-                      ),
-                    ),
-                    child: SafeArea(
-                      top: false,
-                      left: false,
-                      right: false,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          vertical: TIMUIKitTextFieldLayoutNarrow
-                              .inputBarVerticalPadding,
-                          horizontal: 16,
-                        ),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            SizedBox(
-                              height: TIMUIKitTextFieldLayoutNarrow
-                                  .singleLineInputHeight,
-                              child: Center(
-                                child: SvgPicture.asset(
-                                  'images/voice.svg',
-                                  package: 'tencent_cloud_chat_uikit',
-                                  colorFilter: ColorFilter.mode(
-                                    inputIconColor,
-                                    BlendMode.srcIn,
-                                  ),
-                                  height: 26,
-                                  width: 26,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Container(
-                                height: TIMUIKitTextFieldLayoutNarrow
-                                    .singleLineInputHeight,
-                                alignment: Alignment.centerLeft,
-                                padding:
-                                    const EdgeInsets.symmetric(horizontal: 12),
-                                decoration: BoxDecoration(
-                                  color: inputFillColor,
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: Text(
-                                  draftText,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    inherit: false,
-                                    fontSize: 16,
-                                    height: 1.2,
-                                    color: draftText.isEmpty
-                                        ? hintColor
-                                        : (theme.darkTextColor ?? Colors.black),
-                                  ),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            SizedBox(
-                              height: TIMUIKitTextFieldLayoutNarrow
-                                  .singleLineInputHeight,
-                              child: Center(
-                                child: SvgPicture.asset(
-                                  'images/face.svg',
-                                  package: 'tencent_cloud_chat_uikit',
-                                  colorFilter: ColorFilter.mode(
-                                    inputIconColor,
-                                    BlendMode.srcIn,
-                                  ),
-                                  height: 26,
-                                  width: 26,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            SizedBox(
-                              height: TIMUIKitTextFieldLayoutNarrow
-                                  .singleLineInputHeight,
-                              child: Center(
-                                child: SvgPicture.asset(
-                                  'images/add.svg',
-                                  package: 'tencent_cloud_chat_uikit',
-                                  colorFilter: ColorFilter.mode(
-                                    inputIconColor,
-                                    BlendMode.srcIn,
-                                  ),
-                                  height: 26,
-                                  width: 26,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  BoxDecoration _shellMessageAreaDecoration(TUITheme theme) {
-    final conversationId = _resolvedConversationID();
-    final isOfficial = PlatformOfficialAccountService.isPlatformOfficialAccount(
-          widget.selectedConversation.userID,
-        ) ||
-        ChatBackgroundService.isOfficialAccountConversationId(conversationId);
-    final backgroundImagePath = isOfficial || conversationId.isEmpty
-        ? null
-        : TIMUIKitChatBackgroundRegistry.getPath(conversationId);
-    final isColorBackground =
-        backgroundImagePath?.startsWith(ChatBackgroundService.colorPrefix) ??
-            false;
-    final isAssetBackground =
-        backgroundImagePath?.startsWith(ChatBackgroundService.assetPrefix) ??
-            false;
-    final isFileBackground =
-        backgroundImagePath?.startsWith(ChatBackgroundService.filePrefix) ??
-            false;
-    final backgroundImageProvider =
-        backgroundImagePath == null || isColorBackground
-            ? null
-            : isAssetBackground
-                ? AssetImage(
-                    backgroundImagePath.substring(
-                      ChatBackgroundService.assetPrefix.length,
-                    ),
-                  )
-                : timUIKitLocalImageProvider(
-                    isFileBackground
-                        ? backgroundImagePath.substring(
-                            ChatBackgroundService.filePrefix.length,
-                          )
-                        : backgroundImagePath,
-                  );
-    final backgroundColor = isColorBackground
-        ? Color(
-            int.tryParse(
-                  backgroundImagePath!.substring(
-                    ChatBackgroundService.colorPrefix.length,
-                  ),
-                  radix: 16,
-                ) ??
-                0xFFF3F5F8,
-          )
-        : null;
-    final hasCustomBackground =
-        backgroundImageProvider != null || isColorBackground;
-    if (hasCustomBackground) {
-      return BoxDecoration(
-        color: backgroundColor,
-        image: backgroundImageProvider == null
-            ? null
-            : DecorationImage(
-                image: backgroundImageProvider,
-                fit: BoxFit.cover,
-              ),
-      );
-    }
-    return BoxDecoration(color: theme.chatBgColor);
-  }
-
   Future<void> _prefetchShellBackground() async {
     await _loadChatBackground();
-    if (!mounted || _heavyChatBodyMounted) {
+    if (!mounted) {
       return;
     }
     setState(() {});
@@ -4943,6 +4803,69 @@ class _ChatState extends State<Chat> {
     // 头像源追溯默认关闭。
   }
 
+  void _onGroupStoreCommit() {
+    if (!mounted || _getConvType() != ConvType.group) {
+      return;
+    }
+    final groupId = widget.selectedConversation.groupID?.trim() ?? '';
+    if (groupId.isEmpty) {
+      return;
+    }
+    final commit = GroupLocalStore.instance.commitListenable.value;
+    final containsCurrentGroup = commit.upserted.any(
+      (record) => ChatIdFormat.groupIdsEquivalent(record.groupId, groupId),
+    );
+    if (!containsCurrentGroup) {
+      return;
+    }
+    unawaited(_applyCurrentGroupStoreCommit(groupId));
+  }
+
+  Future<void> _applyCurrentGroupStoreCommit(String groupId) async {
+    var record = GroupLocalStore.instance.readCached(groupId: groupId);
+    if (record == null) {
+      return;
+    }
+    final checkedNotice = record.notice.trim();
+    var notice = checkedNotice;
+    if (notice.isNotEmpty &&
+        await GroupNoticeMarqueeDismissService.instance.isDismissed(
+          groupId: groupId,
+          notice: notice,
+        )) {
+      notice = '';
+    }
+    if (!mounted ||
+        !ChatIdFormat.groupIdsEquivalent(
+          widget.selectedConversation.groupID,
+          groupId,
+        )) {
+      return;
+    }
+    // Re-read after the async dismissal check. If another group metadata
+    // commit landed meanwhile, publish the latest Store-owned record/version.
+    record = GroupLocalStore.instance.readCached(groupId: groupId);
+    if (record == null) {
+      return;
+    }
+    if (record.notice.trim() != checkedNotice) {
+      unawaited(_applyCurrentGroupStoreCommit(groupId));
+      return;
+    }
+    _applyGroupMetadataSnapshot(
+      GroupMetadataSnapshot(
+        groupId: record.groupId,
+        name: record.groupName.trim(),
+        memberCount: record.memberCount > 0 ? record.memberCount : null,
+        notice: notice,
+        avatarUrl: record.avatarUrl.trim(),
+        source: GroupMetadataSource.storeCommit,
+        generation: GroupLocalStore.instance.listDataRevision,
+      ),
+      localPlaceholder: false,
+    );
+  }
+
   /// 进入群聊首帧：同步灌入本地群资料缓存，避免标题和头像二次变化。
   void _seedGroupDisplayFromMemory() {
     if (_getConvType() != ConvType.group) {
@@ -4953,12 +4876,12 @@ class _ChatState extends State<Chat> {
       return;
     }
     final groupList = serviceLocator<TUIFriendShipViewModel>().groupList;
-    final count = GroupDisplayResolver.resolveMemberCount(
-      groupId: groupId,
-      groupList: groupList,
-    );
-    if (count != null) {
-      _groupMemberCount = count;
+    // 首帧只接受本地群资料库中的已提交人数。SDK groupList 可能是旧快照，
+    // 不能先写入头部再等待 REST/本地库把它纠正，否则会产生可见跳变。
+    final cachedRecord = GroupLocalStore.instance.readCached(groupId: groupId);
+    final cachedCount = cachedRecord?.memberCount ?? 0;
+    if (cachedRecord != null && cachedCount > 0) {
+      _groupMemberCount = cachedCount;
     }
     final notice = GroupDisplayResolver.resolveNotice(
       groupId: groupId,
@@ -5037,7 +4960,9 @@ class _ChatState extends State<Chat> {
         !ChatIdFormat.groupIdsEquivalent(
           widget.selectedConversation.groupID,
           snapshot.groupId,
-        )) return;
+        )) {
+      return;
+    }
     final prevCount = _groupMemberCount;
     final prevNotice = _groupSide.groupNoticeBanner;
     final prevFace = _conversation.faceUrl ?? '';
@@ -5045,18 +4970,14 @@ class _ChatState extends State<Chat> {
     ChatMainThreadPerf.measure(
       ChatMainThreadPerf.groupMetadataApplyMs,
       () {
-        if (snapshot.memberCount != null &&
-            (!localPlaceholder || _groupMemberCount == null)) {
+        if (snapshot.memberCount != null) {
           _groupMemberCount = snapshot.memberCount;
         }
-        final currentName = (_conversation.showName ?? '').trim();
         if (snapshot.name.isNotEmpty &&
-            (!localPlaceholder ||
-                currentName.isEmpty ||
-                GroupDisplayResolver.looksLikeGroupIdLabel(
-                  currentName,
-                  groupId: snapshot.groupId,
-                ))) {
+            !GroupDisplayResolver.looksLikeGroupIdLabel(
+              snapshot.name,
+              groupId: snapshot.groupId,
+            )) {
           _conversation.showName = snapshot.name;
           widget.selectedConversation.showName = snapshot.name;
           conversationName = snapshot.name;
@@ -5144,7 +5065,21 @@ class _ChatState extends State<Chat> {
     _applyGroupMetadataSnapshot(snapshot, localPlaceholder: false);
   }
 
-  Future<void> _loadGroupGameStatus() async {
+  Future<void> _loadGroupGameStatus() {
+    final inFlight = _openGroupGameEnrichmentInFlight;
+    if (inFlight != null) {
+      return inFlight;
+    }
+    final task = _loadGroupGameStatusImpl();
+    _openGroupGameEnrichmentInFlight = task;
+    return task.whenComplete(() {
+      if (identical(_openGroupGameEnrichmentInFlight, task)) {
+        _openGroupGameEnrichmentInFlight = null;
+      }
+    });
+  }
+
+  Future<void> _loadGroupGameStatusImpl() async {
     if (_getConvType() != ConvType.group) {
       if (_groupSide.groupFeatureEnabled ||
           _groupSide.groupGameEnabled ||
@@ -5842,9 +5777,13 @@ class _ChatState extends State<Chat> {
     if (!_shouldShowGroupGameBanner()) {
       return;
     }
+    final convId = _resolvedConversationID();
+    final generation = _chatOpenGeneration;
     try {
       final settings = await SangongSettingsApi.instance.fetch();
-      if (!mounted || !_shouldShowGroupGameBanner()) {
+      // Plan 095：网络结果晚到时若已切会话，丢弃旧群结果。
+      if (!_isChatOpenGenerationCurrent(generation, convId) ||
+          !_shouldShowGroupGameBanner()) {
         return;
       }
       final doorCount = settings.doorCount.clamp(2, 10);
@@ -6462,7 +6401,8 @@ class _ChatState extends State<Chat> {
       return;
     }
     if (GroupSyncService.memberCountRefreshActions.contains(notice.action)) {
-      unawaited(_loadGroupMemberCount(force: true));
+      // GroupSyncService 已在发布事件前触发群详情刷新；头部只消费
+      // GroupLocalStore.commitListenable，避免同一成员变更重复请求详情。
       _clearMountedDisplayListCache();
       unawaited(
         GroupChangeEventSyncService.instance.syncForGroup(
@@ -7181,7 +7121,8 @@ class _ChatState extends State<Chat> {
             }
           }
           final latestShowName = conv?.showName?.trim() ?? '';
-          if (latestShowName.isNotEmpty &&
+          if (!isGroup &&
+              latestShowName.isNotEmpty &&
               latestShowName != (_conversation.showName?.trim() ?? '')) {
             final shouldApplyName = isGroup
                 ? (!hasLocalName || latestShowName == localName)
@@ -7373,11 +7314,149 @@ class _ChatState extends State<Chat> {
     );
   }
 
+  void _completeChatOpenInitStage(
+    _ChatOpenInitStage stage, {
+    int count = 0,
+    String source = 'chat',
+  }) {
+    if (!_chatOpenCompletedStages.add(stage)) {
+      return;
+    }
+    final elapsedMs = _chatOpenInitStopwatch.elapsedMilliseconds;
+    final event = switch (stage) {
+      _ChatOpenInitStage.sdkReady => 'chat_open_sdk_ready_ms',
+      _ChatOpenInitStage.historyReady => 'chat_open_history_ready_ms',
+      _ChatOpenInitStage.localMetadataReady => 'chat_open_metadata_ms',
+      _ChatOpenInitStage.backgroundEnrichment =>
+        'chat_open_background_enrichment_ms',
+    };
+    ChatOpenPerfLog.mark(
+      event,
+      extras: <String, Object?>{
+        'durationMs': elapsedMs,
+        'count': count,
+        'source': source,
+        'stage': stage.name,
+      },
+    );
+  }
+
+  void _markChatOpenHistoryReady() {
+    if (!_openLifecycle.markHistoryReady(_chatOpenPhaseGeneration)) {
+      return;
+    }
+    ChatOpenPerfLog.mark(
+      'chat_open_phase_history_ready_ms',
+      extras: <String, Object?>{
+        'durationMs': _chatOpenInitStopwatch.elapsedMilliseconds,
+        'count': 1,
+      },
+    );
+    final generation = _chatOpenPhaseGeneration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || generation != _chatOpenPhaseGeneration) return;
+      if (_openLifecycle.markInteractive(generation)) {
+        ChatOpenPerfLog.mark(
+          'chat_open_phase_interactive_ms',
+          extras: <String, Object?>{
+            'durationMs': _chatOpenInitStopwatch.elapsedMilliseconds,
+            'count': 1,
+          },
+        );
+        _tryMarkChatOpenEnriched();
+      }
+    });
+  }
+
+  void _tryMarkChatOpenEnriched() {
+    if (!_chatOpenCompletedStages.contains(
+          _ChatOpenInitStage.backgroundEnrichment,
+        ) ||
+        !_openLifecycle.markEnriched(_chatOpenPhaseGeneration)) {
+      return;
+    }
+    ChatOpenPerfLog.mark(
+      'chat_open_phase_enriched_ms',
+      extras: <String, Object?>{
+        'durationMs': _chatOpenInitStopwatch.elapsedMilliseconds,
+        'count': _chatOpenBackgroundParts.length,
+      },
+    );
+  }
+
+  Future<void> _hydrateGroupDisplayForOpen() async {
+    await _hydrateGroupDisplayFromLocal();
+    if (!mounted) {
+      return;
+    }
+    _completeChatOpenInitStage(
+      _ChatOpenInitStage.localMetadataReady,
+      count: _getConvType() == ConvType.group ? 1 : 0,
+      source: _getConvType() == ConvType.group ? 'local_group_store' : 'none',
+    );
+  }
+
+  void _markChatOpenBackgroundPart({
+    required String part,
+    required int generation,
+  }) {
+    if (!mounted ||
+        generation != _openLifecycle.postOpenTasksGeneration ||
+        _chatOpenCompletedStages.contains(
+          _ChatOpenInitStage.backgroundEnrichment,
+        )) {
+      return;
+    }
+    _chatOpenBackgroundParts.add(part);
+    final expected = _getConvType() == ConvType.group
+        ? const <String>{'metadata', 'mute', 'group_game'}
+        : const <String>{'c2c'};
+    if (!_chatOpenBackgroundParts.containsAll(expected)) {
+      return;
+    }
+    _completeChatOpenInitStage(
+      _ChatOpenInitStage.backgroundEnrichment,
+      count: expected.length,
+      source: 'post_frame',
+    );
+    _tryMarkChatOpenEnriched();
+  }
+
+  Future<void> _runOpenGroupMetadataEnrichment({
+    required int generation,
+    required bool Function() canRun,
+  }) {
+    final inFlight = _openGroupMetadataEnrichmentInFlight;
+    if (inFlight != null) {
+      return inFlight;
+    }
+    final task = () async {
+      await Future.wait<void>(<Future<void>>[
+        _loadGroupMemberCount(),
+        _loadGroupNoticeBanner(),
+      ]);
+      if (canRun()) {
+        _checkAndShowGroupNoticeIfNeeded();
+        _markChatOpenBackgroundPart(
+          part: 'metadata',
+          generation: generation,
+        );
+      }
+    }();
+    _openGroupMetadataEnrichmentInFlight = task;
+    return task.whenComplete(() {
+      if (identical(_openGroupMetadataEnrichmentInFlight, task)) {
+        _openGroupMetadataEnrichmentInFlight = null;
+      }
+    });
+  }
+
   void _schedulePostOpenTasks() {
     if (_openLifecycle.postOpenTasksScheduled) return;
     final taskGeneration = _openLifecycle.beginPostOpenTasks();
     final schedulerGeneration = _postOpenScheduler.beginRun();
     final scheduledConversationId = _resolvedConversationID();
+    final scheduledConvKey = _getConvID()?.trim() ?? scheduledConversationId;
 
     bool canRun() {
       return taskGeneration == _openLifecycle.postOpenTasksGeneration &&
@@ -7396,9 +7475,42 @@ class _ChatState extends State<Chat> {
         'post_open_tasks',
         extras: const <String, Object?>{'source': 'route_animation_or_delay'},
       );
-      unawaited(_loadChatBackground());
-      unawaited(_loadChatLocalDraft());
-      _prepareOfficialAccountChat();
+      _postOpenScheduler.schedule(
+        generation: schedulerGeneration,
+        key: 'local_foundation',
+        delay: Duration.zero,
+        canRun: canRun,
+        task: () async {
+          await Future.wait<void>(<Future<void>>[
+            _loadChatBackground(),
+            _loadChatLocalDraft(),
+            _hydrateGroupDisplayForOpen(),
+            _resolveImGroupIdAfterOpen(),
+          ]);
+          if (canRun()) {
+            await _prepareOfficialAccountChat();
+          }
+          if (canRun() && _getConvType() == ConvType.c2c) {
+            await Future.wait<void>(<Future<void>>[
+              _loadPeerFaceUrl(),
+              _loadPeerLocalProfile(),
+            ]);
+            if (canRun()) {
+              _schedulePeerMessagePermissionSync(forceNetwork: true);
+            }
+          }
+        },
+      );
+      _postOpenScheduler.schedule(
+        generation: schedulerGeneration,
+        key: 'history_enrichment',
+        delay: ChatPostOpenScheduler.p1Delay,
+        canRun: canRun,
+        task: () => _runOpenHistoryEnrichment(
+          scheduledConvKey,
+          canRun: canRun,
+        ),
+      );
       if (_getConvType() == ConvType.group) {
         final groupId = ChatIdFormat.normalizeGroupId(
           widget.selectedConversation.groupID,
@@ -7408,57 +7520,96 @@ class _ChatState extends State<Chat> {
           final muteGeneration = _openLifecycle.muteFetchGeneration;
           _postOpenScheduler.schedule(
             generation: schedulerGeneration,
+            key: 'mute_status',
             delay: ChatPostOpenScheduler.muteNetworkDelay,
             canRun: canRun,
-            task: () {
+            task: () async {
               if (!mounted ||
                   muteGeneration != _openLifecycle.muteFetchGeneration) {
                 return;
               }
               ChatOpenPerfLog.mark('mute_network_fetch_start');
-              unawaited(_fetchAndStoreBackendMuteStatus(groupId));
+              await _fetchAndStoreBackendMuteStatus(groupId);
+              if (canRun()) {
+                _markChatOpenBackgroundPart(
+                  part: 'mute',
+                  generation: taskGeneration,
+                );
+              }
             },
+          );
+        } else {
+          _markChatOpenBackgroundPart(
+            part: 'mute',
+            generation: taskGeneration,
           );
         }
       }
       _postOpenScheduler.schedule(
         generation: schedulerGeneration,
-        delay: ChatPostOpenScheduler.p1Delay,
+        key: 'group_metadata',
+        // Start the authoritative group snapshot with the first background batch.
+        delay: Duration.zero,
         canRun: canRun,
-        task: () {
+        task: () async {
           if (!canRun()) return;
-          unawaited(_loadGroupMemberCount());
-          unawaited(_loadGroupNoticeBanner());
-          _checkAndShowGroupNoticeIfNeeded();
-        },
-      );
-      _postOpenScheduler.schedule(
-        generation: schedulerGeneration,
-        delay: ChatPostOpenScheduler.p2Delay,
-        canRun: canRun,
-        task: () {
-          if (!canRun()) return;
-          unawaited(_loadGroupGameStatus());
-          unawaited(_loadAgentRebateIdentity());
-          unawaited(_loadGroupLiveCurrent());
-        },
-      );
-      _postOpenScheduler.schedule(
-        generation: schedulerGeneration,
-        delay: ChatPostOpenScheduler.idleDelay,
-        canRun: canRun,
-        task: () {
-          if (!canRun()) return;
-          if (!CallLifecycleService.instance.isInActiveCall) {
-            unawaited(SoundPlayer.ensurePlaybackReady());
+          if (_getConvType() != ConvType.group) {
+            _markChatOpenBackgroundPart(
+              part: 'c2c',
+              generation: taskGeneration,
+            );
+            return;
           }
-          unawaited(
+          await _runOpenGroupMetadataEnrichment(
+            generation: taskGeneration,
+            canRun: canRun,
+          );
+        },
+      );
+      _postOpenScheduler.schedule(
+        generation: schedulerGeneration,
+        key: 'business_enrichment',
+        delay: ChatPostOpenScheduler.p2Delay,
+        priority: ChatTaskPriority.background,
+        canRun: canRun,
+        task: () async {
+          if (!canRun()) return;
+          await Future.wait<void>(<Future<void>>[
+            _loadGroupGameStatus(),
+            _loadAgentRebateIdentity(),
+            _loadGroupLiveCurrent(),
+          ]);
+          if (canRun()) {
+            _markChatOpenBackgroundPart(
+              part: 'group_game',
+              generation: taskGeneration,
+            );
+            if (_getConvType() == ConvType.group) {
+              _startGroupLiveCurrentPoll();
+            }
+          }
+        },
+      );
+      _postOpenScheduler.schedule(
+        generation: schedulerGeneration,
+        key: 'idle_enrichment',
+        delay: ChatPostOpenScheduler.idleDelay,
+        priority: ChatTaskPriority.background,
+        canRun: canRun,
+        task: () async {
+          if (!canRun()) return;
+          final idleTasks = <Future<void>>[
+            DiceAssetWarmup.warm(context),
             _retryWalletCardsForConversation(
               source: WalletCardSendSource.autoRetry,
             ),
-          );
+            if (!CallLifecycleService.instance.isInActiveCall)
+              SoundPlayer.ensurePlaybackReady(),
+          ];
+          await Future.wait<void>(idleTasks);
+          if (!canRun()) return;
           if (!_hasVisibleHistoryMessages()) {
-            unawaited(_reloadChatHistoryIfEmpty(reason: 'post_open'));
+            await _reloadChatHistoryIfEmpty(reason: 'post_open');
           }
         },
       );
@@ -7484,9 +7635,10 @@ class _ChatState extends State<Chat> {
       }
       _postOpenScheduler.schedule(
         generation: schedulerGeneration,
+        key: 'route_fallback',
         delay: ChatPostOpenScheduler.routeFallbackDelay,
         canRun: canRun,
-        task: () => unawaited(runTasks()),
+        task: runTasks,
       );
     });
   }
@@ -7669,7 +7821,7 @@ class _ChatState extends State<Chat> {
     );
   }
 
-  Future<bool> _pullLatestMessagesFromAnchor({
+  Future<({bool changed, bool didAttemptCloud})> _pullLatestMessagesFromAnchor({
     required TUIChatSeparateViewModel model,
     required String source,
     bool allowCloudPull = true,
@@ -7684,12 +7836,35 @@ class _ChatState extends State<Chat> {
         source: source,
         conversationID: _resolvedConversationID(),
       );
-      return false;
+      return (changed: false, didAttemptCloud: false);
     }
     final beforeSignature = _visibleHistorySignature();
     final anchorId = _resolveLatestPullAnchorId();
     if (anchorId.isNotEmpty &&
         ConversationPreviewHistorySync.isSyntheticLocalAnchorId(anchorId)) {
+      // Synthetic anchor (group tip / call bubble): try to find a real SDK
+      // message in memory to use as cloud cursor. If none, full reload.
+      final realAnchor = HistoryPaginationAnchor.oldestSdkPaginationAnchor(
+        globalModel.mergedAliasMessageList(_resolvedConversationID()),
+      );
+      if (realAnchor != null && (realAnchor.msgID ?? '').isNotEmpty) {
+        ExternalChatEntryService.instance.logFlow(
+          'anchor_synthetic_replaced',
+          source: source,
+          conversationID: _resolvedConversationID(),
+          extras: <String, Object?>{
+            'syntheticAnchor': anchorId,
+            'realAnchor': realAnchor.msgID,
+          },
+        );
+        return _pullFromRealAnchor(
+          model: model,
+          source: source,
+          anchorId: realAnchor.msgID!,
+          allowCloudPull: allowCloudPull,
+          beforeSignature: beforeSignature,
+        );
+      }
       ExternalChatEntryService.instance.logFlow(
         'anchor_skip_synthetic_local',
         source: source,
@@ -7698,29 +7873,98 @@ class _ChatState extends State<Chat> {
       );
       _clearMountedDisplayListCache();
       await _chatController.refreshCurrentHistoryList();
-      return beforeSignature != _visibleHistorySignature();
+      final changed = beforeSignature != _visibleHistorySignature();
+      return (changed: changed, didAttemptCloud: false);
     }
     if (anchorId.isNotEmpty) {
+      return _pullFromRealAnchor(
+        model: model,
+        source: source,
+        anchorId: anchorId,
+        allowCloudPull: allowCloudPull,
+        beforeSignature: beforeSignature,
+      );
+    }
+    if (!_hasVisibleHistoryMessages()) {
+      await model.loadChatRecord(
+        count: 20,
+        getType: HistoryMsgGetTypeEnum.V2TIM_GET_LOCAL_OLDER_MSG,
+      );
+      if (beforeSignature != _visibleHistorySignature()) {
+        return (changed: true, didAttemptCloud: false);
+      }
+      await model.loadChatRecord(
+        count: 20,
+        getType: HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_OLDER_MSG,
+      );
+      final changed = beforeSignature != _visibleHistorySignature();
+      return (changed: changed, didAttemptCloud: true);
+    }
+    return (changed: false, didAttemptCloud: false);
+  }
+
+  /// Pull newer messages from a real SDK anchor. LOCAL_NEWER does NOT
+  /// short-circuit CLOUD_NEWER: both are executed so cloud-only messages
+  /// (not yet in local DB) are not missed.
+  Future<({bool changed, bool didAttemptCloud})> _pullFromRealAnchor({
+    required TUIChatSeparateViewModel model,
+    required String source,
+    required String anchorId,
+    required bool allowCloudPull,
+    required String beforeSignature,
+  }) async {
+    bool localChanged = false;
+    await model.loadChatRecord(
+      count: 20,
+      lastMsgID: anchorId,
+      direction: LoadDirection.latest,
+      getType: HistoryMsgGetTypeEnum.V2TIM_GET_LOCAL_NEWER_MSG,
+    );
+    if (beforeSignature != _visibleHistorySignature()) {
+      localChanged = true;
+    }
+    // Do NOT short-circuit: continue to CLOUD_NEWER even if LOCAL_NEWER
+    // found changes, because cloud may have messages not yet in local DB.
+    bool cloudChanged = false;
+    bool didAttemptCloud = false;
+    if (allowCloudPull) {
+      didAttemptCloud = true;
+      final beforeRawLen = model.globalModel.rawMessageCount(
+        _resolvedConversationID(),
+      );
       await model.loadChatRecord(
         count: 20,
         lastMsgID: anchorId,
         direction: LoadDirection.latest,
-        getType: HistoryMsgGetTypeEnum.V2TIM_GET_LOCAL_NEWER_MSG,
+        getType: HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_NEWER_MSG,
       );
       if (beforeSignature != _visibleHistorySignature()) {
-        return true;
+        cloudChanged = true;
       }
-      if (allowCloudPull) {
-        await model.loadChatRecord(
-          count: 20,
-          lastMsgID: anchorId,
-          direction: LoadDirection.latest,
-          getType: HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_NEWER_MSG,
+      // differenceTooLong: if CLOUD_NEWER pulled >= 60 messages (3×count)
+      // and the window is not finished, the gap is too large to page
+      // through incrementally. Full-reset to the latest screen instead.
+      final afterRawLen = model.globalModel.rawMessageCount(
+        _resolvedConversationID(),
+      );
+      if (afterRawLen - beforeRawLen >= 60) {
+        ExternalChatEntryService.instance.logFlow(
+          'recovery_difference_too_long',
+          source: source,
+          conversationID: _resolvedConversationID(),
+          extras: <String, Object?>{
+            'beforeLen': beforeRawLen,
+            'afterLen': afterRawLen,
+            'delta': afterRawLen - beforeRawLen,
+          },
         );
-        if (beforeSignature != _visibleHistorySignature()) {
-          return true;
-        }
+        _clearMountedDisplayListCache();
+        await _chatController.refreshCurrentHistoryList();
+        final changed = beforeSignature != _visibleHistorySignature();
+        return (changed: changed, didAttemptCloud: didAttemptCloud);
       }
+    }
+    if (!localChanged && !cloudChanged) {
       ExternalChatEntryService.instance.logFlow(
         'anchor_invalid_local',
         source: source,
@@ -7729,23 +7973,13 @@ class _ChatState extends State<Chat> {
       );
       _clearMountedDisplayListCache();
       await _chatController.refreshCurrentHistoryList();
-      return beforeSignature != _visibleHistorySignature();
+      final changed = beforeSignature != _visibleHistorySignature();
+      return (changed: changed, didAttemptCloud: didAttemptCloud);
     }
-    if (!_hasVisibleHistoryMessages()) {
-      await model.loadChatRecord(
-        count: 20,
-        getType: HistoryMsgGetTypeEnum.V2TIM_GET_LOCAL_OLDER_MSG,
-      );
-      if (beforeSignature != _visibleHistorySignature()) {
-        return true;
-      }
-      await model.loadChatRecord(
-        count: 20,
-        getType: HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_OLDER_MSG,
-      );
-      return beforeSignature != _visibleHistorySignature();
-    }
-    return false;
+    return (
+      changed: localChanged || cloudChanged,
+      didAttemptCloud: didAttemptCloud
+    );
   }
 
   Future<bool> _mergePreviewMessageIfMissing() async {
@@ -7936,6 +8170,7 @@ class _ChatState extends State<Chat> {
       conversationID: conversationID,
       isRouteVisible: isVisible,
       hasVisibleMessages: hasMessages,
+      sourceToken: _externalEntrySourceToken,
     );
   }
 
@@ -7959,6 +8194,7 @@ class _ChatState extends State<Chat> {
   void _clearExternalEntryState([String? conversationID]) {
     ExternalChatEntryService.instance.clearActiveChatState(
       conversationID ?? _resolvedConversationID(),
+      sourceToken: _externalEntrySourceToken,
     );
     _lastPublishedExternalEntryState = null;
   }
@@ -8212,20 +8448,19 @@ class _ChatState extends State<Chat> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _chatOpenInitStopwatch.start();
     _c2cPermission.onTransitionToBlocked = _syncInFlightOutgoingOnC2cBlocked;
     _groupLiveState.addListener(_onGroupLiveStateChanged);
     GroupLiveIndexStore.instance.addListener(_onGroupLiveIndexStoreChanged);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) {
-        return;
-      }
-      unawaited(DiceAssetWarmup.warm(context));
-    });
+    GroupLocalStore.instance.commitListenable.addListener(_onGroupStoreCommit);
     _openLifecycle.clearedExternalEntryOnDeactivate = false;
     ConversationDeletedBus.instance.revision.addListener(
       _onConversationDeletedBus,
     );
     _conversation = _normalizedConversationForChat(widget.selectedConversation);
+    _beginChatOpenGeneration();
+    _chatOpenPhaseGeneration = _openLifecycle.beginConversation();
     if (_getConvType() == ConvType.c2c) {
       final peerId = widget.selectedConversation.userID?.trim() ?? '';
       if (peerId.isNotEmpty) {
@@ -8318,6 +8553,9 @@ class _ChatState extends State<Chat> {
         openedConversationId,
         conversationType: _getConvType(),
       );
+      ExternalChatEntryService.instance.claimActiveChatSource(
+        _externalEntrySourceToken,
+      );
     }
     DeviceSyncService.instance.prepareForChatNavigation();
     DeviceSyncService.instance.beginForegroundMediaWork(
@@ -8339,31 +8577,7 @@ class _ChatState extends State<Chat> {
     _syncChatHeaderState(notify: false);
     _seedGroupLiveFromIndex();
     _syncChatTopFixState(notify: false);
-    if (_getConvType() == ConvType.group) {
-      // 进群尽早拉当前直播，顶部横幅不必等 post-open P2。
-      unawaited(_loadGroupLiveCurrent());
-      _startGroupLiveCurrentPoll();
-    } else {
-      _stopGroupLiveCurrentPoll();
-    }
-    unawaited(_hydrateGroupDisplayFromLocal());
-    unawaited(_loadGroupMemberCount());
-    unawaited(_resolveImGroupIdAfterOpen());
-    // 先灌本地禁言/身份；有缓存则勿与进页抢网络，转场后再补后端权威态。
-    unawaited(_seedSelfMemberFromLocalStore());
-    if (_getConvType() == ConvType.group) {
-      final groupId = ChatIdFormat.normalizeGroupId(
-        widget.selectedConversation.groupID,
-      );
-      final selfId = ContactSocialCacheStore.safeLoginUserId().trim();
-      final hasLocalSelf = groupId.isNotEmpty &&
-          selfId.isNotEmpty &&
-          GroupMemberStore.instance.memberOf(groupId, selfId) != null;
-      if (groupId.isNotEmpty && !hasLocalSelf) {
-        // 无本地成员缓存：尽快拉禁言，避免输入栏长时间错误可发。
-        unawaited(_fetchAndStoreBackendMuteStatus(groupId));
-      }
-    }
+    _stopGroupLiveCurrentPoll();
     _clearMountedDisplayListCache();
     if (openedConversationId.isNotEmpty) {
       unawaited(
@@ -8387,14 +8601,7 @@ class _ChatState extends State<Chat> {
         delay: const Duration(milliseconds: 1400),
         callOnly: true,
       );
-      final cachedMessages =
-          serviceLocator<TUIChatGlobalModel>().getMessageList(convId);
-      if (cachedMessages != null && cachedMessages.isNotEmpty) {
-        ChatImageMessagePrefetch.fromMessages(cachedMessages);
-      }
     }
-    // 转场前预热会话/首屏头像，降低气泡大图挤掉 imageCache 后的闪动。
-    unawaited(_warmAvatarsOnChatOpen());
     if (convId.isNotEmpty) {
       PushFocusService.instance.enterChat(
         conversationType: _getConvType(),
@@ -8406,6 +8613,9 @@ class _ChatState extends State<Chat> {
         _handleGroupLiveIncomingMessage(message);
         unawaited(
             MessageMediaMetadataStore.instance.upsertFromMessage(message));
+        if (_getConvType() == ConvType.c2c) {
+          ChatImageMessagePrefetch.prefetchThumbnailForMessage(message);
+        }
         if (ChatImageMessagePrefetch.needsOnlineUrlResolution(
           message,
           includeSelf: true,
@@ -8430,57 +8640,37 @@ class _ChatState extends State<Chat> {
         return message;
       },
       didGetHistoricalMessageList: (List<V2TimMessage> messageList) async {
-        await MessageMediaMetadataStore.instance.hydrateMessages(messageList);
-        unawaited(
-          MessageMediaMetadataStore.instance.persistFromMessages(messageList),
+        _completeChatOpenInitStage(
+          _ChatOpenInitStage.sdkReady,
+          count: messageList.length,
+          source: 'sdk_history_callback',
         );
-        StickerMessagePrefetch.fromMessages(messageList);
-        ChatImageMessagePrefetch.fromHistoricalBatch(messageList);
-        // 本地历史必须先提交上屏；缺失的在线图片 URL 在后台补齐，不能
-        // 把 SDK/网络耗时放进 didGetHistoricalMessageList 关键路径。
-        unawaited(
-          ChatImageMessagePrefetch.resolveOnlineUrlsForMessages(messageList)
-              .then(
-            (_) {
-              unawaited(
-                MessageMediaMetadataStore.instance.persistFromMessages(
-                  messageList,
-                ),
-              );
-              ChatImageMessagePrefetch.fromHistoricalBatch(messageList);
-            },
-          ).catchError((_) {}),
+        // Media metadata, sticker scans and image prefetch are enrichment.
+        // Keep the history callback limited to the authoritative list commit.
+        _pendingOpenHistoryMediaEnrichment = messageList;
+        // C2C/group histories can contain both the server lk_call terminal
+        // message and our local terminal projection for the same callId.
+        // Normalize call candidates on every conversation type so those two
+        // sources converge before the first history frame is mounted.
+        final normalized = CallBubbleDedupe.normalizeCallHistoryMessages(
+          messageList,
+          preserveTipIdentity: true,
         );
-        final skipCallNormalize =
-            _getConvType() == ConvType.c2c || _getConvType() == ConvType.group;
-        final normalized = skipCallNormalize
-            ? messageList
-            : CallBubbleDedupe.normalizeCallHistoryMessages(
-                messageList,
-                preserveTipIdentity: true,
-              );
         final deduped = TUIChatGlobalModel.dedupeMessages(normalized);
-        if (deduped.length != messageList.length) {
-          // ignore: avoid_print
-          print(
-            '[CHAT_JITTER] event=call_bubble_normalize conv=${_getConvID()} '
-            'openSeq=${ChatJitterDiag.openSeq} '
-            'before=${messageList.length} after=${deduped.length} '
-            'delta=${deduped.length - messageList.length}',
-          );
-        }
-        // After history lands for list→chat open; filter logs: [RegExpProbe]
-        RegExpProbe.dump(reason: 'list_to_chat_didGetHistoricalMessageList');
-        RegExpProbe.reset();
+        _completeChatOpenInitStage(
+          _ChatOpenInitStage.historyReady,
+          count: deduped.length,
+          source: 'sdk_history_commit',
+        );
+        _markChatOpenHistoryReady();
+        RegExpProbe.dump(reason: 'didGetHistoricalMessageList');
         return deduped;
       },
       messageShouldMount: _messageShouldMountInHistory,
       messageListShouldMount: _normalizeMessageListForMount,
       messageDidSend: (sendMsgRes) {
         final conversationId = _resolvedConversationID();
-        print('[ChatInputDiag] host=message_did_send conv=$conversationId '
-            'code=${sendMsgRes.code} hasData=${sendMsgRes.data != null}');
-        if (conversationId.isNotEmpty) {
+        if (sendMsgRes.code == 0 && conversationId.isNotEmpty) {
           unawaited(_clearChatLocalDraftAfterSend(conversationId));
         }
         // 己方发送不走通知侧 patch；SDK onConversationChanged 若因群 ID
@@ -8547,12 +8737,9 @@ class _ChatState extends State<Chat> {
         }
       },
     );
-    if (openConvKey.isNotEmpty) {
-      // Ready / 内存已齐：首帧挂重体，转场里就是完整记录。
-      _mountHeavyChatBodyOrReady(openConvKey: openConvKey);
-    } else {
-      _mountHeavyChatBodyOrReady(openConvKey: '');
-    }
+    // Telegram-style stable surface: the real chat tree exists on the first
+    // route frame. History readiness is represented inside that tree.
+    _mountStableChatBody(openConvKey: openConvKey);
     _ensureMessageItemBuilder();
     _chatGlobalModel = serviceLocator<TUIChatGlobalModel>();
     _chatGlobalModel!.addListener(_onChatGlobalModelChanged);
@@ -8663,6 +8850,19 @@ class _ChatState extends State<Chat> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached) {
+      // Read the controller synchronously before the app can suspend. The
+      // queued write also cancels the normal debounce, closing the final-input
+      // loss window when users background the app immediately after typing.
+      unawaited(_persistChatLocalDraft());
+    }
+  }
+
+  @override
   void deactivate() {
     final route = ModalRoute.of(context);
     final globalModel = serviceLocator<TUIChatGlobalModel>();
@@ -8709,14 +8909,35 @@ class _ChatState extends State<Chat> {
         return;
       }
       // 真·二级页返回：空列表重拉，有消息则贴底刷新，避免整页空白。
-      unawaited(
-        _recoverChatHistoryAfterOverlayReturn(reason: 'route_reactivated'),
-      );
+      // If a previous-direction pagination is in flight, skip the
+      // aggressive jumpTo+setState to avoid discarding the in-flight page.
+      // Fall back to a 2s timeout guard.
+      final model = _chatController.model;
+      final hasInFlightPrevious = model != null && model.isLoadingChatHistory;
+      if (hasInFlightPrevious) {
+        _restoreActiveChatRegistry(routeVisible: true);
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted) {
+            unawaited(
+              _recoverChatHistoryAfterOverlayReturn(
+                  reason: 'route_reactivated'),
+            );
+          }
+        });
+      } else {
+        unawaited(
+          _recoverChatHistoryAfterOverlayReturn(reason: 'route_reactivated'),
+        );
+      }
     }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _mobileCommitGuard.advancePage();
+    _chatOpenGeneration++;
+    _pendingOpenHistoryMediaEnrichment = null;
     ConversationDeletedBus.instance.revision.removeListener(
       _onConversationDeletedBus,
     );
@@ -8735,6 +8956,8 @@ class _ChatState extends State<Chat> {
     _headerState.dispose();
     _groupLiveState.removeListener(_onGroupLiveStateChanged);
     GroupLiveIndexStore.instance.removeListener(_onGroupLiveIndexStoreChanged);
+    GroupLocalStore.instance.commitListenable
+        .removeListener(_onGroupStoreCommit);
     _stopGroupLiveCurrentPoll();
     _groupLiveState.dispose();
     _topFixState.dispose();
@@ -8860,8 +9083,17 @@ class _ChatState extends State<Chat> {
         )) {
       return;
     }
+    final generation = _chatOpenGeneration;
+    final commitToken = _mobileCommitGuard.begin(
+      'call-history-refresh',
+      key: convId,
+    );
     _callBubbleRefreshTimer?.cancel();
     _callBubbleRefreshTimer = Timer(const Duration(milliseconds: 60), () {
+      if (!_isChatOpenGenerationCurrent(generation, convId) ||
+          !_mobileCommitGuard.canCommit(commitToken)) {
+        return;
+      }
       unawaited(_refreshChatHistoryAfterCallEnd());
     });
   }
@@ -9033,11 +9265,12 @@ class _ChatState extends State<Chat> {
             source: source,
             previewAhead: previewAhead,
           );
-          final changed = await _pullLatestMessagesFromAnchor(
+          final pullResult = await _pullLatestMessagesFromAnchor(
             model: model,
             source: source,
             allowCloudPull: shouldAllowCloudCatchUp,
           );
+          final changed = pullResult.changed;
           hasMessages = _hasVisibleHistoryMessages();
           ExternalChatEntryService.instance.logFlow(
             'history_recovery_pull_done',
@@ -9045,6 +9278,7 @@ class _ChatState extends State<Chat> {
             conversationID: current,
             extras: <String, Object?>{
               'changed': changed,
+              'didAttemptCloud': pullResult.didAttemptCloud,
               'hasMessages': hasMessages,
               'previewAhead': previewAhead,
               'anchorMsgID': anchorMsgID,
@@ -9066,7 +9300,7 @@ class _ChatState extends State<Chat> {
             previewAhead: previewAhead,
             hasDeferredIncoming: hasDeferredIncoming,
             cloudCatchUpRequired: shouldAllowCloudCatchUp && !previewAhead,
-            cloudCatchUpAttempted: shouldAllowCloudCatchUp,
+            cloudCatchUpAttempted: pullResult.didAttemptCloud,
           )) {
             final savedDelayMs = retryDelays
                 .skip(index + 1)
@@ -9361,9 +9595,6 @@ class _ChatState extends State<Chat> {
   List<V2TimMessage> _normalizeCallHistoryMessages(
     List<V2TimMessage> messageList,
   ) {
-    if (_getConvType() == ConvType.c2c || _getConvType() == ConvType.group) {
-      return messageList;
-    }
     return CallBubbleDedupe.normalizeCallHistoryMessages(
       messageList,
       preserveTipIdentity: true,
@@ -9711,6 +9942,31 @@ class _ChatState extends State<Chat> {
       widget.selectedConversation,
     );
     if (oldConversationID != newConversationID) {
+      final oldInputText =
+          _chatController.textFieldController?.textEditingController?.text ??
+              '';
+      if (!_draft.shouldSuppressLifecyclePersist &&
+          oldConversationID.isNotEmpty) {
+        _draft.cancelDebounce();
+        unawaited(
+          _persistChatLocalDraftText(
+            oldInputText,
+            _draft.writeGeneration,
+            conversationID: oldConversationID,
+            enforceCurrentGeneration: false,
+          ),
+        );
+      }
+      _draft.beginConversation();
+      _mobileCommitGuard.advanceConversation();
+      _beginChatOpenGeneration();
+      _chatOpenPhaseGeneration = _openLifecycle.beginConversation();
+      _chatOpenCompletedStages.clear();
+      _chatOpenBackgroundParts.clear();
+      _pendingOpenHistoryMediaEnrichment = null;
+      _chatOpenInitStopwatch
+        ..reset()
+        ..start();
       final oldGroupId = oldWidget.selectedConversation.groupID?.trim() ?? '';
       if (oldGroupId.isNotEmpty) {
         GroupMetadataRefreshCoordinator.instance.invalidate(oldGroupId);
@@ -9740,19 +9996,16 @@ class _ChatState extends State<Chat> {
       _groupSide.agentRebateGroupEnabled = false;
       _groupSide.agentRebateIdentityEnabled = false;
       _groupSide.groupNoticeBanner = '';
+      // Plan 095：切会话时清空旧群的三公/游戏状态，防止旧群的网络结果
+      // 晚到后把 sangongTenantId / canEditConfig 等写入新会话。
+      _groupSide.clearSangongAccess();
+      _groupSide.disableGroupGame();
       _watchingGroupLive = false;
       _groupLiveIndexFingerprint = null;
       _seedGroupDisplayFromMemory();
       _seedGroupLiveFromIndex();
       _syncChatTopFixState();
-      unawaited(_hydrateGroupDisplayFromLocal());
-      unawaited(_loadGroupMemberCount());
-      if (_getConvType() == ConvType.group) {
-        unawaited(_loadGroupLiveCurrent());
-        _startGroupLiveCurrentPoll();
-      } else {
-        _stopGroupLiveCurrentPoll();
-      }
+      _stopGroupLiveCurrentPoll();
       _resolvedPeerFaceUrl = null;
       _resolvedPeerFaceUrlForId = null;
       _peerLocalProfile = null;
@@ -9765,21 +10018,12 @@ class _ChatState extends State<Chat> {
         C2cFriendMessageGuard.invalidate(peer);
       }
       _syncChatHeaderState();
-      unawaited(_loadPeerFaceUrl());
-      unawaited(_loadPeerLocalProfile());
-      _schedulePeerMessagePermissionSync(forceNetwork: true);
+      // Peer/network enrichment is restarted by the bounded post-open queue.
       _resetWalletCardState();
       _ensureMessageItemBuilder();
       _invalidateChatConfigCache();
       final newConvKey = _getConvID()?.trim() ?? '';
-      if (_heavyChatBodyMounted) {
-        _startOpenHistoryGate(newConvKey);
-      } else {
-        _mountHeavyChatBody(
-          openConvKey: newConvKey,
-          reason: 'conversation_switch',
-        );
-      }
+      _startOpenHistoryGate(newConvKey);
     }
     if (oldConversationID != newConversationID ||
         oldWidget.selectedConversation.groupID !=
@@ -9951,19 +10195,6 @@ class _ChatState extends State<Chat> {
       theme,
       isDark: isDarkTheme,
     );
-
-    if (!_heavyChatBodyMounted) {
-      return AnnotatedRegion<SystemUiOverlayStyle>(
-        value: overlayStyle,
-        child: TickerMode(
-          enabled: routeVisible,
-          child: TencentPage(
-            name: 'chat',
-            child: _buildChatTransitionShell(theme),
-          ),
-        ),
-      );
-    }
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: overlayStyle,

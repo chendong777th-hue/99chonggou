@@ -762,10 +762,13 @@ class V2TIMMessageManager {
       if (res.code == 0) {
         return CommonUtils.returnSuccessForCb(jsToMap(res.data));
       } else {
-        return CommonUtils.returnError('设置已读失败');
+        return _readReceiptError(
+          res.code,
+          'setMessageRead failed: ${res.data ?? ''}',
+        );
       }
     } catch (error) {
-      return CommonUtils.returnError(error);
+      return _readReceiptError(-1, error.toString());
     }
   }
 
@@ -1549,7 +1552,27 @@ class V2TIMMessageManager {
     required List<String> messageIDList,
   }) async {
     try {
-      final originalMessageList = messageIDList.map((e) => timeweb!.findMessage(e)).toList();
+      final normalizedIDs = messageIDList
+          .map((id) => id.trim())
+          .where((id) => id.isNotEmpty)
+          .toSet()
+          .toList(growable: false);
+      if (normalizedIDs.isEmpty) {
+        return CommonUtils.returnSuccess<List<V2TimMessageReceipt>>(
+          const <V2TimMessageReceipt>[],
+        );
+      }
+      final originalMessageList = <dynamic>[];
+      for (final messageID in normalizedIDs) {
+        final original = timeweb!.findMessage(messageID);
+        if (original == null) {
+          return _readReceiptValueError<List<V2TimMessageReceipt>>(
+            -1,
+            'message is not available in the Web SDK cache',
+          );
+        }
+        originalMessageList.add(original);
+      }
       final res = await wrappedPromiseToFuture(timeweb!.getMessageReadReceiptList(originalMessageList));
       if (res.code == 0) {
         final resData = res.data;
@@ -1569,9 +1592,15 @@ class V2TIMMessageManager {
         }).toList();
         return CommonUtils.returnSuccess<List<V2TimMessageReceipt>>(formatedList);
       }
-      return CommonUtils.returnSuccess<List<V2TimMessageReceipt>>([]);
+      return _readReceiptValueError<List<V2TimMessageReceipt>>(
+        res.code,
+        'getMessageReadReceiptList failed: ${res.data ?? ''}',
+      );
     } catch (error) {
-      return CommonUtils.returnErrorForValueCb(error.toString());
+      return _readReceiptValueError<List<V2TimMessageReceipt>>(
+        -1,
+        error.toString(),
+      );
     }
   }
 
@@ -1579,15 +1608,51 @@ class V2TIMMessageManager {
     List<String>? messageIDList,
   }) async {
     try {
-      final originalMessageList = messageIDList?.map((e) => timeweb!.findMessage(e)).toList();
+      final normalizedIDs = (messageIDList ?? const <String>[])
+          .map((id) => id.trim())
+          .where((id) => id.isNotEmpty)
+          .toSet()
+          .toList(growable: false);
+      if (normalizedIDs.isEmpty) {
+        return CommonUtils.returnSuccessForCb(null);
+      }
+      final originalMessageList = <dynamic>[];
+      for (final messageID in normalizedIDs) {
+        final original = timeweb!.findMessage(messageID);
+        if (original == null) {
+          return _readReceiptError(
+            -1,
+            'message is not available in the Web SDK cache',
+          );
+        }
+        originalMessageList.add(original);
+      }
       final res = await wrappedPromiseToFuture(timeweb!.sendMessageReadReceipt(originalMessageList));
       if (res.code == 0) {
         return CommonUtils.returnSuccessForCb(res.data);
       }
-      return CommonUtils.returnSuccessForCb([]);
+      return _readReceiptError(
+        res.code,
+        'sendMessageReadReceipt failed: ${res.data ?? ''}',
+      );
     } catch (error) {
-      return CommonUtils.returnError(error.toString());
+      return _readReceiptError(-1, error.toString());
     }
+  }
+
+  V2TimValueCallback<T> _readReceiptValueError<T>(int code, String desc) {
+    return V2TimValueCallback<T>.fromJson(<String, dynamic>{
+      'code': code == 0 ? -1 : code,
+      'desc': desc,
+      'data': null,
+    });
+  }
+
+  V2TimCallback _readReceiptError(int code, String desc) {
+    return V2TimCallback.fromJson(<String, dynamic>{
+      'code': code == 0 ? -1 : code,
+      'desc': desc,
+    });
   }
 
   Future<V2TimValueCallback<V2TimGroupMessageReadMemberList>> getGroupMessageReadMemberList({

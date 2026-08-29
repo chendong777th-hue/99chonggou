@@ -70,44 +70,42 @@ void main() {
   });
 
   group('ChatOpenViewportCoordinator requestId', () {
-    test('takeOpenWasViewportReady is single-consume', () {
+    test('reset clears coordinator state', () {
       final c = ChatOpenViewportCoordinator.instance;
       c.resetForTest();
-      // Simulate pending flag without full prepare (no service locator).
-      // prepareForOpen needs locator; only test take API via reflection-free
-      // path: mark via prepare is integration; here we only assert reset clears.
-      expect(c.takeOpenWasViewportReady('c2c_u1'), isFalse);
       expect(c.currentRequestId, 0);
       expect(c.phase, ChatOpenViewportPhase.idle);
     });
   });
 
   group('source contracts', () {
-    test('tap path uses viewport coordinator before push', () {
+    test('tap path starts warm without awaiting before navigation', () {
       final conv = File('lib/src/conversation.dart').readAsStringSync();
-      expect(conv.contains('ChatOpenViewportCoordinator.instance.prepareForOpen'),
-          isTrue);
+      expect(
+        conv.contains('ChatOpenViewportCoordinator.instance\n'
+            '                .prepareForOpen(conversation: selectedConv)'),
+        isTrue,
+      );
       expect(conv.contains('markTransitioning'), isTrue);
       final prepareAt = conv.indexOf('prepareForOpen');
-      final pushAt = conv.indexOf('Navigator.push');
+      final backgroundAt = conv.lastIndexOf('unawaited(() async', prepareAt);
+      final pushAt = conv.indexOf('openOrReuseAppChat');
+      expect(backgroundAt, greaterThanOrEqualTo(0));
       expect(prepareAt, greaterThanOrEqualTo(0));
+      expect(prepareAt, greaterThan(backgroundAt));
       expect(pushAt, greaterThan(prepareAt));
     });
 
-    test('chat Ready bypasses shell delay; fallback keeps schedule', () {
+    test('chat mounts one stable real tree on the first route frame', () {
       final chat = File('lib/src/chat.dart').readAsStringSync();
-      expect(chat.contains('_mountHeavyChatBodyOrReady'), isTrue);
-      expect(chat.contains('_liveOpenViewportIsReady'), isTrue);
-      expect(chat.contains("'viewport_ready'"), isTrue);
-      expect(chat.contains('live_viewport_ready'), isTrue);
-      expect(chat.contains('_scheduleHeavyChatBodyMount'), isTrue);
-      expect(
-        chat.contains('takeOpenWasViewportReady'),
-        isTrue,
-      );
+      expect(chat.contains('_mountStableChatBody'), isTrue);
+      expect(chat.contains("'stable_chat_body_mounted'"), isTrue);
+      expect(chat.contains('_heavyChatBodyMounted'), isFalse);
+      expect(chat.contains('_buildChatTransitionShell'), isFalse);
+      expect(chat.contains('takeOpenWasViewportReady'), isFalse);
     });
 
-    test('prepare waits up to 400ms for local complete window', () {
+    test('background prepare stays bounded to 400ms', () {
       final coord = File(
         'lib/src/services/chat_open_viewport_coordinator.dart',
       ).readAsStringSync();
@@ -117,10 +115,12 @@ void main() {
         ChatOpenViewportCoordinator.prepareTimeout,
         const Duration(milliseconds: 400),
       );
+      expect(coord.contains('不能\n/// 决定页面是否允许 push'), isTrue);
     });
 
     test('chat route isolates first paint with RepaintBoundary', () {
-      final route = File('lib/src/navigation/app_chat_route.dart').readAsStringSync();
+      final route =
+          File('lib/src/navigation/app_chat_route.dart').readAsStringSync();
       expect(route.contains('RepaintBoundary('), isTrue);
       final boundaryAt = route.indexOf('RepaintBoundary(');
       final chatAt = route.indexOf('Chat(');

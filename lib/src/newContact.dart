@@ -52,7 +52,6 @@ class _NewContactState extends State<NewContact> {
     });
   }
 
-
   Future<void> _loadPendingRequests() async {
     if (_loadingPendingRequests) {
       return;
@@ -359,10 +358,7 @@ class _NewContactState extends State<NewContact> {
     if (!mounted) {
       return;
     }
-    await Navigator.push(
-      context,
-      appChatRoute(conversation),
-    );
+    await openOrReuseAppChat(context, conversation);
   }
 
   Future<void> _openAuditPage(
@@ -383,7 +379,6 @@ class _NewContactState extends State<NewContact> {
       setState(() {});
     }
   }
-
 
   String _getShowName(FriendRequestRecord item) {
     return TencentUtils.checkString(item.nickname) ??
@@ -1125,9 +1120,8 @@ class _NewContactState extends State<NewContact> {
         child: SizedBox(
           width: double.infinity,
           child: FilledButton(
-            onPressed: _selectedKeys.isEmpty || _deleting
-                ? null
-                : _deleteSelected,
+            onPressed:
+                _selectedKeys.isEmpty || _deleting ? null : _deleteSelected,
             style: FilledButton.styleFrom(
               backgroundColor: const Color(0xFFE64340),
               disabledBackgroundColor: dividerColor,
@@ -1274,7 +1268,8 @@ class _NewContactState extends State<NewContact> {
       builder: (context, _) {
         return TUIKitScreenUtils.getDeviceWidget(
           context: context,
-          desktopWidget: _buildPageScaffold(context, showAppBar: _hasListItems()),
+          desktopWidget:
+              _buildPageScaffold(context, showAppBar: _hasListItems()),
           defaultWidget: _buildPageScaffold(context, showAppBar: true),
         );
       },

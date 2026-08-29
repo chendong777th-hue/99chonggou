@@ -34,10 +34,12 @@ import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/tim_uikit_chat_co
 import 'package:tencent_cloud_chat_uikit/ui/widgets/chat_message_enter_animation.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/chat_message_row_reveal.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/chat_message_input_anchor.dart';
+import 'package:tencent_cloud_chat_uikit/ui/widgets/chat_message_list_skeleton.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKItMessageList/utils.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/keepalive_wrapper.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_history_trace.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_jitter_diag.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_main_thread_perf.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_resource_sample.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_geom_settle_trace.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_history_open_layout_ready.dart';
@@ -175,6 +177,14 @@ class _TIMUIKitHistoryMessageListState
   // 只更新锚点"，保证一定能在 120ms 后触发一次加载。
   _PreviousLoadAnchor? _pendingLoadPreviousAnchor;
   bool _userScrollGestureActive = false;
+  // A pagination request can complete while the user is still dragging. Keep
+  // the restore alive until ScrollEnd instead of exhausting frame retries.
+  _PaginationRestoreRequest? _pendingPaginationRestoreAfterScrollEnd;
+  // Once the user continues the same gesture after a page is requested, the
+  // saved pre-request pixels are stale. Never restore that old offset at the
+  // next ScrollEnd; the gesture owns the viewport from that point on.
+  bool _paginationUserScrollSinceLoad = false;
+  int _lastPaginationScrollWriteLogMs = 0;
   Timer? _postScrollInboundFlushTimer;
   Timer? _unreadTongueMetricsThrottleTimer;
   static const int _postScrollInboundFlushDelayMs = 160;
@@ -231,6 +241,7 @@ class _TIMUIKitHistoryMessageListState
   TUIChatGlobalModel? _chatGlobalModel;
   List<V2TimMessage?> _cachedUnreadList = [];
   List<V2TimMessage?> _cachedReadList = [];
+  List<V2TimMessage?>? _contextMenuFrozenVisibleMessages;
   int _cacheUnreadCount = -1;
   int _cacheMessageListLen = -1;
   int _cacheUnreadEndPoint = -1;
@@ -244,10 +255,16 @@ class _TIMUIKitHistoryMessageListState
   Map<String, int> _globalIndexMap = {};
   Map<String, int> _globalMessageIdentityIndexMap = {};
   bool _deferUnreadCenterPartition = false;
+  int? _contextMenuFrozenLayoutUnreadCount;
+  int _lastResolvedLayoutUnreadCount = 0;
   int _lastDiagLayoutSafeUnread = -1;
   int _lastDiagLayoutUnread = -1;
   double? _incomingScrollAnchorPixels;
   int _incomingScrollAnchorGeneration = 0;
+  int _contextMenuViewportRestoreGeneration = 0;
+  bool _contextMenuViewportRestoreScheduled = false;
+  bool _contextMenuViewportRestoreCallbackPending = false;
+  int _contextMenuViewportStableFrames = 0;
   int _searchJumpStabilizeUntilMs = 0;
   int _searchJumpGeneration = 0;
   String? _initialUnreadAnchorConversationID;
@@ -283,6 +300,8 @@ class _TIMUIKitHistoryMessageListState
   /// 一旦对用户亮过首屏，epoch 重置也不得再 Opacity=0，否则会「先出记录再闪一下」。
   bool _historyOpenRevealPainted = false;
   bool _compactHistoryCacheExtent = false;
+  int _lastScrollNearTopTraceMs = 0;
+  String _lastScrollNearTopTraceAnchor = '';
   int _historyOpenRevealPostFrameCount = 0;
   int? _historyOpenRevealDeadlineMs;
   bool _historyOpenRevealWaitScheduled = false;
@@ -317,6 +336,21 @@ class _TIMUIKitHistoryMessageListState
   /// reveal 后因异步历史写回清过 latch / 装不下时：禁止再 `spacer_prime`。
   bool _blockShortSpacerReprimeAfterReveal = false;
 
+  static const Duration _openingPlaceholderDelay = Duration(milliseconds: 80);
+  static const Duration _openingPlaceholderFadeDuration =
+      Duration(milliseconds: 160);
+  final ChatHistoryOpeningPlaceholderController _openingPlaceholder =
+      ChatHistoryOpeningPlaceholderController();
+  Timer? _openingPlaceholderDelayTimer;
+  late final AnimationController _openingPlaceholderFadeController;
+  late final Animation<double> _openingPlaceholderOpacity;
+  int _openingPlaceholderFadeGeneration = 0;
+  int? _openingPlaceholderFirstPaintAtMs;
+  bool _openingPlaceholderDismissScheduled = false;
+  bool _messagesFirstVisibleScheduled = false;
+  bool _messagesFirstVisibleReported = false;
+  String _openingPlaceholderDismissSource = 'reveal';
+
   @override
   void initState() {
     super.initState();
@@ -348,6 +382,20 @@ class _TIMUIKitHistoryMessageListState
     );
     _routeScroll.openedWithCachedHistory =
         globalModel.rawMessageCount(convId) > 0;
+    _openingPlaceholderFadeController = AnimationController(
+      vsync: this,
+      duration: _openingPlaceholderFadeDuration,
+      value: 1,
+    );
+    _openingPlaceholderOpacity = CurvedAnimation(
+      parent: _openingPlaceholderFadeController,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeOutCubic,
+    );
+    _openingPlaceholderFadeController.addStatusListener(
+      _onOpeningPlaceholderFadeStatus,
+    );
+    _beginOpeningPlaceholderForCurrentConversation();
     if (_routeScroll.openedWithCachedHistory &&
         globalModel.hasInitialHistoryLoaded(convId)) {
       _routeScroll.wasInitialHistoryBootstrapping = false;
@@ -464,27 +512,199 @@ class _TIMUIKitHistoryMessageListState
     if (count <= 0) {
       return;
     }
+    if (_historyOpenRevealPainted && !_openingPlaceholder.shouldPaint) {
+      _scheduleMessagesFirstVisibleAfterReveal(source: reason);
+    }
+  }
+
+  bool get _isOpeningPlaceholderSearchJump =>
+      widget.searchJumpAnchor != null || widget.initFindingMsg != null;
+
+  void _beginOpeningPlaceholderForCurrentConversation() {
+    _openingPlaceholderDelayTimer?.cancel();
+    _openingPlaceholderDelayTimer = null;
+    _openingPlaceholderFadeController.stop();
+    _openingPlaceholderFadeController.value = 1;
+    _openingPlaceholderDismissScheduled = false;
+    _openingPlaceholderFadeGeneration = 0;
+    _openingPlaceholderFirstPaintAtMs = null;
+    final globalModel = widget.model.globalModel;
+    final conversationID = _conversationId();
+    final generation = _openingPlaceholder.begin(
+      initialMessageCount: globalModel.rawMessageCount(conversationID),
+      initialHistoryLoaded: globalModel.hasInitialHistoryLoaded(conversationID),
+      isSearchJump: _isOpeningPlaceholderSearchJump,
+      hasLockedEntryUnread: globalModel.hasLockedEntryUnreadFor(conversationID),
+    );
+    if (_openingPlaceholder.phase !=
+        ChatHistoryOpeningPlaceholderPhase.waiting) {
+      return;
+    }
+    _openingPlaceholderDelayTimer = Timer(
+      _openingPlaceholderDelay,
+      () => _showOpeningPlaceholderAfterDelay(generation),
+    );
+  }
+
+  void _showOpeningPlaceholderAfterDelay(int generation) {
+    _openingPlaceholderDelayTimer = null;
+    if (!mounted) {
+      return;
+    }
+    final globalModel = widget.model.globalModel;
+    final conversationID = _conversationId();
+    final shown = _openingPlaceholder.showAfterDelay(
+      generation: generation,
+      messageCount: globalModel.rawMessageCount(conversationID),
+      initialHistoryLoaded: globalModel.hasInitialHistoryLoaded(conversationID),
+      revealPainted: _historyOpenRevealPainted,
+      isSearchJump: _isOpeningPlaceholderSearchJump,
+      hasLockedEntryUnread: globalModel.hasLockedEntryUnreadFor(conversationID),
+    );
+    if (!shown) {
+      return;
+    }
+    setState(() {});
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) {
+      if (!mounted ||
+          generation != _openingPlaceholder.generation ||
+          !_openingPlaceholder.shouldPaint) {
+        return;
+      }
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      _openingPlaceholderFirstPaintAtMs = nowMs;
+      ChatMainThreadPerf.recordDurationMicros(
+        ChatMainThreadPerf.openingPlaceholderFirstPaintMs,
+        (nowMs - _createdAtMs) * Duration.microsecondsPerMillisecond,
+        source: widget.conversation.type != 1 ? 'group' : 'c2c',
+      );
+      ChatOpenPerfLog.mark(
+        'opening_placeholder_first_paint',
+        conversationID: _conversationId(),
+        extras: <String, Object?>{
+          'delayMs': _openingPlaceholderDelay.inMilliseconds,
+          'isGroup': widget.conversation.type != 1,
+        },
+      );
+    });
+  }
+
+  void _scheduleOpeningPlaceholderDismiss({required String source}) {
+    final phase = _openingPlaceholder.phase;
+    if (phase == ChatHistoryOpeningPlaceholderPhase.inactive ||
+        phase == ChatHistoryOpeningPlaceholderPhase.removed) {
+      _scheduleMessagesFirstVisibleAfterReveal(source: source);
+      return;
+    }
+    if (phase == ChatHistoryOpeningPlaceholderPhase.dismissing ||
+        _openingPlaceholderDismissScheduled) {
+      return;
+    }
+    _openingPlaceholderDismissScheduled = true;
+    final generation = _openingPlaceholder.generation;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _openingPlaceholderDismissScheduled = false;
+      if (!mounted || generation != _openingPlaceholder.generation) {
+        return;
+      }
+      _openingPlaceholderDelayTimer?.cancel();
+      _openingPlaceholderDelayTimer = null;
+      final shouldFade = _openingPlaceholder.beginDismiss(generation);
+      if (!shouldFade) {
+        _scheduleMessagesFirstVisibleAfterReveal(source: source);
+        return;
+      }
+      _openingPlaceholderDismissSource = source;
+      _openingPlaceholderFadeGeneration = generation;
+      final disableAnimations =
+          MediaQuery.maybeOf(context)?.disableAnimations ?? false;
+      if (disableAnimations) {
+        _finishOpeningPlaceholderDismiss(generation);
+        return;
+      }
+      setState(() {});
+      _openingPlaceholderFadeController.reverse(from: 1);
+    });
+  }
+
+  void _onOpeningPlaceholderFadeStatus(AnimationStatus status) {
+    if (status != AnimationStatus.dismissed ||
+        _openingPlaceholderFadeGeneration <= 0) {
+      return;
+    }
+    _finishOpeningPlaceholderDismiss(_openingPlaceholderFadeGeneration);
+  }
+
+  void _finishOpeningPlaceholderDismiss(int generation) {
+    if (!_openingPlaceholder.finishDismiss(generation)) {
+      return;
+    }
+    _openingPlaceholderFadeGeneration = 0;
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final firstPaintAtMs = _openingPlaceholderFirstPaintAtMs;
+    if (firstPaintAtMs != null) {
+      ChatMainThreadPerf.recordDurationMicros(
+        ChatMainThreadPerf.openingPlaceholderVisibleMs,
+        (nowMs - firstPaintAtMs) * Duration.microsecondsPerMillisecond,
+        source: _openingPlaceholderDismissSource,
+      );
+    }
+    ChatOpenPerfLog.mark(
+      'opening_placeholder_removed',
+      conversationID: _conversationId(),
+      extras: <String, Object?>{
+        'source': _openingPlaceholderDismissSource,
+        'fadeMs': _openingPlaceholderFadeDuration.inMilliseconds,
+        'messageCount': widget.messageList.length,
+      },
+    );
+    if (mounted) {
+      setState(() {});
+    }
+    _scheduleMessagesFirstVisibleAfterReveal(
+      source: 'placeholder_${_openingPlaceholderDismissSource}_removed',
+    );
+  }
+
+  void _scheduleMessagesFirstVisibleAfterReveal({required String source}) {
+    if (_messagesFirstVisibleReported ||
+        _messagesFirstVisibleScheduled ||
+        !_historyOpenRevealPainted ||
+        _openingPlaceholder.shouldPaint) {
+      return;
+    }
+    _messagesFirstVisibleScheduled = true;
+    final conversationID = _conversationId();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _messagesFirstVisibleScheduled = false;
+      if (!mounted ||
+          conversationID != _conversationId() ||
+          !_historyOpenRevealPainted ||
+          _openingPlaceholder.shouldPaint) {
         return;
       }
       final painted = widget.messageList.length;
       if (painted <= 0) {
         return;
       }
-      ChatOpenPerfLog.markMessagesFirstVisible(
-        conversationID: _conversationId(),
-        messageCount: painted,
-        source: reason,
+      _messagesFirstVisibleReported = true;
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      ChatMainThreadPerf.recordDurationMicros(
+        ChatMainThreadPerf.messagesFirstVisibleMs,
+        (nowMs - _createdAtMs) * Duration.microsecondsPerMillisecond,
+        count: painted,
+        source: source,
       );
-      // Geom 的 visible 门对齐用户真正看见的揭示帧，避免 Opacity=0 阶段误结算。
-      if (_historyOpenRevealReady) {
-        ChatGeomSettleTrace.markMessagesVisible(
-          conversationID: _conversationId(),
-          messageCount: painted,
-          source: reason,
-        );
-      }
+      ChatOpenPerfLog.markMessagesFirstVisible(
+        conversationID: conversationID,
+        messageCount: painted,
+        source: source,
+      );
+      ChatGeomSettleTrace.markMessagesVisible(
+        conversationID: conversationID,
+        messageCount: painted,
+        source: source,
+      );
     });
   }
 
@@ -594,6 +814,7 @@ class _TIMUIKitHistoryMessageListState
   }) {
     if (_historyOpenRevealReady) {
       _historyOpenRevealPainted = true;
+      _scheduleOpeningPlaceholderDismiss(source: source);
       return;
     }
     final epoch = ChatHistoryOpenLayoutReady.epochOf(_conversationId());
@@ -632,14 +853,7 @@ class _TIMUIKitHistoryMessageListState
         epoch: epoch,
       );
     }
-    final painted = widget.messageList.length;
-    if (painted > 0) {
-      ChatGeomSettleTrace.markMessagesVisible(
-        conversationID: _conversationId(),
-        messageCount: painted,
-        source: 'history_open_reveal_$source',
-      );
-    }
+    _scheduleOpeningPlaceholderDismiss(source: 'history_open_reveal_$source');
   }
 
   void _armHistoryOpenRevealWaitBudget({required bool shortHistory}) {
@@ -1308,12 +1522,28 @@ class _TIMUIKitHistoryMessageListState
 
   void _onGlobalModelUpdated() {
     _onGlobalRouteRestoreChanged();
+    final globalModel = _routeScroll.routeRestoreGlobalModel;
+    // Menu close can change only unread/buffer state, without changing the
+    // message-list length. Arm anchor restoration from the model notification
+    // itself so that path cannot miss the restore transaction.
+    if (globalModel != null &&
+        globalModel.isContextMenuViewportRestoreActive(_conversationId())) {
+      _scheduleContextMenuViewportRestore();
+    }
+    if (globalModel != null && globalModel.isMessageContextMenuOverlayOpen) {
+      // Abort any already-running automatic insertion transaction immediately
+      // on menu open. Waiting for the ticker's next frame leaves a window in
+      // which CVP can write a competing offset under the overlay.
+      _abortViewportInsertSlideForSupersede();
+      _cancelForcePinScroll();
+      _clearIncomingScrollAnchor(reason: 'context_menu_open');
+      return;
+    }
     _onInboundPresentationSupersede();
     if (_viewportInsert.viewportInsertSlideActive) {
       return;
     }
     _onInboundScrollFollowTick();
-    final globalModel = _routeScroll.routeRestoreGlobalModel;
     if (globalModel != null &&
         globalModel.chatConfig.inboundScrollFollowEnabled &&
         globalModel.isChunkedRevealActive(_conversationId())) {
@@ -1471,6 +1701,9 @@ class _TIMUIKitHistoryMessageListState
       return;
     }
     _lastHandledPinSeq = seq;
+    final position = _singleScrollPositionOrNull();
+    debugPrint(
+        '[MessageContextTrace] scroll_mutation type=pin_request conv=$convId seq=$seq force=${globalModel.pinToBottomForce} before=${position?.hasPixels == true ? position!.pixels : 'n/a'} min=${position?.minScrollExtent} max=${position?.maxScrollExtent} menuOpen=${globalModel.isMessageContextMenuOverlayOpen} restore=${globalModel.isContextMenuViewportRestoreActive(_conversationId())}');
     if (globalModel.pinToBottomForce) {
       _scheduleForcePinScrollToBottom();
     } else {
@@ -1510,6 +1743,12 @@ class _TIMUIKitHistoryMessageListState
     if (oldWidget.model.conversationID != widget.model.conversationID) {
       _clearShortHistoryAlignmentLatch();
       _resetHistoryOpenRevealGate();
+      _messagesFirstVisibleScheduled = false;
+      _messagesFirstVisibleReported = false;
+      _routeScroll.openedWithCachedHistory = widget.model.globalModel
+              .rawMessageCount(widget.model.conversationID) >
+          0;
+      _beginOpeningPlaceholderForCurrentConversation();
       _routeScroll.shortHistoryAlignmentSuppressedByLiveInsert = false;
       _paginationUi.triedPreviousAfterNoMore = false;
       _initialUnreadAnchorConversationID = null;
@@ -1551,6 +1790,10 @@ class _TIMUIKitHistoryMessageListState
       _deferUnreadCenterPartition = false;
       _incomingScrollAnchorPixels = null;
       _incomingScrollAnchorGeneration++;
+      _contextMenuViewportRestoreScheduled = false;
+      _contextMenuViewportRestoreCallbackPending = false;
+      _contextMenuViewportStableFrames = 0;
+      _contextMenuViewportRestoreGeneration++;
       _lastDiagLayoutSafeUnread = -1;
       _lastDiagLayoutUnread = -1;
       _paginationUi.previousLoadConsumedThisTopReach = false;
@@ -1572,6 +1815,7 @@ class _TIMUIKitHistoryMessageListState
         _bindActiveScrollController();
         _schedulePinScrollToBottom();
       });
+      _scheduleChatOpenPerfProbe(reason: 'didUpdate_conversation');
     }
     final newestSideAbsorbed = _onMessageListMaybeInserted(
       oldWidget.messageList,
@@ -1887,6 +2131,12 @@ class _TIMUIKitHistoryMessageListState
     _viewportInsert.activeRowRevealMessages.clear();
     _viewportInsert.queuedViewportInsertMessages.clear();
     _viewportInsert.rowRevealFullExtentByKey.clear();
+    _openingPlaceholderDelayTimer?.cancel();
+    _openingPlaceholderDelayTimer = null;
+    _openingPlaceholderFadeController.removeStatusListener(
+      _onOpeningPlaceholderFadeStatus,
+    );
+    _openingPlaceholderFadeController.dispose();
     _viewportInsert.rowRevealController?.dispose();
     _acknowledgeInboundProjectionRevealIfNeeded();
     _inboundScrollFollow?.dispose();
@@ -1898,7 +2148,7 @@ class _TIMUIKitHistoryMessageListState
     _pendingUnreadTongueMetricsList = null;
     _chatGlobalModel?.clearActiveChatScrollController(
         conversationID: _conversationId());
-    _chatGlobalModel?.setMemoryWindowSuppressed(_conversationId(), false);
+    _compactMemoryWindowAtStableBoundary(reason: 'page_dispose');
     _setUserScrolling(false);
     _chatGlobalModel?.clearUnreadTongueMetrics(_conversationId(),
         notify: false);
@@ -1944,14 +2194,37 @@ class _TIMUIKitHistoryMessageListState
         ChatResourceSample.onBottom(rawMessageCount: rawCount);
         if (!_isSearchJumpStabilizing &&
             rawCount > ChatMessageWindowPolicy.softMax) {
-          global.setMemoryWindowSuppressed(convId, false);
-          global.applyMessageMemoryWindowNow(
-            convId,
-            memoryWindowPreferLatest: true,
-          );
+          _compactMemoryWindowAtStableBoundary(reason: 'returned_to_bottom');
         }
       }
     }
+  }
+
+  void _compactMemoryWindowAtStableBoundary({required String reason}) {
+    final globalModel = _chatGlobalModel ?? widget.model.globalModel;
+    final conversationID = _conversationId();
+    final before = globalModel.rawMessageCount(conversationID);
+    globalModel.setMemoryWindowSuppressed(conversationID, false);
+    if (before <= ChatMessageWindowPolicy.softMax) {
+      return;
+    }
+    ChatHistoryTrace.log(
+      'memory_window_compact_stable_boundary',
+      conversationID: conversationID,
+      extras: <String, Object?>{
+        'reason': reason,
+        'before': before,
+        'position': globalModel.getMessageListPosition(conversationID).name,
+        'preferLatest': true,
+      },
+    );
+    // At bottom the reverse list is pinned to its stable edge; on dispose it
+    // is no longer visible. The trim is one authoritative list commit and
+    // never relies on a row RenderObject that the trim itself may evict.
+    globalModel.applyMessageMemoryWindowNow(
+      conversationID,
+      memoryWindowPreferLatest: true,
+    );
   }
 
   void _setCompactHistoryCacheExtent(bool compact) {
@@ -2114,25 +2387,31 @@ class _TIMUIKitHistoryMessageListState
   }
 
   int _layoutUnreadCount(int safeUnreadCount) {
-    if (safeUnreadCount <= 0) {
-      return 0;
-    }
-    // 进房贴底、尚未点击「未读」跳转：禁止 unread center 切分，
-    // 否则 CustomScrollView.center 会把视口锚到首条未读附近（像自动跳转）。
     final globalModel = _chatGlobalModel;
-    if (globalModel != null &&
-        !_firstUnreadAnchorJumped &&
-        globalModel.getMessageListPosition(_conversationId()) ==
+    final menuTransactionActive = globalModel != null &&
+        (globalModel.isMessageContextMenuOverlayOpen ||
+            globalModel.isContextMenuViewportRestoreActive(_conversationId()) ||
+            globalModel.deferredIncomingBufferedCount(_conversationId()) > 0);
+    if (menuTransactionActive) {
+      return _contextMenuFrozenLayoutUnreadCount ??=
+          _lastResolvedLayoutUnreadCount.clamp(0, safeUnreadCount);
+    }
+    _contextMenuFrozenLayoutUnreadCount = null;
+
+    final int resolved;
+    if (safeUnreadCount <= 0) {
+      resolved = 0;
+    } else if (!_firstUnreadAnchorJumped &&
+        globalModel?.getMessageListPosition(_conversationId()) ==
             HistoryMessagePosition.bottom) {
-      return 0;
+      resolved = 0;
+    } else if (!_deferUnreadCenterPartition || !_isReadingHistory()) {
+      resolved = safeUnreadCount;
+    } else {
+      resolved = 0;
     }
-    if (!_deferUnreadCenterPartition) {
-      return safeUnreadCount;
-    }
-    if (!_isReadingHistory()) {
-      return safeUnreadCount;
-    }
-    return 0;
+    _lastResolvedLayoutUnreadCount = resolved;
+    return resolved;
   }
 
   void _maybeLatchUnreadCenterDeferral() {
@@ -2159,7 +2438,10 @@ class _TIMUIKitHistoryMessageListState
   }
 
   bool _shouldCompensateScrollForPagination() {
-    if (_paginationUi.isLoadingPrevious) {
+    if (_paginationUi.isLoadingPrevious ||
+        _paginationUi.paginationRestoreAnchorMsgID != null ||
+        _paginationUi.paginationRestoreAnchorSeq != null ||
+        _paginationUi.previousLoadInFlightAnchorKey != null) {
       return true;
     }
     final until = _paginationUi.scrollPaginationCompensationUntilMs;
@@ -2192,6 +2474,227 @@ class _TIMUIKitHistoryMessageListState
         'scroll_anchor_clear',
         extras: <String, Object?>{'reason': reason},
       );
+    }
+  }
+
+  int? _globalIndexForContextMenuAnchor(
+    MessageContextMenuViewportAnchor anchor,
+  ) {
+    final identity = anchor.identity?.trim() ?? '';
+    final messageList = _currentVisibleMessageList();
+    if (identity.isNotEmpty) {
+      for (var index = 0; index < messageList.length; index++) {
+        final message = messageList[index];
+        if (message == null || message.elemType == 11) {
+          continue;
+        }
+        final msgID = message.msgID?.trim() ?? '';
+        final localID = message.id?.toString().trim() ?? '';
+        if (msgID == identity || localID == identity) {
+          return index;
+        }
+      }
+    }
+    final seq = anchor.seq?.trim() ?? '';
+    if (seq.isNotEmpty) {
+      for (var index = 0; index < messageList.length; index++) {
+        final message = messageList[index];
+        if (message != null && message.elemType != 11 && message.seq == seq) {
+          return index;
+        }
+      }
+    }
+    return null;
+  }
+
+  BuildContext? _contextForContextMenuAnchor(
+    MessageContextMenuViewportAnchor anchor,
+    int globalIndex,
+  ) {
+    final messageList = _currentVisibleMessageList();
+    if (globalIndex < 0 || globalIndex >= messageList.length) {
+      return null;
+    }
+    final expectedKey = ValueKey(
+      _stableMessageListKey(messageList[globalIndex], globalIndex),
+    );
+    // AutoScrollController's tagMap is indexed by a mutable ordinal. During
+    // partition/history updates that ordinal can lag the current projection;
+    // search by the stable ValueKey before accepting a RenderBox.
+    for (final tag in _autoScrollController.tagMap.values) {
+      final context = tag.context;
+      if (context.widget.key == expectedKey) {
+        return context;
+      }
+    }
+    return null;
+  }
+
+  void _scheduleContextMenuViewportRestore({int attempt = 0}) {
+    final globalModel = _chatGlobalModel;
+    if (globalModel == null ||
+        !globalModel.isContextMenuViewportRestoreActive(_conversationId())) {
+      _contextMenuViewportRestoreScheduled = false;
+      _contextMenuViewportRestoreCallbackPending = false;
+      return;
+    }
+    // Rebuilds can request restore repeatedly in the same frame. Keep a
+    // single post-frame callback; duplicate callbacks otherwise issue several
+    // jumpTo calls against the same layout pass and make the close look like
+    // a visible bounce.
+    if (_contextMenuViewportRestoreCallbackPending) {
+      return;
+    }
+    _contextMenuViewportRestoreCallbackPending = true;
+    if (!_contextMenuViewportRestoreScheduled) {
+      _contextMenuViewportRestoreScheduled = true;
+      _contextMenuViewportStableFrames = 0;
+      _contextMenuViewportRestoreGeneration++;
+    }
+    final generation = _contextMenuViewportRestoreGeneration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _contextMenuViewportRestoreCallbackPending = false;
+      if (!mounted ||
+          generation != _contextMenuViewportRestoreGeneration ||
+          !_contextMenuViewportRestoreScheduled) {
+        return;
+      }
+      _restoreContextMenuViewportAnchorIfNeeded(
+        globalModel: globalModel,
+        attempt: attempt,
+        generation: generation,
+      );
+    });
+  }
+
+  void _finishContextMenuViewportRestore(TUIChatGlobalModel globalModel) {
+    _contextMenuViewportRestoreScheduled = false;
+    _contextMenuViewportRestoreCallbackPending = false;
+    _contextMenuViewportStableFrames = 0;
+    _contextMenuViewportRestoreGeneration++;
+    globalModel.completeContextMenuViewportRestore(_conversationId());
+  }
+
+  void _restoreContextMenuViewportAnchorIfNeeded({
+    required TUIChatGlobalModel globalModel,
+    required int attempt,
+    required int generation,
+  }) {
+    if (!mounted ||
+        generation != _contextMenuViewportRestoreGeneration ||
+        !_contextMenuViewportRestoreScheduled) {
+      return;
+    }
+    final convId = _conversationId();
+    if (!globalModel.isContextMenuViewportRestoreActive(convId)) {
+      _contextMenuViewportRestoreScheduled = false;
+      return;
+    }
+    // A real gesture always wins over an automatic menu-close correction.
+    if (globalModel.isChatListUserScrolling) {
+      _finishContextMenuViewportRestore(globalModel);
+      return;
+    }
+    final anchor = globalModel.contextMenuViewportAnchorFor(convId);
+    final currentPixels = _singleScrollPositionOrNull()?.pixels;
+    debugPrint('[MessageContextTrace] restore_attempt conv=$convId '
+        'attempt=$attempt anchor=${anchor?.identity}/${anchor?.seq} '
+        'desiredTop=${anchor?.viewportTop} pixels=$currentPixels '
+        'rawCount=${globalModel.rawMessageCount(convId)}');
+    if (anchor == null) {
+      _contextMenuViewportStableFrames = 0;
+      if (attempt < 300) {
+        _scheduleContextMenuViewportRestore(attempt: attempt + 1);
+      } else {
+        _finishContextMenuViewportRestore(globalModel);
+      }
+      return;
+    }
+    final globalIndex = _globalIndexForContextMenuAnchor(anchor);
+    final position = _singleScrollPositionOrNull();
+    if (globalIndex == null ||
+        position == null ||
+        !position.hasPixels ||
+        !position.hasContentDimensions) {
+      // The reverse sliver can need several frames to mount the selected row
+      // after a buffered flush. Giving up at 8 frames releases the restore
+      // gate while the row is still absent, allowing the inbound viewport
+      // ticker to take over and visibly drag the list to the edge.
+      _contextMenuViewportStableFrames = 0;
+      if (attempt < 300) {
+        _scheduleContextMenuViewportRestore(attempt: attempt + 1);
+      } else {
+        _finishContextMenuViewportRestore(globalModel);
+      }
+      return;
+    }
+    final tagContext = _contextForContextMenuAnchor(anchor, globalIndex);
+    final scrollable =
+        tagContext == null ? null : Scrollable.maybeOf(tagContext);
+    final target = tagContext?.findRenderObject();
+    final viewport = scrollable?.context.findRenderObject();
+    if (target is! RenderBox ||
+        viewport is! RenderBox ||
+        !target.attached ||
+        !viewport.attached ||
+        !target.hasSize ||
+        !viewport.hasSize ||
+        _renderObjectNeedsLayout(target) ||
+        _renderObjectNeedsLayout(viewport)) {
+      _contextMenuViewportStableFrames = 0;
+      if (attempt < 300) {
+        _scheduleContextMenuViewportRestore(attempt: attempt + 1);
+      } else {
+        _finishContextMenuViewportRestore(globalModel);
+      }
+      return;
+    }
+    final currentTop = target.localToGlobal(Offset.zero, ancestor: viewport).dy;
+    final targetPixels =
+        HistoryPaginationScrollPhysics.restorePixelsForViewportAnchor(
+      axisDirection: position.axisDirection,
+      currentPixels: position.pixels,
+      currentAnchorTop: currentTop,
+      desiredAnchorTop: anchor.viewportTop,
+      minScrollExtent: position.minScrollExtent,
+      maxScrollExtent: position.maxScrollExtent,
+    );
+    final correction = targetPixels - position.pixels;
+    debugPrint('[MessageContextTrace] restore_calc conv=$convId '
+        'attempt=$attempt index=$globalIndex currentTop=$currentTop '
+        'desiredTop=${anchor.viewportTop} pixels=${position.pixels} '
+        'target=$targetPixels correction=$correction '
+        'min=${position.minScrollExtent} max=${position.maxScrollExtent}');
+    if (correction.abs() > 0.5) {
+      _contextMenuViewportStableFrames = 0;
+      _geomJumpTo(
+        targetPixels,
+        reason: 'jump__restoreContextMenuViewportAnchor',
+      );
+      ChatJitterDiag.logInboundFlow(
+        action: 'context_menu_viewport_anchor_restore',
+        conv: convId,
+        extras: <String, Object?>{
+          'identity': anchor.identity,
+          'seq': anchor.seq,
+          'globalIndex': globalIndex,
+          'beforeTop': currentTop.toStringAsFixed(1),
+          'desiredTop': anchor.viewportTop.toStringAsFixed(1),
+          'correction': correction.toStringAsFixed(1),
+          'attempt': attempt,
+        },
+      );
+    } else {
+      _contextMenuViewportStableFrames++;
+    }
+    // Success is geometric, not time based: only release after the exact row
+    // remains within tolerance for three consecutive laid-out frames.
+    if (_contextMenuViewportStableFrames >= 3) {
+      _finishContextMenuViewportRestore(globalModel);
+    } else if (attempt < 300) {
+      _scheduleContextMenuViewportRestore(attempt: attempt + 1);
+    } else {
+      _finishContextMenuViewportRestore(globalModel);
     }
   }
 
@@ -2315,11 +2818,13 @@ class _TIMUIKitHistoryMessageListState
     required int generation,
     required double anchorPixels,
     required double anchorMaxExtent,
+    required _PaginationViewportAnchor? viewportAnchor,
   }) {
     _scheduleScrollPaginationPrependRestore(
       generation: generation,
       anchorPixels: anchorPixels,
       anchorMaxExtent: anchorMaxExtent,
+      viewportAnchor: viewportAnchor,
       attempt: 0,
     );
   }
@@ -2328,6 +2833,7 @@ class _TIMUIKitHistoryMessageListState
     required int generation,
     required double anchorPixels,
     required double anchorMaxExtent,
+    required _PaginationViewportAnchor? viewportAnchor,
     required int attempt,
   }) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2339,31 +2845,122 @@ class _TIMUIKitHistoryMessageListState
         generation: generation,
         anchorPixels: anchorPixels,
         anchorMaxExtent: anchorMaxExtent,
+        viewportAnchor: viewportAnchor,
         attempt: attempt,
       ));
     });
+  }
+
+  void _resumePaginationRestoreAfterScrollEnd() {
+    final pending = _pendingPaginationRestoreAfterScrollEnd;
+    if (pending == null ||
+        _paginationUi.scrollPaginationCompensationGeneration !=
+            pending.generation) {
+      return;
+    }
+    _pendingPaginationRestoreAfterScrollEnd = null;
+    ChatHistoryTrace.log(
+      'load_previous_restore_resumed_after_scroll_end',
+      conversationID: _conversationId(),
+      extras: <String, Object?>{
+        'generation': pending.generation,
+        'userScrolling': _chatGlobalModel?.isChatListUserScrolling,
+      },
+    );
+    _scheduleScrollPaginationPrependRestore(
+      generation: pending.generation,
+      anchorPixels: pending.anchorPixels,
+      anchorMaxExtent: pending.anchorMaxExtent,
+      viewportAnchor: pending.viewportAnchor,
+      attempt: 0,
+    );
+  }
+
+  void _cancelPaginationRestoreForUserScroll({required String reason}) {
+    final hadPending = _pendingPaginationRestoreAfterScrollEnd != null ||
+        _shouldCompensateScrollForPagination() ||
+        _paginationUi.paginationRestoreAnchorMsgID != null ||
+        _paginationUi.paginationRestoreAnchorSeq != null;
+    if (!hadPending) {
+      return;
+    }
+    _paginationUi.scrollPaginationCompensationGeneration++;
+    _pendingPaginationRestoreAfterScrollEnd = null;
+    _clearPaginationRestoreAnchor();
+    _clearScrollPaginationCompensation();
+    ChatHistoryTrace.log(
+      'load_previous_restore_cancelled_user_scroll',
+      conversationID: _conversationId(),
+      extras: <String, Object?>{
+        'reason': reason,
+        'userScrolling': _userScrollGestureActive,
+        'pageUiUserScrolling': _pageUi.userScrolling.value,
+      },
+    );
   }
 
   Future<void> _restoreScrollAfterPaginationPrepend({
     required int generation,
     required double anchorPixels,
     required double anchorMaxExtent,
+    required _PaginationViewportAnchor? viewportAnchor,
     required int attempt,
   }) async {
-    const maxPinnedAnchorAttempts = 4;
+    const maxPinnedAnchorAttempts = 5;
     if (!mounted ||
         _paginationUi.scrollPaginationCompensationGeneration != generation) {
       return;
+    }
+    final userScrolling =
+        (_chatGlobalModel?.isChatListUserScrolling ?? false) ||
+            _userScrollGestureActive ||
+            _pageUi.userScrolling.value;
+    if (userScrolling) {
+      _pendingPaginationRestoreAfterScrollEnd = _PaginationRestoreRequest(
+        generation: generation,
+        anchorPixels: anchorPixels,
+        anchorMaxExtent: anchorMaxExtent,
+        viewportAnchor: viewportAnchor,
+      );
+      ChatHistoryTrace.log(
+        'load_previous_restore_waiting_for_scroll_end',
+        conversationID: _conversationId(),
+        extras: <String, Object?>{
+          'generation': generation,
+          'attempt': attempt,
+          'userScrolling': true,
+          'gestureActive': _userScrollGestureActive,
+          'pageUiUserScrolling': _pageUi.userScrolling.value,
+        },
+      );
+      return;
+    }
+    if (_pendingPaginationRestoreAfterScrollEnd?.generation == generation) {
+      _pendingPaginationRestoreAfterScrollEnd = null;
     }
     final position = _singleScrollPositionOrNull();
     if (position == null ||
         !position.hasPixels ||
         !position.hasContentDimensions) {
+      if (attempt >= maxPinnedAnchorAttempts - 1) {
+        ChatHistoryTrace.log(
+          'load_previous_viewport_anchor_restore_skipped',
+          conversationID: _conversationId(),
+          extras: <String, Object?>{
+            'reason': 'scroll_position_not_ready',
+            'attempt': attempt,
+            'hasPosition': position != null,
+            'hasPixels': position?.hasPixels,
+            'hasContentDimensions': position?.hasContentDimensions,
+          },
+        );
+      }
       if (attempt < maxPinnedAnchorAttempts - 1) {
         _scheduleScrollPaginationPrependRestore(
           generation: generation,
           anchorPixels: anchorPixels,
           anchorMaxExtent: anchorMaxExtent,
+          viewportAnchor: viewportAnchor,
           attempt: attempt + 1,
         );
       } else {
@@ -2377,7 +2974,48 @@ class _TIMUIKitHistoryMessageListState
       return;
     }
 
-    const compensationPath = 'reverse_append_native';
+    // This chat is rendered as one `reverse: true` viewport. Older pages are
+    // appended to the read sliver's visual top, so Flutter's layout already
+    // keeps the mounted rows at the same viewport coordinates while the
+    // extent grows. Do not replay the pre-request `pixels` value here. When
+    // the boundary row is outside the cache, the old fallback used to jump
+    // from a transient 0 to the stale offset (for example 0 -> 4821), and
+    // every later page made that oscillation visible. Telegram's equivalent
+    // path gives the active gesture/native layout precedence for the same
+    // reason. Anchor recovery remains available for non-reversed lists.
+    if (position.axisDirection == AxisDirection.up ||
+        position.axisDirection == AxisDirection.left) {
+      ChatHistoryTrace.log(
+        'load_previous_reverse_append_native',
+        conversationID: _conversationId(),
+        extras: <String, Object?>{
+          'attempt': attempt,
+          'pixels': position.pixels,
+          'maxExtent': position.maxScrollExtent,
+          'oldMaxExtent': anchorMaxExtent,
+          'extentDelta': position.maxScrollExtent - anchorMaxExtent,
+          'viewportAnchor': viewportAnchor != null,
+          'userScrolling': false,
+        },
+      );
+      _clearPaginationRestoreAnchor();
+      _clearScrollPaginationCompensation();
+      _cancelPaginationPrependReveal(notify: false);
+      if (mounted) {
+        setState(() {});
+      }
+      return;
+    }
+
+    final viewportAnchorRestored = viewportAnchor != null &&
+        _restorePaginationViewportAnchor(
+          anchor: viewportAnchor,
+          position: position,
+          attempt: attempt,
+        );
+    final compensationPath = viewportAnchorRestored
+        ? 'message_viewport_anchor'
+        : 'extent_delta_fallback';
     final pinnedAtLoad = _wasPinnedNearTopForPagination(
       anchorPixels: anchorPixels,
       anchorMaxExtent: anchorMaxExtent,
@@ -2400,38 +3038,181 @@ class _TIMUIKitHistoryMessageListState
       );
     }
 
-    // 不再调用 jumpTo/scrollToIndex，也不按 extent 增长修正。reverse sliver
-    // 中旧历史追加不会改变既有行索引，保留 pixels 即可保持可见内容位置。
-
     final restoreMsgIDForLog =
         _paginationUi.paginationRestoreAnchorMsgID?.trim() ?? '';
-    _clearPaginationRestoreAnchor();
-    _clearScrollPaginationCompensation();
-    _cancelPaginationPrependReveal(notify: false);
+    final isFinalAttempt = attempt >= maxPinnedAnchorAttempts - 1;
     ChatHistoryTrace.log(
-      'load_previous_scroll_compensation_done',
+      isFinalAttempt
+          ? 'load_previous_scroll_compensation_done'
+          : 'load_previous_scroll_compensation_step',
       conversationID: _conversationId(),
       extras: <String, Object?>{
         'anchorPixels': anchorPixels,
         'anchorMaxExtent': anchorMaxExtent,
+        'beforePixels': position.pixels,
         'pixels': position.pixels,
         'maxExtent': position.maxScrollExtent,
+        'oldMaxExtent': anchorMaxExtent,
+        'newMaxExtent': position.maxScrollExtent,
+        'extentDelta': position.maxScrollExtent - anchorMaxExtent,
         'restoreMsgID': restoreMsgIDForLog,
         'path': compensationPath,
         'attempt': attempt,
+        'axisDirection': position.axisDirection.name,
         'pinnedAtLoad': pinnedAtLoad,
         'overscrollAtLoad': overscrollAtLoad,
         'expectedExtentDeltaPixels': expectedExtentDeltaPixels,
+        'viewportAnchorRestored': viewportAnchorRestored,
+        'anchorViewportTop': viewportAnchor?.viewportTop,
       },
     );
+    if (!viewportAnchorRestored &&
+        position.axisDirection == AxisDirection.up &&
+        // When an anchor row exists but is still outside the sliver cache,
+        // let the viewport/physics settle first. Repeating jumpTo on every
+        // post-frame retry makes the position alternate between the layout
+        // correction (often 0) and the saved offset, which is the visible
+        // shake reported during long history reads. Use the extent fallback
+        // only when there is no row anchor, or once as a last-resort final
+        // attempt after the row had a chance to mount.
+        (viewportAnchor == null || isFinalAttempt)) {
+      final fallbackPixels = anchorPixels.clamp(
+        position.minScrollExtent,
+        position.maxScrollExtent,
+      );
+      final drift = (position.pixels - fallbackPixels).abs();
+      if (drift > 0.5) {
+        _geomJumpTo(
+          fallbackPixels,
+          reason: 'jump__restorePaginationExtentAnchor',
+        );
+        ChatHistoryTrace.log(
+          'load_previous_extent_anchor_restore',
+          conversationID: _conversationId(),
+          extras: <String, Object?>{
+            'beforePixels': position.pixels,
+            'afterPixels': fallbackPixels,
+            'oldMaxExtent': anchorMaxExtent,
+            'newMaxExtent': position.maxScrollExtent,
+            'extentDelta': position.maxScrollExtent - anchorMaxExtent,
+            'drift': drift,
+            'axisDirection': position.axisDirection.name,
+            'attempt': attempt,
+          },
+        );
+      }
+    }
+    if (!isFinalAttempt) {
+      _scheduleScrollPaginationPrependRestore(
+        generation: generation,
+        anchorPixels: anchorPixels,
+        anchorMaxExtent: anchorMaxExtent,
+        viewportAnchor: viewportAnchor,
+        attempt: attempt + 1,
+      );
+      return;
+    }
+    _clearPaginationRestoreAnchor();
+    _clearScrollPaginationCompensation();
+    _cancelPaginationPrependReveal(notify: false);
     if (mounted) {
       setState(() {});
     }
   }
 
+  bool _restorePaginationViewportAnchor({
+    required _PaginationViewportAnchor anchor,
+    required ScrollPosition position,
+    required int attempt,
+  }) {
+    final globalIndex = _globalIndexForPreviousLoadAnchor(
+      _PreviousLoadAnchor(msgID: anchor.msgID, seq: anchor.seq),
+    );
+    if (globalIndex == null) {
+      if (attempt >= 4) {
+        ChatHistoryTrace.log(
+          'load_previous_viewport_anchor_restore_skipped',
+          conversationID: _conversationId(),
+          extras: <String, Object?>{
+            'reason': 'anchor_not_found',
+            'attempt': attempt,
+            'msgID': anchor.msgID,
+            'seq': anchor.seq,
+          },
+        );
+      }
+      return false;
+    }
+    final tagContext = _autoScrollController.tagMap[-globalIndex]?.context;
+    final scrollable =
+        tagContext == null ? null : Scrollable.maybeOf(tagContext);
+    final target = tagContext?.findRenderObject();
+    final viewport = scrollable?.context.findRenderObject();
+    if (target is! RenderBox ||
+        viewport is! RenderBox ||
+        !target.attached ||
+        !viewport.attached ||
+        !target.hasSize ||
+        !viewport.hasSize ||
+        _renderObjectNeedsLayout(target) ||
+        _renderObjectNeedsLayout(viewport)) {
+      if (attempt >= 4) {
+        ChatHistoryTrace.log(
+          'load_previous_viewport_anchor_restore_skipped',
+          conversationID: _conversationId(),
+          extras: <String, Object?>{
+            'reason': 'anchor_render_object_not_ready',
+            'attempt': attempt,
+            'globalIndex': globalIndex,
+            'hasTagContext': tagContext != null,
+            'targetType': target?.runtimeType.toString(),
+            'viewportType': viewport?.runtimeType.toString(),
+          },
+        );
+      }
+      return false;
+    }
+    final currentTop = target.localToGlobal(Offset.zero, ancestor: viewport).dy;
+    final targetPixels =
+        HistoryPaginationScrollPhysics.restorePixelsForViewportAnchor(
+      axisDirection: position.axisDirection,
+      currentPixels: position.pixels,
+      currentAnchorTop: currentTop,
+      desiredAnchorTop: anchor.viewportTop,
+      minScrollExtent: position.minScrollExtent,
+      maxScrollExtent: position.maxScrollExtent,
+    );
+    final viewportDrift = currentTop - anchor.viewportTop;
+    final pixelCorrection = targetPixels - position.pixels;
+    if (pixelCorrection.abs() > 0.5) {
+      _geomJumpTo(
+        targetPixels,
+        reason: 'jump__restorePaginationViewportAnchor',
+      );
+    }
+    ChatHistoryTrace.log(
+      'load_previous_viewport_anchor_restore',
+      conversationID: _conversationId(),
+      extras: <String, Object?>{
+        'msgID': anchor.msgID,
+        'seq': anchor.seq,
+        'globalIndex': globalIndex,
+        'attempt': attempt,
+        'axisDirection': position.axisDirection.name,
+        'desiredTop': anchor.viewportTop.toStringAsFixed(1),
+        'currentTop': currentTop.toStringAsFixed(1),
+        'viewportDrift': viewportDrift.toStringAsFixed(1),
+        'pixelsBefore': position.pixels.toStringAsFixed(1),
+        'targetPixels': targetPixels.toStringAsFixed(1),
+      },
+    );
+    return true;
+  }
+
   void _clearPaginationRestoreAnchor() {
     _paginationUi.paginationRestoreAnchorMsgID = null;
     _paginationUi.paginationRestoreAnchorSeq = null;
+    _pendingPaginationRestoreAfterScrollEnd = null;
   }
 
   bool _wasPinnedNearTopForPagination({
@@ -2455,9 +3236,21 @@ class _TIMUIKitHistoryMessageListState
     if (globalModel.shouldLockChatScrollForMediaPreview) {
       return const NeverScrollableScrollPhysics();
     }
-    // reverse sliver 的旧历史追加不会改变既有行位置。使用调用方/平台原生
-    // physics，避免按 maxExtent 增长修正而把视口推向新批次最旧端。
-    return widget.mainHistoryListConfig?.physics;
+    // 微信式长按菜单打开时，底层聊天列表不响应拖动；滚动只留给菜单自身
+    // 的长消息预览区域。
+    if (globalModel.isMessageContextMenuOverlayOpen) {
+      return const NeverScrollableScrollPhysics();
+    }
+    final configured = widget.mainHistoryListConfig?.physics;
+    return HistoryPaginationScrollPhysics(
+      parent: configured,
+      shouldCompensate: _shouldCompensateScrollForPagination,
+      // Context-menu restoration uses the identity anchor below as its sole
+      // geometry correction. Do not also compensate extent in physics; doing
+      // both applies the same delta twice before the post-frame measurement.
+      shouldPreserveNewestInsertExtent: () => false,
+      pinnedNearTopTolerancePx: _loadPreviousTopNearPx,
+    );
   }
 
   ScrollPosition? _singleScrollPositionOrNull() {
@@ -2500,6 +3293,40 @@ class _TIMUIKitHistoryMessageListState
   }
 
   void _geomJumpTo(double pixels, {required String reason}) {
+    final globalModel = _chatGlobalModel;
+    final menuTransactionActive = globalModel != null &&
+        (globalModel.isMessageContextMenuOverlayOpen ||
+            globalModel.isContextMenuViewportRestoreActive(_conversationId()));
+    final isMenuRestoreWrite = reason.contains('restoreContextMenuViewport');
+    if (menuTransactionActive && !isMenuRestoreWrite) {
+      // Context-menu restore is the sole scroll writer while its transaction
+      // is active. Reject stale CVP/pin/spacer callbacks instead of letting a
+      // delayed producer seize the ScrollPosition after dismissal.
+      debugPrint('[MessageContextTrace] scroll_mutation_blocked '
+          'conv=${_conversationId()} reason=$reason');
+      return;
+    }
+    if (_shouldCompensateScrollForPagination()) {
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if (nowMs - _lastPaginationScrollWriteLogMs >= 250) {
+        _lastPaginationScrollWriteLogMs = nowMs;
+        final position = _singleScrollPositionOrNull();
+        ChatHistoryTrace.log(
+          'pagination_scroll_write',
+          conversationID: _conversationId(),
+          extras: <String, Object?>{
+            'reason': reason,
+            'beforePixels': position?.hasPixels == true
+                ? position!.pixels.toStringAsFixed(1)
+                : 'n/a',
+            'target': pixels.toStringAsFixed(1),
+            'axis': position?.axisDirection.name,
+            'userScrolling': _userScrollGestureActive ||
+                (_chatGlobalModel?.isChatListUserScrolling ?? false),
+          },
+        );
+      }
+    }
     ChatGeomSettleTrace.noteReason(
       reason,
       extras: <String, Object?>{
@@ -3078,6 +3905,9 @@ class _TIMUIKitHistoryMessageListState
     if (globalModel.isMessageContextMenuOverlayOpen) {
       return false;
     }
+    if (globalModel.isContextMenuViewportRestoreActive(_conversationId())) {
+      return false;
+    }
     if (!globalModel.chatConfig.messageEnterAnimationListPushEnabled) {
       return false;
     }
@@ -3095,6 +3925,11 @@ class _TIMUIKitHistoryMessageListState
     final convId = _conversationId();
     if (globalModel.getMessageListPosition(convId) !=
         HistoryMessagePosition.bottom) {
+      return false;
+    }
+    // Keep the list-push gate aligned with inbound routing. A stale logical
+    // `bottom` must not animate after the user has physically drifted away.
+    if (!globalModel.isActiveChatNearBottom(convId)) {
       return false;
     }
     // 物理已离开底部超过约一屏：即使用户逻辑位姿仍是 bottom，也不上推。
@@ -3310,6 +4145,12 @@ class _TIMUIKitHistoryMessageListState
       _viewportInsert.isMediaSettlingForKey(key);
 
   void _silentAbsorbExtentDelta(double delta) {
+    final model = _chatGlobalModel;
+    if (model != null &&
+        (model.isMessageContextMenuOverlayOpen ||
+            model.isContextMenuViewportRestoreActive(_conversationId()))) {
+      return;
+    }
     final position = _singleScrollPositionOrNull();
     if (position == null ||
         !position.hasPixels ||
@@ -3547,6 +4388,13 @@ class _TIMUIKitHistoryMessageListState
                 _viewportInsert.continuousViewportPushIntegrationGeneration) {
           return;
         }
+        final model = _chatGlobalModel;
+        if (model != null &&
+            (model.isMessageContextMenuOverlayOpen ||
+                model.isContextMenuViewportRestoreActive(_conversationId()))) {
+          _abortViewportInsertSlideForSupersede();
+          return;
+        }
         final currentPosition = _singleScrollPositionOrNull();
         if (currentPosition == null ||
             !currentPosition.hasPixels ||
@@ -3724,6 +4572,15 @@ class _TIMUIKitHistoryMessageListState
     }
     final globalModel = _chatGlobalModel;
     if (globalModel == null || globalModel.isChatListUserScrolling) {
+      _finishContinuousViewportPush(reachedBottom: false);
+      return;
+    }
+    // A context menu freezes the selected message in viewport coordinates.
+    // An already-running inbound ticker used to keep issuing cvp_tick jumps
+    // underneath the overlay, forcing close-time restoration to visibly jump
+    // back from the bottom. Stop the transaction before any scroll write.
+    if (globalModel.isMessageContextMenuOverlayOpen ||
+        globalModel.isContextMenuViewportRestoreActive(_conversationId())) {
       _finishContinuousViewportPush(reachedBottom: false);
       return;
     }
@@ -4176,6 +5033,12 @@ class _TIMUIKitHistoryMessageListState
       );
 
       try {
+        final model = _chatGlobalModel;
+        if (model != null &&
+            (model.isMessageContextMenuOverlayOpen ||
+                model.isContextMenuViewportRestoreActive(_conversationId()))) {
+          return;
+        }
         await _autoScrollController.animateTo(
           target,
           duration: Duration(milliseconds: animateDurationMs),
@@ -4376,9 +5239,15 @@ class _TIMUIKitHistoryMessageListState
     // 不经过这里，因此不受影响。
     if (globalModel.isChatListUserScrolling) {
       globalModel.completeInboundProjectionReveal(_conversationId());
+      if (globalModel.isContextMenuViewportRestoreActive(_conversationId())) {
+        _finishContextMenuViewportRestore(globalModel);
+      }
       return false;
     }
     if (newList.length <= oldList.length) {
+      if (globalModel.isContextMenuViewportRestoreActive(_conversationId())) {
+        _scheduleContextMenuViewportRestore();
+      }
       return false;
     }
     final growth = newList.length - oldList.length;
@@ -4412,6 +5281,9 @@ class _TIMUIKitHistoryMessageListState
     }
     if (insertedMessages.isEmpty) {
       globalModel.completeInboundProjectionReveal(_conversationId());
+      if (globalModel.isContextMenuViewportRestoreActive(_conversationId())) {
+        _scheduleContextMenuViewportRestore();
+      }
       return false;
     }
     final outgoingMediaInserted =
@@ -4471,6 +5343,9 @@ class _TIMUIKitHistoryMessageListState
           _breakShortHistoryIfOutgoingOverflowsViewport();
         });
       }
+      if (globalModel.isContextMenuViewportRestoreActive(_conversationId())) {
+        _scheduleContextMenuViewportRestore();
+      }
       return true;
     }
     final fastForwardInsertedMessages = insertedMessages
@@ -4485,11 +5360,13 @@ class _TIMUIKitHistoryMessageListState
       }
       // Fast-forwarded rows intentionally skip animation. Commit them at the
       // latest edge before the retained animated tail starts on the next tick.
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          _pinScrollToBottomImmediate();
-        }
-      });
+      if (!globalModel.isContextMenuViewportRestoreActive(_conversationId())) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            _pinScrollToBottomImmediate();
+          }
+        });
+      }
     }
     final animatingMessages = insertedMessages
         .where(
@@ -4561,6 +5438,16 @@ class _TIMUIKitHistoryMessageListState
     if (oldList.isEmpty && newList.isNotEmpty) {
       _finishIncomingMessagesWithoutRowReveal(incomingInsertedMessages);
       _finishIncomingMessagesWithoutRowReveal(outgoingAnimatingMessages);
+      return false;
+    }
+    if (globalModel.isContextMenuViewportRestoreActive(_conversationId())) {
+      // The scroll physics owns this one geometry transaction. Commit all
+      // buffered rows at full height now; row reveal/list-push would continue
+      // changing extent after the menu disappears and reintroduce a wobble.
+      _finishIncomingMessagesWithoutRowReveal(incomingInsertedMessages);
+      _finishIncomingMessagesWithoutRowReveal(outgoingAnimatingMessages);
+      _clearIncomingScrollAnchor(reason: 'context_menu_viewport_restore');
+      _scheduleContextMenuViewportRestore();
       return false;
     }
     // 自动 list-push 本身会暂时把 pixels 推离 minExtent；这不是用户在读历史。
@@ -4700,6 +5587,9 @@ class _TIMUIKitHistoryMessageListState
     if (globalModel.isMessageContextMenuOverlayOpen) {
       return false;
     }
+    if (globalModel.isContextMenuViewportRestoreActive(_conversationId())) {
+      return false;
+    }
     if (globalModel.isRestoringScrollAfterMediaPreview) {
       return false;
     }
@@ -4719,6 +5609,9 @@ class _TIMUIKitHistoryMessageListState
       }
     }
     if (_isReadingHistory() || _deferUnreadCenterPartition) {
+      return false;
+    }
+    if (!globalModel.isActiveChatNearBottom(convId)) {
       return false;
     }
     return true;
@@ -5084,6 +5977,10 @@ class _TIMUIKitHistoryMessageListState
     if (globalModel.isChatListUserScrolling || _userScrollGestureActive) {
       return;
     }
+    if (globalModel.isMessageContextMenuOverlayOpen ||
+        globalModel.isContextMenuViewportRestoreActive(_conversationId())) {
+      return;
+    }
     // Open / just-revealed: always jump. Smooth follow is for live inbound only.
     if (!_historyOpenRevealPainted ||
         _isInitialRouteSettleWindow ||
@@ -5330,12 +6227,138 @@ class _TIMUIKitHistoryMessageListState
     return null;
   }
 
+  int? _globalIndexForPreviousLoadAnchor(_PreviousLoadAnchor anchor) {
+    final msgID = anchor.msgID?.trim() ?? '';
+    if (msgID.isNotEmpty) {
+      final byIdentity = _globalIndexForMessageIdentity(msgID);
+      if (byIdentity != null) {
+        return byIdentity;
+      }
+    }
+    final seq = anchor.seq;
+    if (seq == null || seq <= 0) {
+      return null;
+    }
+    final messageList = _currentVisibleMessageList();
+    for (var i = 0; i < messageList.length; i++) {
+      if (int.tryParse(messageList[i]?.seq?.trim() ?? '') == seq) {
+        return i;
+      }
+    }
+    return null;
+  }
+
+  _PaginationViewportAnchor? _capturePaginationViewportAnchor(
+    _PreviousLoadAnchor anchor,
+  ) {
+    final globalIndex = _globalIndexForPreviousLoadAnchor(anchor);
+    if (globalIndex == null) {
+      return _captureVisiblePaginationViewportAnchor();
+    }
+    final tagContext = _autoScrollController.tagMap[-globalIndex]?.context;
+    final scrollable =
+        tagContext == null ? null : Scrollable.maybeOf(tagContext);
+    final target = tagContext?.findRenderObject();
+    final viewport = scrollable?.context.findRenderObject();
+    if (target is! RenderBox ||
+        viewport is! RenderBox ||
+        !target.attached ||
+        !viewport.attached ||
+        !target.hasSize ||
+        !viewport.hasSize ||
+        _renderObjectNeedsLayout(target) ||
+        _renderObjectNeedsLayout(viewport)) {
+      return _captureVisiblePaginationViewportAnchor();
+    }
+    final viewportTop =
+        target.localToGlobal(Offset.zero, ancestor: viewport).dy;
+    final captured = _PaginationViewportAnchor(
+      msgID: anchor.msgID?.trim(),
+      seq: anchor.seq,
+      viewportTop: viewportTop,
+    );
+    ChatHistoryTrace.log(
+      'load_previous_viewport_anchor_capture',
+      conversationID: _conversationId(),
+      extras: <String, Object?>{
+        'msgID': captured.msgID,
+        'seq': captured.seq,
+        'globalIndex': globalIndex,
+        'viewportTop': viewportTop.toStringAsFixed(1),
+      },
+    );
+    return captured;
+  }
+
+  /// Captures a mounted row near the current viewport when the pagination
+  /// boundary itself is outside the sliver cache. This keeps the user's
+  /// visible content stable even when the boundary row was just evicted.
+  _PaginationViewportAnchor? _captureVisiblePaginationViewportAnchor() {
+    final messageList = _currentVisibleMessageList();
+    _PaginationViewportAnchor? best;
+    var bestDistance = double.infinity;
+    for (final entry in _autoScrollController.tagMap.entries) {
+      final globalIndex = -entry.key;
+      if (globalIndex < 0 || globalIndex >= messageList.length) {
+        continue;
+      }
+      final tagContext = entry.value.context;
+      final target = tagContext?.findRenderObject();
+      final viewport =
+          tagContext == null ? null : _viewportRenderBoxFor(tagContext);
+      if (target is! RenderBox ||
+          viewport is! RenderBox ||
+          !target.attached ||
+          !viewport.attached ||
+          !target.hasSize ||
+          !viewport.hasSize ||
+          _renderObjectNeedsLayout(target) ||
+          _renderObjectNeedsLayout(viewport)) {
+        continue;
+      }
+      final top = target.localToGlobal(Offset.zero, ancestor: viewport).dy;
+      final bottom = top + target.size.height;
+      if (bottom < -1 || top > viewport.size.height + 1) {
+        continue;
+      }
+      final distance = (top - viewport.size.height / 3).abs();
+      if (distance >= bestDistance) {
+        continue;
+      }
+      final message = messageList[globalIndex];
+      if (message == null) {
+        continue;
+      }
+      bestDistance = distance;
+      best = _PaginationViewportAnchor(
+        msgID: message.msgID?.trim(),
+        seq: int.tryParse(message.seq?.trim() ?? ''),
+        viewportTop: top,
+      );
+    }
+    if (best != null) {
+      ChatHistoryTrace.log(
+        'load_previous_viewport_anchor_capture_fallback',
+        conversationID: _conversationId(),
+        extras: <String, Object?>{
+          'msgID': best.msgID,
+          'seq': best.seq,
+          'viewportTop': best.viewportTop,
+        },
+      );
+    }
+    return best;
+  }
+
   int _rawMessageCount() {
     return _chatGlobalModel?.rawMessageCount(_conversationId()) ??
         widget.messageList.length;
   }
 
-  void _finishPreviousLoadPagination() {
+  void _finishPreviousLoadPagination({
+    String? anchorMsgID,
+    String? anchorSeq,
+  }) {
     _paginationUi.finishPreviousLoadInFlight();
     if (!_isSearchJumpStabilizing) {
       final gm = _chatGlobalModel;
@@ -5345,17 +6368,27 @@ class _TIMUIKitHistoryMessageListState
         final stillReadingHistory =
             position == HistoryMessagePosition.awayTwoScreen ||
                 position == HistoryMessagePosition.notShowLatest;
+        final isSearchJump = widget.searchJumpAnchor != null ||
+            widget.initFindingMsg != null ||
+            findingAnchor != null ||
+            findingMsg != null;
+        if (!isSearchJump &&
+            stillReadingHistory &&
+            gm.rawMessageCount(conv) >
+                ChatMessageWindowPolicy.historyReadSoftMax) {
+          ChatHistoryTrace.log(
+            'memory_window_trim_held_reading_history',
+            conversationID: conv,
+            extras: <String, Object?>{
+              'count': gm.rawMessageCount(conv),
+              'historyReadSoftMax': ChatMessageWindowPolicy.historyReadSoftMax,
+              'anchorMsgID': anchorMsgID,
+              'anchorSeq': anchorSeq,
+            },
+          );
+        }
         if (!stillReadingHistory) {
           gm.setMemoryWindowSuppressed(conv, false);
-          if (gm.rawMessageCount(conv) > ChatMessageWindowPolicy.softMax) {
-            gm.applyMessageMemoryWindowNow(
-              conv,
-              memoryWindowAnchorMsgID:
-                  _paginationUi.paginationRestoreAnchorMsgID,
-              memoryWindowAnchorSeq:
-                  _paginationUi.paginationRestoreAnchorSeq?.toString(),
-            );
-          }
         }
       }
     }
@@ -5516,6 +6549,7 @@ class _TIMUIKitHistoryMessageListState
     if (blockReason != null) {
       _logScrollLoadPreviousBlocked(
         metrics: metrics,
+        anchor: anchor,
         reason: blockReason,
       );
       return false;
@@ -5533,6 +6567,18 @@ class _TIMUIKitHistoryMessageListState
     final nearTop =
         metrics.pixels >= metrics.maxScrollExtent - _loadPreviousTopNearPx;
     if (nearTop) {
+      // ScrollUpdateNotification 可在一帧内触发多次。Profile 下保留诊断，
+      // 但按时间/锚点限流，避免 debugPrint 自身放大上滑卡顿。
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final anchorKey =
+          anchor == null ? 'none' : _previousLoadAnchorKey(anchor);
+      final shouldTrace = anchorKey != _lastScrollNearTopTraceAnchor ||
+          nowMs - _lastScrollNearTopTraceMs >= 500;
+      if (!shouldTrace) {
+        return nearTop;
+      }
+      _lastScrollNearTopTraceMs = nowMs;
+      _lastScrollNearTopTraceAnchor = anchorKey;
       ChatHistoryTrace.log(
         'scroll_near_top',
         conversationID: _conversationId(),
@@ -5540,6 +6586,13 @@ class _TIMUIKitHistoryMessageListState
           'pixels': metrics.pixels.toStringAsFixed(1),
           'maxExtent': metrics.maxScrollExtent.toStringAsFixed(1),
           'haveMoreData': widget.model.haveMoreData,
+          'anchorMsgID': anchor?.msgID,
+          'anchorSeq': anchor?.seq,
+          'topReachConsumed': _paginationUi.previousLoadConsumedThisTopReach,
+          'ignoreScroll': _paginationUi.ignoreScrollLoadPrevious,
+          'loadingPrevious': _paginationUi.isLoadingPrevious,
+          'taskInFlight': _paginationUi.loadPreviousTask != null,
+          'triedAfterNoMore': _paginationUi.triedPreviousAfterNoMore,
         },
       );
     }
@@ -5548,6 +6601,7 @@ class _TIMUIKitHistoryMessageListState
 
   void _logScrollLoadPreviousBlocked({
     required ScrollMetrics metrics,
+    _PreviousLoadAnchor? anchor,
     required String reason,
   }) {
     if (!metrics.hasPixels || !metrics.hasContentDimensions) {
@@ -5570,6 +6624,12 @@ class _TIMUIKitHistoryMessageListState
         'maxExtent': metrics.maxScrollExtent.toStringAsFixed(1),
         'haveMoreData': widget.model.haveMoreData,
         'triedAfterNoMore': _paginationUi.triedPreviousAfterNoMore,
+        'anchorMsgID': anchor?.msgID,
+        'anchorSeq': anchor?.seq,
+        'topReachConsumed': _paginationUi.previousLoadConsumedThisTopReach,
+        'ignoreScroll': _paginationUi.ignoreScrollLoadPrevious,
+        'loadingPrevious': _paginationUi.isLoadingPrevious,
+        'taskInFlight': _paginationUi.loadPreviousTask != null,
       },
     );
   }
@@ -5580,6 +6640,23 @@ class _TIMUIKitHistoryMessageListState
     bool allowAfterRevealForViewportFill = false,
     bool bypassTopReachConsumed = false,
   }) {
+    ChatHistoryTrace.log(
+      'schedule_previous_attempt',
+      conversationID: _conversationId(),
+      extras: <String, Object?>{
+        'anchorMsgID': anchor?.msgID,
+        'anchorSeq': anchor?.seq,
+        'haveMoreData': widget.model.haveMoreData,
+        'silent': silent,
+        'allowAfterRevealForViewportFill': allowAfterRevealForViewportFill,
+        'bypassTopReachConsumed': bypassTopReachConsumed,
+        'topReachConsumed': _paginationUi.previousLoadConsumedThisTopReach,
+        'ignoreScroll': _paginationUi.ignoreScrollLoadPrevious,
+        'loadingPrevious': _paginationUi.isLoadingPrevious,
+        'taskInFlight': _paginationUi.loadPreviousTask != null,
+        'triedAfterNoMore': _paginationUi.triedPreviousAfterNoMore,
+      },
+    );
     if (silent && _historyOpenRevealReady && !allowAfterRevealForViewportFill) {
       ChatGeomSettleTrace.noteReason(
         'schedule_previous_silent_blocked_post_reveal',
@@ -5602,6 +6679,7 @@ class _TIMUIKitHistoryMessageListState
     }
     if (_isSearchJumpStabilizing ||
         _isHistoryScrollProtected ||
+        (_chatGlobalModel?.isMessageContextMenuOverlayOpen ?? false) ||
         !_shouldAllowLoadPreviousDespiteTopReach(
           anchor,
           bypassTopReachConsumed: bypassTopReachConsumed,
@@ -5613,6 +6691,8 @@ class _TIMUIKitHistoryMessageListState
         extras: <String, Object?>{
           'searchJump': _isSearchJumpStabilizing,
           'scrollProtected': _isHistoryScrollProtected,
+          'menuOpen':
+              _chatGlobalModel?.isMessageContextMenuOverlayOpen ?? false,
           'consumedTopReach': _paginationUi.previousLoadConsumedThisTopReach,
           'taskInFlight': _paginationUi.loadPreviousTask != null,
         },
@@ -5710,7 +6790,8 @@ class _TIMUIKitHistoryMessageListState
     if (!_canProbeLatestHistory(globalModel) ||
         globalModel.isRestoringScrollAfterMediaPreview ||
         _paginationUi.isLoadingPrevious ||
-        _paginationUi.isLoadingLatest) {
+        _paginationUi.isLoadingLatest ||
+        _shouldCompensateScrollForPagination()) {
       return false;
     }
     final listPosition = globalModel.getMessageListPosition(_conversationId());
@@ -5966,6 +7047,9 @@ class _TIMUIKitHistoryMessageListState
   }
 
   Future<void> _loadPreviousImpl(_PreviousLoadAnchor anchor) async {
+    if (_chatGlobalModel?.isMessageContextMenuOverlayOpen ?? false) {
+      return;
+    }
     if (_paginationUi.isLoadingPrevious || !mounted) {
       _clearTopHistoryLoading();
       return;
@@ -5978,6 +7062,7 @@ class _TIMUIKitHistoryMessageListState
       _paginationUi.triedPreviousAfterNoMore = true;
     }
     _paginationUi.isLoadingPrevious = true;
+    _paginationUserScrollSinceLoad = false;
     _paginationUi.pendingLoadPrevious = false;
     _paginationUi.previousLoadInFlightAnchorKey =
         _previousLoadAnchorKey(anchor);
@@ -6010,6 +7095,14 @@ class _TIMUIKitHistoryMessageListState
       anchorMaxExtent = loadPosition.maxScrollExtent;
       anchorPixels = loadPosition.pixels;
     }
+    // The normal chat viewport is reversed and older rows are appended at its
+    // visual top. Native sliver layout is the anchor in that mode; walking the
+    // cached tag map only adds main-thread work and creates another restore
+    // source. Keep the row anchor for non-reversed consumers.
+    final viewportAnchor = loadPosition?.axisDirection == AxisDirection.up ||
+            loadPosition?.axisDirection == AxisDirection.left
+        ? null
+        : _capturePaginationViewportAnchor(anchor);
     _paginationUi.loadingIndicatorTimer?.cancel();
     if (mounted) {
       // 静默补拉不改 loadingPlace，避免顶部转圈被点亮。
@@ -6082,10 +7175,15 @@ class _TIMUIKitHistoryMessageListState
             DateTime.now().millisecondsSinceEpoch + _historyScrollProtectMs;
         _beginHistoryScrollProtection();
         final listLenAfter = _rawMessageCount();
-        // 分页层可能返回 loaded=true 但列表未增长；视口补偿只应在真正 prepend 后执行。
+        // 窗口策略可能在 prepend 同一提交中裁掉已离开视口的较新端，
+        // 因而 raw count 会下降；只要提交改变了窗口，就仍需完成视口补偿。
         final effectiveLoaded = loaded && listLenAfter > listLenBefore;
         if (!effectiveLoaded) {
-          // 空批/拒绝 shrink/无新增：保留贴顶消费位，避免同顶连拉导致列表振荡。
+          // 空批/拒绝 shrink/无新增：有更多历史时释放贴顶消费位，允许
+          // 下一次上滑重试。冷却和 scroll protection 仍会阻止同一帧连拉。
+          _paginationUi.releaseTopReachConsumedAfterRetryableNoGrowth(
+            haveMoreData: widget.model.haveMoreData,
+          );
           _clearPaginationRestoreAnchor();
           _clearScrollPaginationCompensation();
           _cancelPaginationPrependReveal(notify: false);
@@ -6095,13 +7193,8 @@ class _TIMUIKitHistoryMessageListState
           _cancelPaginationPrependReveal(notify: false);
           _clearTopHistoryLoading(notify: false);
           _extendScrollPaginationCompensation();
-          _scheduleScrollPaginationCompensationEnd(
-            generation: compensationGeneration,
-            anchorPixels: anchorPixels,
-            anchorMaxExtent: anchorMaxExtent,
-          );
           // 列表已增长：放开同一次贴顶消费位，便于继续上滑/回弹拉下一页。
-          // 空批仍走上方分支保留消费位；此处不自动连拉，等下一次滚动事件。
+          // 此处不自动连拉，等下一次滚动事件。
           _paginationUi.releaseTopReachConsumedAfterSuccessfulPage(
             haveMoreData: widget.model.haveMoreData,
           );
@@ -6120,7 +7213,7 @@ class _TIMUIKitHistoryMessageListState
             'triedAfterNoMore': _paginationUi.triedPreviousAfterNoMore,
             'delta': listLenAfter - listLenBefore,
             'topReachConsumed': _paginationUi.previousLoadConsumedThisTopReach,
-            'releasedTopReach': effectiveLoaded && widget.model.haveMoreData,
+            'releasedTopReach': !_paginationUi.previousLoadConsumedThisTopReach,
           },
         );
         ChatJitterDiag.log(
@@ -6138,7 +7231,37 @@ class _TIMUIKitHistoryMessageListState
         );
         ChatResourceSample.onRawMessageCount(_rawMessageCount());
         setState(() {});
-        _finishPreviousLoadPagination();
+        // Register the window trim callback before the viewport restore callback
+        // so the anchor is measured against the final post-trim list.
+        _finishPreviousLoadPagination(
+          anchorMsgID: anchor.msgID,
+          anchorSeq: anchor.seq?.toString(),
+        );
+        if (effectiveLoaded && !_paginationUserScrollSinceLoad) {
+          _scheduleScrollPaginationCompensationEnd(
+            generation: compensationGeneration,
+            anchorPixels: anchorPixels,
+            anchorMaxExtent: anchorMaxExtent,
+            viewportAnchor: viewportAnchor,
+          );
+        } else if (effectiveLoaded) {
+          // The user kept dragging after this request started. Telegram-style
+          // behavior is to leave the current gesture position authoritative;
+          // restoring the pre-request offset here creates the observed
+          // 0 -> oldOffset jump when ScrollEnd arrives later.
+          _cancelPaginationRestoreForUserScroll(
+            reason: 'gesture_continued_during_request',
+          );
+          ChatHistoryTrace.log(
+            'load_previous_restore_skipped_user_scroll',
+            conversationID: _conversationId(),
+            extras: <String, Object?>{
+              'listLenBefore': listLenBefore,
+              'listLenAfter': listLenAfter,
+              'anchorPixels': anchorPixels,
+            },
+          );
+        }
         Future<void>.delayed(
             const Duration(milliseconds: _loadPreviousScrollUnlockMs), () {
           if (mounted) {
@@ -6577,23 +7700,26 @@ class _TIMUIKitHistoryMessageListState
       return 'empty_$index';
     }
     if (message.elemType == 11) {
-      return 'time_${message.timestamp ?? index}';
+      // Time-divider rows are generated by the display projection. Their
+      // position is not an identity: prepend/replace must not turn a divider
+      // into a different child merely because its index moved.
+      return 'time_${message.timestamp ?? message.seq ?? 'unknown'}';
     }
     final outgoingStableId = readOutgoingStableId(message);
     if (outgoingStableId != null) {
       return 'outgoing_$outgoingStableId';
     }
-    final id = message.id;
-    if (id != null && id.toString().isNotEmpty) {
-      // Keep the list key stable across send-status transitions.
-      // If the key changes when a self message flips between sending/fail/success,
-      // Flutter treats the row as a different item and remounts it, which makes
-      // the outgoing bubble visibly jump/shake multiple times.
-      return 'msg_${id.toString()}';
-    }
     final msgID = message.msgID;
-    if (msgID != null && msgID.isNotEmpty) {
-      return 'msgid_$msgID';
+    if (msgID != null && msgID.trim().isNotEmpty) {
+      // msgID is the SDK/server identity. Local `id` can differ between an
+      // optimistic row, a send callback and a history replacement, so it must
+      // not be preferred for a Sliver child key.
+      return 'msgid_${msgID.trim()}';
+    }
+    final id = message.id;
+    if (id != null && id.toString().trim().isNotEmpty) {
+      // Only use the local id while the row has no server identity yet.
+      return 'local_${id.toString().trim()}';
     }
     // Position-independent fallback. The key MUST stay stable when a message
     // changes index, otherwise `findChildIndexCallback` (which is populated
@@ -6601,13 +7727,20 @@ class _TIMUIKitHistoryMessageListState
     // element and Flutter pins the row at a stale slot until the element tree
     // is torn down (i.e. only an app restart fixes the visual order).
     final sender = message.sender ?? message.userID ?? '';
-    final random = message.random ?? '';
+    final random = message.random ?? 0;
     final seq = message.seq ?? '';
-    return 'msg_${sender}_${message.timestamp ?? ''}_${seq}_${random}_${message.elemType}';
+    final fallback = sender.isEmpty &&
+            (message.timestamp == null || message.timestamp == 0) &&
+            seq.isEmpty &&
+            random == 0
+        ? '_local_${message.hashCode}'
+        : '';
+    return 'msg_${sender}_${message.timestamp ?? ''}_${seq}_${random}_${message.elemType}$fallback';
   }
 
   List<V2TimMessage?> _visibleMessageList(List<V2TimMessage?> source) {
     final list = <V2TimMessage?>[];
+    final seenKeys = <String>{};
     for (final item in source) {
       if (item == null) {
         continue;
@@ -6621,12 +7754,24 @@ class _TIMUIKitHistoryMessageListState
       if (item.elemType == 11 && (list.isEmpty || list.last?.elemType == 11)) {
         continue;
       }
+      // A history page and an inbound/send callback can contain the same row
+      // in different object instances. Never expose duplicate child keys to a
+      // Sliver; keep the first row in newest-first order and let the next
+      // authoritative commit replace its content.
+      final stableKey = _stableMessageListKey(item, list.length);
+      if (!seenKeys.add(stableKey)) {
+        continue;
+      }
       list.add(item);
     }
     return list;
   }
 
   List<V2TimMessage?> _currentVisibleMessageList() {
+    final frozen = _contextMenuFrozenVisibleMessages;
+    if (frozen != null) {
+      return frozen;
+    }
     final globalModel = Provider.of<TUIChatGlobalModel>(context, listen: false);
     final currentMessages = globalModel.getMessageList(_conversationId());
     return _visibleMessageList(
@@ -7030,6 +8175,13 @@ class _TIMUIKitHistoryMessageListState
     int attempt = 0,
   }) async {
     if (!mounted || unreadMessageCount <= 0) {
+      return;
+    }
+    final contextMenuModel = _chatGlobalModel;
+    if (contextMenuModel != null &&
+        (contextMenuModel.isMessageContextMenuOverlayOpen ||
+            contextMenuModel
+                .isContextMenuViewportRestoreActive(_conversationId()))) {
       return;
     }
     final position = _singleScrollPositionOrNull();
@@ -7833,7 +8985,12 @@ class _TIMUIKitHistoryMessageListState
       final appended =
           messageList.sublist(_cacheMessageListLen, messageList.length);
       final readStartInCache = _cachedReadList.length;
-      _cachedReadList.addAll(appended);
+      // Do not mutate the list captured by the previous Sliver delegate.
+      // Even a tail-only addAll changes the delegate's closure-visible data
+      // between layout passes. Publish a new immutable snapshot instead.
+      _cachedReadList = List<V2TimMessage?>.unmodifiable(
+        <V2TimMessage?>[..._cachedReadList, ...appended],
+      );
       for (var i = 0; i < appended.length; i++) {
         final globalIndex = _cacheMessageListLen + i;
         final message = appended[i];
@@ -7901,11 +9058,29 @@ class _TIMUIKitHistoryMessageListState
     _cacheLastMsgKey = lastMsgKey;
     _cacheHeadMsgKey = headMsgKey;
     _cacheListStateKey = listStateKey;
-    _cachedUnreadList = safeUnreadCount == 0
-        ? <V2TimMessage?>[]
-        : messageList.sublist(0, unreadEndPoint).reversed.toList();
-    _cachedReadList =
-        messageList.sublist(unreadEndPoint, messageList.length).toList();
+    _cachedUnreadList = List<V2TimMessage?>.unmodifiable(
+      safeUnreadCount == 0
+          ? const <V2TimMessage?>[]
+          : messageList.sublist(0, unreadEndPoint).reversed,
+    );
+    _cachedReadList = List<V2TimMessage?>.unmodifiable(
+      messageList.sublist(unreadEndPoint, messageList.length),
+    );
+    ChatHistoryTrace.log(
+      'render_partitions_rebuilt',
+      conversationID: _conversationId(),
+      extras: <String, Object?>{
+        ...?_chatGlobalModel?.historyProjectionDiagnostics(_conversationId()),
+        'messageListLen': messageList.length,
+        'safeUnreadCount': safeUnreadCount,
+        'unreadEndPoint': unreadEndPoint,
+        'unreadLen': _cachedUnreadList.length,
+        'readLen': _cachedReadList.length,
+        'messageListRevision': messageListRevision,
+        'restoreVersion': restoreVersion,
+        'listStateKey': listStateKey,
+      },
+    );
     _unreadIndexMap = {};
     for (var i = 0; i < _cachedUnreadList.length; i++) {
       _unreadIndexMap[getMessageIdentifier(_cachedUnreadList[i], 0)] = i;
@@ -9116,6 +10291,7 @@ class _TIMUIKitHistoryMessageListState
     int index, {
     int? globalIndex,
   }) {
+    final stableListKey = _stableMessageListKey(messageItem, index);
     // Group only: enqueue near-visible senders for capped/TTL getUsersInfo.
     // Cost ∝ built rows, never ∝ total group members.
     if (messageItem != null && messageItem.isSelf != true) {
@@ -9129,13 +10305,12 @@ class _TIMUIKitHistoryMessageListState
         );
       }
     }
-    final resolvedGlobalIndex = globalIndex ??
-        _globalIndexMap[_stableMessageListKey(messageItem, index)] ??
-        index;
+    final resolvedGlobalIndex =
+        globalIndex ?? _globalIndexMap[stableListKey] ?? index;
     Widget tile = AutoScrollTag(
       controller: _autoScrollController,
       index: -resolvedGlobalIndex,
-      key: ValueKey(_stableMessageListKey(messageItem, index)),
+      key: ValueKey(stableListKey),
       // 搜索/引用/转发消息定位只负责滚动到目标，不再让 AutoScrollTag
       // 自动闪烁边框/遮罩。转发消息卡片自身带边框时，高亮闪烁会被误认为
       // 定位抖动或消息状态异常。
@@ -9150,8 +10325,7 @@ class _TIMUIKitHistoryMessageListState
         child: tile,
       );
     }
-    final rowRevealKey =
-        messageItem == null ? null : _stableMessageListKey(messageItem, 0);
+    final rowRevealKey = messageItem == null ? null : stableListKey;
     if (rowRevealKey != null) {
       final isActive =
           _viewportInsert.activeRowRevealMessages.containsKey(rowRevealKey);
@@ -9212,7 +10386,14 @@ class _TIMUIKitHistoryMessageListState
     if (_shouldHideMessageDuringPaginationPrependReveal(resolvedGlobalIndex)) {
       tile = Opacity(opacity: 0, child: tile);
     }
-    return tile;
+    // SliverChildBuilderDelegate only sees the direct child's key. Wrappers
+    // such as Opacity, layout reporters and reveal animations must not hide
+    // the message identity during prepend/replace, otherwise
+    // findChildIndexCallback cannot relocate the existing RenderBox.
+    return KeyedSubtree(
+      key: ValueKey<String>(stableListKey),
+      child: tile,
+    );
   }
 
   _getMessageId(int index) {
@@ -9623,34 +10804,30 @@ class _TIMUIKitHistoryMessageListState
 
   @override
   Widget tuiBuild(BuildContext context, TUIKitBuildValue value) {
-    final messageList = _visibleMessageList(widget.messageList);
     final globalModel = context.read<TUIChatGlobalModel>();
-    _handleInitialHistoryBootstrapTransition(globalModel);
-    if (messageList.isEmpty) {
-      final jumpStatus = globalModel.getSearchJumpStatus(_conversationId());
-      final isSearchJump =
-          widget.searchJumpAnchor != null || widget.initFindingMsg != null;
-      if (isSearchJump && jumpStatus == SearchJumpStatus.loading) {
-        return Center(
-          child: _buildHistoryLoadingSpinner(size: 36, strokeWidth: 3),
-        );
-      }
-      if (isSearchJump &&
-          jumpStatus == SearchJumpStatus.failed &&
-          !widget.model.isLoadingChatHistory) {
-        return Container();
-      }
-      final convId = _conversationId();
-      final stillBootstrapping = !globalModel.hasInitialHistoryLoaded(convId);
-      // 已确认过历史（含确认空会话）：直接空态，不要因后台补拉再全屏转圈。
-      if (!stillBootstrapping) {
-        return Container();
-      }
-      // 首屏冷启动静默：不用全屏转圈挡视野；有锁定未读时继续走下方 tongue 布局。
-      if (!globalModel.hasLockedEntryUnreadFor(convId)) {
-        return Container();
-      }
+    final freezeProjection = globalModel.isMessageContextMenuOverlayOpen ||
+        globalModel.isContextMenuViewportRestoreActive(_conversationId()) ||
+        globalModel.deferredIncomingBufferedCount(_conversationId()) > 0;
+    if (freezeProjection) {
+      _contextMenuFrozenVisibleMessages ??= List<V2TimMessage?>.unmodifiable(
+        _visibleMessageList(widget.messageList),
+      );
+    } else {
+      _contextMenuFrozenVisibleMessages = null;
     }
+    final messageList = _contextMenuFrozenVisibleMessages ??
+        _visibleMessageList(widget.messageList);
+    _handleInitialHistoryBootstrapTransition(globalModel);
+    // Never exchange this list for a spinner/empty container while history is
+    // loading. That structural replacement deactivates the scroll tree just
+    // as the first page arrives, loses its controller state, and produces a
+    // visible hitch. The stable tree below simply has zero Sliver children
+    // until the committed message window changes.
+    final jumpStatus = globalModel.getSearchJumpStatus(_conversationId());
+    final isSearchJump =
+        widget.searchJumpAnchor != null || widget.initFindingMsg != null;
+    final stillBootstrapping =
+        !globalModel.hasInitialHistoryLoaded(_conversationId());
 
     final rawUnreadNewMessageCount = globalModel.unreadCountForTongue;
     final dismissedEntryUnreadCount =
@@ -9787,9 +10964,11 @@ class _TIMUIKitHistoryMessageListState
     }
 
     final shouldShowCenterHistoryLoading = messageList.isEmpty
-        ? !_shouldSilenceInitialHistoryLoading(globalModel) &&
-            (widget.model.isLoadingChatHistory ||
-                globalModel.hasLockedEntryUnreadFor(_conversationId()))
+        ? isSearchJump
+            ? jumpStatus == SearchJumpStatus.loading
+            : stillBootstrapping &&
+                globalModel.hasLockedEntryUnreadFor(_conversationId()) &&
+                !_shouldSilenceInitialHistoryLoading(globalModel)
         : _shouldShowCenterHistoryLoading(
             isLoadingHistory: widget.model.isLoadingChatHistory,
             messageList: messageList,
@@ -9810,6 +10989,14 @@ class _TIMUIKitHistoryMessageListState
             }
             if (notification is ScrollStartNotification &&
                 notification.dragDetails != null) {
+              if (_paginationUi.isLoadingPrevious ||
+                  _paginationUi.loadPreviousTask != null ||
+                  _shouldCompensateScrollForPagination()) {
+                _paginationUserScrollSinceLoad = true;
+                _cancelPaginationRestoreForUserScroll(
+                  reason: 'scroll_start_after_load',
+                );
+              }
               _userScrollGestureActive = true;
               _setUserScrolling(true);
               _setCompactHistoryCacheExtent(true);
@@ -9832,6 +11019,16 @@ class _TIMUIKitHistoryMessageListState
               }
             } else if (notification is ScrollUpdateNotification ||
                 notification is OverscrollNotification) {
+              if (notification is ScrollUpdateNotification &&
+                  notification.dragDetails != null &&
+                  (_paginationUi.isLoadingPrevious ||
+                      _paginationUi.loadPreviousTask != null ||
+                      _shouldCompensateScrollForPagination())) {
+                _paginationUserScrollSinceLoad = true;
+                _cancelPaginationRestoreForUserScroll(
+                  reason: 'scroll_update_after_load',
+                );
+              }
               if (notification is ScrollUpdateNotification &&
                   notification.dragDetails != null &&
                   !_compactHistoryCacheExtent) {
@@ -9884,6 +11081,7 @@ class _TIMUIKitHistoryMessageListState
               // 无论是否标记过 active，都清全局滚动态，防止掐断后丢 End 导致永久失灵。
               _userScrollGestureActive = false;
               _setUserScrolling(false);
+              _resumePaginationRestoreAfterScrollEnd();
               _setCompactHistoryCacheExtent(false);
               final deferBefore = _deferUnreadCenterPartition;
               _maybeReleaseUnreadCenterDeferral();
@@ -10006,9 +11204,16 @@ class _TIMUIKitHistoryMessageListState
                                     ?.addRepaintBoundaries ??
                                 true,
                             findChildIndexCallback: (Key key) {
-                              final ValueKey<String> valueKey =
-                                  key as ValueKey<String>;
+                              if (key is! ValueKey<String>) {
+                                return null;
+                              }
+                              final valueKey = key;
                               final index = _unreadIndexMap[valueKey.value];
+                              if (index == null ||
+                                  index < 0 ||
+                                  index >= unreadMessageList.length) {
+                                return null;
+                              }
                               return index;
                             })),
                   ),
@@ -10048,16 +11253,26 @@ class _TIMUIKitHistoryMessageListState
                                     ?.addRepaintBoundaries ??
                                 true,
                             findChildIndexCallback: (Key key) {
-                              final ValueKey<String> valueKey =
-                                  key as ValueKey<String>;
+                              if (key is! ValueKey<String>) {
+                                return null;
+                              }
+                              final valueKey = key;
                               final index = _readIndexMap[valueKey.value];
+                              if (index == null ||
+                                  index < 0 ||
+                                  index >= readMessageList.length) {
+                                return null;
+                              }
                               return index;
                             })),
                   ),
                 ],
               );
-              // 未揭开前保持测高；一旦亮过就不再藏，避免 tip/二次 begin 把列表闪没。
-              if (!_historyOpenRevealPainted) {
+              // 占位仍为满不透明时继续让真列表在下面测高；淡出开始的同一帧
+              // 再亮真列表，避免两组气泡先重叠一帧后才交接。
+              final placeholderStillOpaque = _openingPlaceholder.phase ==
+                  ChatHistoryOpeningPlaceholderPhase.visible;
+              if (!_historyOpenRevealPainted || placeholderStillOpaque) {
                 return Opacity(
                   opacity: 0,
                   child: IgnorePointer(child: scrollView),
@@ -10067,6 +11282,21 @@ class _TIMUIKitHistoryMessageListState
             },
           )),
         ),
+        if (_openingPlaceholder.shouldPaint)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: FadeTransition(
+                opacity: _openingPlaceholderOpacity,
+                child: RepaintBoundary(
+                  key: const ValueKey<String>('chat_opening_placeholder'),
+                  child: ChatMessageListSkeleton(
+                    theme: value.theme,
+                    showAvatars: widget.conversation.type != 1,
+                  ),
+                ),
+              ),
+            ),
+          ),
         if (_shouldShowTopHistoryLoading)
           Positioned(
             top: 12,
@@ -10120,6 +11350,32 @@ class _PreviousLoadAnchor {
   const _PreviousLoadAnchor({
     required this.msgID,
     required this.seq,
+  });
+}
+
+class _PaginationViewportAnchor {
+  final String? msgID;
+  final int? seq;
+  final double viewportTop;
+
+  const _PaginationViewportAnchor({
+    required this.msgID,
+    required this.seq,
+    required this.viewportTop,
+  });
+}
+
+class _PaginationRestoreRequest {
+  final int generation;
+  final double anchorPixels;
+  final double anchorMaxExtent;
+  final _PaginationViewportAnchor? viewportAnchor;
+
+  const _PaginationRestoreRequest({
+    required this.generation,
+    required this.anchorPixels,
+    required this.anchorMaxExtent,
+    required this.viewportAnchor,
   });
 }
 
@@ -10371,7 +11627,13 @@ class TIMUIKitHistoryMessageListSelector extends TIMUIKitStatelessWidget {
               _recentMessageOrderSignature(next.messageList);
         },
         selector: (context, model) {
-          final messageList = model.getMessageList(conversationID) ?? [];
+          // The model owns and replaces its authoritative list asynchronously.
+          // Give Sliver delegates a structural snapshot so an in-flight
+          // prepend/replace cannot mutate childCount or ordering underneath a
+          // layout/paint pass.
+          final messageList = List<V2TimMessage?>.unmodifiable(
+            model.getMessageList(conversationID) ?? const <V2TimMessage>[],
+          );
           return _HistoryMessageListSelectorData(
             messageList: messageList,
             restoreVersion: model.mediaPreviewRestoreVersion,

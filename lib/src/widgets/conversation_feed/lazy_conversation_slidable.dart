@@ -59,12 +59,49 @@ class _LazyConversationSlidable extends StatefulWidget {
       _LazyConversationSlidableState();
 }
 
-class _LazyConversationSlidableState extends State<_LazyConversationSlidable> {
+class _LazyConversationSlidableState extends State<_LazyConversationSlidable>
+    with SingleTickerProviderStateMixin {
   ActionPane? _startPane;
   ActionPane? _endPane;
   bool _actionsBuilt = false;
   double _accumulatedDx = 0;
   double _accumulatedDy = 0;
+  late final SlidableController _slidableController;
+  bool _tickerActive = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _slidableController = SlidableController(this);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final active = TickerMode.of(context);
+    if (conversationSlidableShouldRelease(
+      wasTickerActive: _tickerActive,
+      tickerActive: active,
+      pointerCanceled: false,
+    )) {
+      _releaseGestureState();
+    }
+    _tickerActive = active;
+  }
+
+  void _releaseGestureState() {
+    _resetPointerAccum();
+    if (_slidableController.ratio != 0 && !_slidableController.closing) {
+      _slidableController.close(duration: Duration.zero);
+    }
+  }
+
+  @override
+  void dispose() {
+    _resetPointerAccum();
+    _slidableController.dispose();
+    super.dispose();
+  }
 
   @override
   void didUpdateWidget(covariant _LazyConversationSlidable oldWidget) {
@@ -109,7 +146,7 @@ class _LazyConversationSlidableState extends State<_LazyConversationSlidable> {
       child: applyConversationSlidableTouchSlop(
         child: Listener(
           onPointerDown: (_) => _resetPointerAccum(),
-          onPointerCancel: (_) => _resetPointerAccum(),
+          onPointerCancel: (_) => _releaseGestureState(),
           onPointerUp: (_) => _resetPointerAccum(),
           onPointerMove: (event) {
             if (_actionsBuilt) {
@@ -125,6 +162,7 @@ class _LazyConversationSlidableState extends State<_LazyConversationSlidable> {
             }
           },
           child: Slidable(
+            controller: _slidableController,
             groupTag: widget.groupTag,
             enabled: widget.enabled,
             closeOnScroll: !webFeel,

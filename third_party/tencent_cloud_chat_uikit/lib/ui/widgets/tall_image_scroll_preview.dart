@@ -180,6 +180,7 @@ class _TallImageScrollPreviewState extends State<TallImageScrollPreview>
   bool _pointerDownSeen = false;
   bool _gestureStartedAtLeftEdge = true;
   bool _gestureStartedAtRightEdge = true;
+  bool _showScrollToTop = false;
   /// 放大后贴边翻页的位移基准；从中间滑到贴边时会重置为贴边时刻的手指位置。
   Offset? _pageRouteBaseline;
   int _activePointerCount = 0;
@@ -203,8 +204,42 @@ class _TallImageScrollPreviewState extends State<TallImageScrollPreview>
   @override
   void initState() {
     super.initState();
-    _controller.addListener(_syncGalleryScrollGate);
+    _controller.addListener(_onMatrixChanged);
+    _onMatrixChanged();
+  }
+
+  void _onMatrixChanged() {
     _syncGalleryScrollGate();
+    _updateScrollToTopVisibility();
+  }
+
+  void _updateScrollToTopVisibility() {
+    if (!mounted) {
+      return;
+    }
+    final shouldShow = !_atScrollTop &&
+        _childDisplaySize.height > 0 &&
+        _childDisplaySize.height >
+            MediaQuery.sizeOf(context).height * 1.2;
+    if (shouldShow != _showScrollToTop) {
+      _showScrollToTop = shouldShow;
+    }
+  }
+
+  void _scrollToTop() {
+    _panMomentumRunner?.stop();
+    _springReboundRunner?.stop();
+    final current = _currentTranslation();
+    if (current.dy.abs() < 0.5) {
+      return;
+    }
+    final bounds = _matrixPanBounds(scale: 1.0);
+    final target = Offset(bounds.clamp(current).dx, 0.0);
+    _ensureSpringReboundRunner().animate(
+      from: current,
+      to: target,
+      onUpdate: _setTranslation,
+    );
   }
 
   void _syncGalleryScrollGate() {
@@ -299,7 +334,7 @@ class _TallImageScrollPreviewState extends State<TallImageScrollPreview>
     if (_routingPage) {
       _endPageRoute(cancelled: true);
     }
-    _controller.removeListener(_syncGalleryScrollGate);
+    _controller.removeListener(_onMatrixChanged);
     widget.galleryScrollGate?.value = TallImageGalleryScrollGate.initial;
     _detachDismissMetricsListener();
     _panMomentumRunner?.stop();
@@ -1501,16 +1536,65 @@ class _TallImageScrollPreviewState extends State<TallImageScrollPreview>
       );
     }
 
-    return Listener(
-      onPointerDown: _handlePointerDown,
-      onPointerMove: _handlePointerMove,
-      onPointerUp: _handlePointerUp,
-      onPointerCancel: _handlePointerCancel,
+    return Stack(
+      children: [
+        Listener(
+          onPointerDown: _handlePointerDown,
+          onPointerMove: _handlePointerMove,
+          onPointerUp: _handlePointerUp,
+          onPointerCancel: _handlePointerCancel,
+          behavior: HitTestBehavior.opaque,
+          child: GestureDetector(
+            onDoubleTapDown: _handleDoubleTap,
+            behavior: HitTestBehavior.opaque,
+            child: viewer,
+          ),
+        ),
+        if (_showScrollToTop)
+          Positioned(
+            top: screenSize.height * 0.08,
+            right: 16,
+            child: _ScrollToTopButton(onTap: _scrollToTop),
+          ),
+      ],
+    );
+  }
+}
+
+class _ScrollToTopButton extends StatelessWidget {
+  const _ScrollToTopButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
       behavior: HitTestBehavior.opaque,
-      child: GestureDetector(
-        onDoubleTapDown: _handleDoubleTap,
-        behavior: HitTestBehavior.opaque,
-        child: viewer,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: const Color(0x99000000),
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.keyboard_arrow_up_rounded,
+              color: Colors.white,
+              size: 18,
+            ),
+            SizedBox(width: 4),
+            Text(
+              '顶部',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

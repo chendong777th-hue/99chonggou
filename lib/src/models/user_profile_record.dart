@@ -10,6 +10,7 @@ class UserProfileRecord {
     required this.userId,
     this.nickname = '',
     this.avatarUrl = '',
+    this.avatarVersion = 0,
     this.selfSignature = '',
     this.friendRemark = '',
     this.gender,
@@ -20,6 +21,7 @@ class UserProfileRecord {
   final String userId;
   final String nickname;
   final String avatarUrl;
+  final int avatarVersion;
   final String selfSignature;
   final String friendRemark;
   final int? gender;
@@ -30,6 +32,7 @@ class UserProfileRecord {
     String? userId,
     String? nickname,
     String? avatarUrl,
+    int? avatarVersion,
     String? selfSignature,
     String? friendRemark,
     int? gender,
@@ -40,6 +43,7 @@ class UserProfileRecord {
       userId: userId ?? this.userId,
       nickname: nickname ?? this.nickname,
       avatarUrl: avatarUrl ?? this.avatarUrl,
+      avatarVersion: avatarVersion ?? this.avatarVersion,
       selfSignature: selfSignature ?? this.selfSignature,
       friendRemark: friendRemark ?? this.friendRemark,
       gender: gender ?? this.gender,
@@ -53,6 +57,7 @@ class UserProfileRecord {
       userId: row['user_id']?.toString() ?? '',
       nickname: row['nickname']?.toString() ?? '',
       avatarUrl: row['avatar_url']?.toString() ?? '',
+      avatarVersion: (row['avatar_version'] as int?) ?? 0,
       selfSignature: row['self_signature']?.toString() ?? '',
       friendRemark: row['friend_remark']?.toString() ?? '',
       gender: row['gender'] as int?,
@@ -90,6 +95,7 @@ class UserProfileRecord {
       userId: me.userId.trim(),
       nickname: me.nickname.trim(),
       avatarUrl: me.avatarUrl?.trim() ?? '',
+      avatarVersion: me.avatarVersion,
     );
   }
 
@@ -176,7 +182,8 @@ class UserProfileRecord {
   }
 
   /// SDK 用户资料写入本地：公开昵称/头像远端非空覆盖本地。
-  UserProfileRecord mergeSdkRemoteUserInfoPreferLocal(V2TimUserFullInfo? remote) {
+  UserProfileRecord mergeSdkRemoteUserInfoPreferLocal(
+      V2TimUserFullInfo? remote) {
     if (remote == null) {
       return this;
     }

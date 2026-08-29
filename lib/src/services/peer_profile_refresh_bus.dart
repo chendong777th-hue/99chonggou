@@ -11,6 +11,7 @@ class PeerProfileRefreshBus {
   final ValueNotifier<int> revision = ValueNotifier<int>(0);
 
   final Set<String> _changedUserIds = <String>{};
+  Set<String> _latestChangedUserIds = <String>{};
 
   String? get lastUserId {
     if (_changedUserIds.isEmpty) {
@@ -27,21 +28,23 @@ class PeerProfileRefreshBus {
       return;
     }
     _changedUserIds.add(id);
+    _latestChangedUserIds = <String>{id};
     revision.value++;
   }
 
   /// 批量标记变更 peer，只 bump 一次 revision，避免全量 sync 后 UI 风暴。
   void notifyMany(Iterable<String> userIds) {
-    var any = false;
+    final latest = <String>{};
     for (final raw in userIds) {
       final id = ChatIdFormat.rawUserUid(raw);
       if (id.isEmpty) {
         continue;
       }
       _changedUserIds.add(id);
-      any = true;
+      latest.add(id);
     }
-    if (any) {
+    if (latest.isNotEmpty) {
+      _latestChangedUserIds = latest;
       revision.value++;
     }
   }
@@ -54,11 +57,22 @@ class PeerProfileRefreshBus {
     return _changedUserIds.contains(id);
   }
 
+  /// Matches only the notification currently being delivered. This prevents
+  /// consumers that reload on changes from reacting to an old change forever.
+  bool matchesLatest(String userId) {
+    final id = ChatIdFormat.rawUserUid(userId);
+    if (id.isEmpty) {
+      return false;
+    }
+    return _latestChangedUserIds.contains(id);
+  }
+
   void clear() {
     if (_changedUserIds.isEmpty) {
       return;
     }
     _changedUserIds.clear();
+    _latestChangedUserIds = <String>{};
     revision.value++;
   }
 }

@@ -140,6 +140,12 @@ class _ImageScreenState extends TIMUIKitState<ImageScreen>
   final Map<int, ImageProvider> _refreshedProviders = <int, ImageProvider>{};
   final Map<int, ImagePreviewDisplayConfig> _loadedDisplayByIndex =
       <int, ImagePreviewDisplayConfig>{};
+  // Lock the Hero flight displaySize per index: the display config can
+  // change subtly after ORIGIN decode (decoded pixels vs metadata), which
+  // would make the dismiss Hero land at a different rect than the entrance
+  // Hero started from. Freeze the box size on first build so entrance and
+  // dismiss use the same geometry.
+  final Map<int, Size> _heroLockedBoxSizeByIndex = <int, Size>{};
   final Map<int, ValueNotifier<TallImageGalleryScrollGate>>
       _tallImageGalleryGateByIndex =
       <int, ValueNotifier<TallImageGalleryScrollGate>>{};
@@ -207,7 +213,7 @@ class _ImageScreenState extends TIMUIKitState<ImageScreen>
       ImagePreviewGalleryPrecache();
   int? _pendingOriginalRefreshIndex;
   Timer? _galleryIdleWorkTimer;
-  static const int _galleryCacheRadius = 2;
+  static const int _galleryCacheRadius = 3;
   static const Duration _galleryIdleWorkDelay = Duration(milliseconds: 48);
 
   AnimationController _fanControllerForIndex(int index) {
@@ -578,6 +584,7 @@ class _ImageScreenState extends TIMUIKitState<ImageScreen>
 
     if (_loadedDisplayByIndex.length > 24) {
       _loadedDisplayByIndex.removeWhere((i, _) => far(i));
+      _heroLockedBoxSizeByIndex.removeWhere((i, _) => far(i));
     }
   }
 
@@ -1511,11 +1518,22 @@ class _ImageScreenState extends TIMUIKitState<ImageScreen>
           screenHeight: screenSize.height,
           fitTallImagesToScreenWidth: widget.fitTallImagesToScreenWidth,
         );
-    final boxSize = imagePreviewBoxSizeFor(
+    final computedBoxSize = imagePreviewBoxSizeFor(
       display: display,
       screenWidth: screenSize.width,
       screenHeight: screenSize.height,
     );
+    // Freeze the Hero flight box size on first build. ORIGIN decode can
+    // shift the aspect ratio by a few pixels, which would otherwise make
+    // the dismiss Hero land at a slightly different rect than the entrance
+    // Hero started from (visible "jump" on close).
+    final heroBoxSize = _heroLockedBoxSizeByIndex.putIfAbsent(
+      index,
+      () => computedBoxSize,
+    );
+    // The displayed image still uses the live box size (so ORIGIN upgrades
+    // render crisply); only the Hero flight geometry is locked.
+    final boxSize = computedBoxSize;
     final imageFit = imagePreviewPaintFit(
       display,
       fitTallImagesToScreenWidth: widget.fitTallImagesToScreenWidth,
@@ -1535,6 +1553,9 @@ class _ImageScreenState extends TIMUIKitState<ImageScreen>
       enableLoadState: true,
       extendedImageGestureKey: gestureKey,
       enableSlideOutPage: true,
+      // 默认 Clip.antiAlias 会把放大后的图片裁回 boxSize 矩形内，
+      // 导致放大无法超出初始显示尺寸。none 让绘制自然溢出框外。
+      clipBehavior: Clip.none,
       initGestureConfigHandler: (state) {
         final screenSize = MediaQuery.sizeOf(context);
         final info = state.extendedImageInfo;
@@ -1658,6 +1679,8 @@ class _ImageScreenState extends TIMUIKitState<ImageScreen>
       image = HeroWidget(
         tag: item.heroTag,
         slidePagekey: slidePageKey,
+        animateCornerRadius: true,
+        cornerRadius: 10,
         child: image,
       );
     }
@@ -1686,7 +1709,10 @@ class _ImageScreenState extends TIMUIKitState<ImageScreen>
     }
 
     image = MediaPreviewHeroLayout(
-      displaySize: boxSize,
+      // Hero flight uses the locked box size so entrance and dismiss use
+      // the same geometry (prevents a close-time "jump" from ORIGIN decode
+      // shifting the aspect ratio by a few pixels).
+      displaySize: heroBoxSize,
       alignment: display.alignment,
       child: ImagePreviewDisplayBox(
         displaySize: boxSize,

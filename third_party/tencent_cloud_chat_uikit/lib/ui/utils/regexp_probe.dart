@@ -1,16 +1,14 @@
 import 'package:flutter/foundation.dart';
 
-/// Profile-gated wall-time probe for Main-thread RegExp hotspots.
-///
-/// Filter keyword: `[RegExpProbe]`.
-/// Default off in release; on in profile builds via [enabledInProfile].
+/// Opt-in wall-time probe for RegExp hotspots.
 class RegExpProbe {
   RegExpProbe._();
 
   static const bool enabled = false;
-  /// On for profile builds so list→chat RegExp sites show in device logs
-  /// (`[RegExpProbe]`). Release stays off via [enabled].
+  // Profile builds are the production-like sampling build used for hitch
+  // capture. Keep debug builds quiet unless a test explicitly forces probes.
   static const bool enabledInProfile = true;
+  static const int _maxSamplesPerSite = 120;
 
   static bool get isEnabled =>
       enabled || (kProfileMode && enabledInProfile) || _debugForceEnabled;
@@ -21,7 +19,8 @@ class RegExpProbe {
 
   static bool get _debugForceEnabled => debugForceEnabled;
 
-  static final Map<String, _RegExpProbeSite> _sites = <String, _RegExpProbeSite>{};
+  static final Map<String, _RegExpProbeSite> _sites =
+      <String, _RegExpProbeSite>{};
 
   static T measure<T>(String site, T Function() body) {
     if (!isEnabled) {
@@ -34,7 +33,15 @@ class RegExpProbe {
       sw.stop();
       final entry = _sites.putIfAbsent(site, _RegExpProbeSite.new);
       entry.calls += 1;
-      entry.elapsedUs += sw.elapsedMicroseconds;
+      final elapsedUs = sw.elapsedMicroseconds;
+      entry.elapsedUs += elapsedUs;
+      entry.samples.add(elapsedUs);
+      if (entry.samples.length > _maxSamplesPerSite) {
+        entry.samples.removeRange(
+          0,
+          entry.samples.length - _maxSamplesPerSite,
+        );
+      }
     }
   }
 
@@ -46,32 +53,78 @@ class RegExpProbe {
     entry.matchInvocations += count;
   }
 
+  /// Records cache activity without timing the cache lookup itself. This
+  /// keeps the probe useful for distinguishing repeated regex work from cache
+  /// churn while adding only one integer increment to the hot path.
+  static void recordCacheHit(String site, {int count = 1}) {
+    if (!isEnabled || count <= 0) {
+      return;
+    }
+    final entry = _sites.putIfAbsent(site, _RegExpProbeSite.new);
+    entry.cacheHits += count;
+  }
+
+  static void recordCacheMiss(String site, {int count = 1}) {
+    if (!isEnabled || count <= 0) {
+      return;
+    }
+    final entry = _sites.putIfAbsent(site, _RegExpProbeSite.new);
+    entry.cacheMisses += count;
+  }
+
   static void reset() {
     _sites.clear();
   }
 
+  /// Emits a bounded diagnostic snapshot. Deliberately called at lifecycle or
+  /// batch boundaries instead of every invocation, so Profile logging does not
+  /// perturb the frame being measured.
   static void dump({String reason = ''}) {
-    if (!isEnabled) {
+    if (!isEnabled || _sites.isEmpty) {
       return;
     }
-    final ranked = _sites.entries.toList()
+    final sites = _sites.entries.toList()
       ..sort((a, b) => b.value.elapsedUs.compareTo(a.value.elapsedUs));
-    final reasonPart = reason.trim().isEmpty ? '' : ' reason=$reason';
-    if (ranked.isEmpty) {
-      // ignore: avoid_print
-      print('[RegExpProbe] dump$reasonPart (empty)');
-      return;
-    }
-    final buffer = StringBuffer('[RegExpProbe] dump$reasonPart');
-    for (final e in ranked) {
-      buffer.write(
-        ' | ${e.key}: calls=${e.value.calls} '
-        'us=${e.value.elapsedUs} matches=${e.value.matchInvocations}',
+    _emit(
+        '[RegExpProbe] dump reason=${_safeLabel(reason)} sites=${sites.length}');
+    for (final entry in sites) {
+      final site = entry.value;
+      final samples = List<int>.of(site.samples)..sort();
+      final p50 = _percentile(samples, 0.50);
+      final p95 = _percentile(samples, 0.95);
+      _emit(
+        '[RegExpProbe] site=${_safeLabel(entry.key)} '
+        'calls=${site.calls} matches=${site.matchInvocations} '
+        'cacheHits=${site.cacheHits} cacheMisses=${site.cacheMisses} '
+        'totalUs=${site.elapsedUs} p50Us=$p50 p95Us=$p95',
       );
     }
-    // ignore: avoid_print
-    print(buffer.toString());
   }
+
+  static int _percentile(List<int> sorted, double fraction) {
+    if (sorted.isEmpty) {
+      return 0;
+    }
+    final index = ((sorted.length - 1) * fraction).ceil();
+    return sorted[index.clamp(0, sorted.length - 1)];
+  }
+
+  static void _emit(String line) {
+    final sink = debugSink;
+    if (sink != null) {
+      sink(line);
+    } else {
+      debugPrint(line);
+    }
+  }
+
+  static String _safeLabel(String value) {
+    final sanitized = value.replaceAll(RegExp(r'[^A-Za-z0-9_.-]'), '_');
+    return sanitized.length <= 64 ? sanitized : sanitized.substring(0, 64);
+  }
+
+  @visibleForTesting
+  static void Function(String line)? debugSink;
 
   @visibleForTesting
   static Map<String, ({int calls, int elapsedUs, int matchInvocations})>
@@ -91,4 +144,7 @@ class _RegExpProbeSite {
   int calls = 0;
   int elapsedUs = 0;
   int matchInvocations = 0;
+  int cacheHits = 0;
+  int cacheMisses = 0;
+  final List<int> samples = <int>[];
 }

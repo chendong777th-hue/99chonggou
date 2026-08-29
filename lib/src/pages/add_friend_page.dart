@@ -10,6 +10,7 @@ import 'package:tencent_cloud_chat_demo/src/api/friend_request_api.dart';
 import 'package:tencent_cloud_chat_demo/src/friend_application_helper.dart';
 import 'package:tencent_cloud_chat_demo/src/models/friend_request_record.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_local/friend_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/user_profile_local/user_profile_local_service.dart';
 import 'package:tencent_cloud_chat_demo/src/api/user_api.dart';
 import 'package:tencent_cloud_chat_demo/utils/custom_message/contact_card_message.dart';
 import 'package:tencent_cloud_chat_demo/utils/custom_message/friend_became_friends_message.dart';
@@ -160,8 +161,7 @@ class _AddFriendPageState extends State<AddFriendPage> {
   String? _addHiddenHint;
   bool _loadingGroupAddPolicy = false;
   bool _checkingQrPolicy = false;
-  bool _isPrivilegedGameUser =
-      PrivilegedGameUserService.instance.isPrivileged;
+  bool _isPrivilegedGameUser = PrivilegedGameUserService.instance.isPrivileged;
   GroupMemberRecord? _groupJoinMetaRecord;
 
   @override
@@ -641,9 +641,8 @@ class _AddFriendPageState extends State<AddFriendPage> {
           peerUserId: widget.userID,
           nickname: _getShowName(),
           avatarUrl: _getSdkFaceUrl(),
-          reason: result.isRestored
-              ? 'friend_restored'
-              : 'friend_auto_accepted',
+          reason:
+              result.isRestored ? 'friend_restored' : 'friend_auto_accepted',
         );
         await FriendBecameFriendsNotifier.notifyIfBecameFriends(
           peerUserId: widget.userID,
@@ -861,6 +860,11 @@ class _AddFriendPageState extends State<AddFriendPage> {
     required Color primaryColor,
   }) {
     final displayId = _displayUserID();
+    final avatarOwnerId = ChatIdFormat.rawUserUid(widget.userID);
+    final avatarVersion = UserProfileLocalService.instance
+            .readCached(avatarOwnerId)
+            ?.avatarVersion ??
+        0;
     return ProfilePageKeyboard.dismissScope(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -951,6 +955,17 @@ class _AddFriendPageState extends State<AddFriendPage> {
                             type: 1,
                             borderRadius: BorderRadius.circular(36),
                             isShowBigWhenClick: true,
+                            previewUrlResolver: () async {
+                              final result = await UserApi.instance
+                                  .fetchUserAvatarPreview(widget.userID);
+                              return result.previewUrl;
+                            },
+                            avatarCacheKey: avatarOwnerId.isEmpty
+                                ? null
+                                : 'avatar|user|$avatarOwnerId|$avatarVersion|thumb',
+                            previewCacheKey: avatarOwnerId.isEmpty
+                                ? null
+                                : 'avatar|user|$avatarOwnerId|$avatarVersion|preview',
                           ),
                         ),
                       ],

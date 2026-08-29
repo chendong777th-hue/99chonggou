@@ -41,6 +41,13 @@ class DeepgramVoiceToTextService {
       return byUrl;
     }
 
+    // Authentication, rate-limit and timeout failures are not repaired by
+    // downloading the same audio and retrying with bytes. Avoid turning one
+    // failed request into a second long network operation.
+    if (!_shouldFallbackToBytes(byUrl.errorMessage)) {
+      return byUrl;
+    }
+
     final downloaded = await _downloadAudio(audioUrl);
     if (downloaded == null) {
       lastErrorMessage = byUrl.errorMessage ?? '语音下载失败';
@@ -193,6 +200,25 @@ class DeepgramVoiceToTextService {
       return '网络超时，请稍后重试';
     }
     return '转写失败，请重试';
+  }
+
+  static bool _shouldFallbackToBytes(String? errorMessage) {
+    final message = errorMessage?.trim().toLowerCase() ?? '';
+    if (message.isEmpty) {
+      return true;
+    }
+    const nonRecoverableMarkers = <String>[
+      '鉴权',
+      '密钥',
+      '频繁',
+      '限流',
+      '超时',
+      'timeout',
+      '401',
+      '403',
+      '429',
+    ];
+    return !nonRecoverableMarkers.any(message.contains);
   }
 
   static bool _looksLikeUserFacing(String text) {

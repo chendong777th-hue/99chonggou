@@ -11,7 +11,6 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_group_application.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_group_application.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart'
     show GroupSystemNoticeItem;
-import 'package:tencent_cloud_chat_uikit/theme/color.dart';
 import 'package:tencent_cloud_chat_uikit/theme/tui_theme.dart';
 import 'package:tencent_cloud_chat_uikit/ui/controller/tim_uikit_conversation_controller.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitConversation/tim_uikit_conversation.dart'
@@ -293,24 +292,7 @@ class _ConversationGroupNoticeEntryTileState
           ),
           child: InkWell(
             onTap: editing ? () => widget.onToggleSelect?.call() : widget.onTap,
-            child: Stack(
-              children: [
-                rowContent,
-                Positioned(
-                  left: conversationFeedDividerInset(
-                    context,
-                    editing: editing,
-                  ),
-                  right: 0,
-                  bottom: 0,
-                  child: Container(
-                    height: 0.6,
-                    color:
-                        widget.theme.weakDividerColor ?? hexToColor('E5E6E9'),
-                  ),
-                ),
-              ],
-            ),
+            child: rowContent,
           ),
         );
         if (!widget.wrapWithSlidable || editing) {

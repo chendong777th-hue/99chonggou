@@ -15,6 +15,34 @@ import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_group_info.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_group_info.dart';
 
+enum GroupStoreMutationKind { incremental, replaceAll, reset }
+
+/// The only publication boundary for committed group metadata.
+///
+/// Database/cache mutation happens first. Consumers then receive one immutable
+/// delta carrying the exact Store version that owns those snapshots.
+class GroupStoreCommit {
+  GroupStoreCommit({
+    required this.ownerUserId,
+    required this.version,
+    required this.kind,
+    Iterable<MeGroupRecord> upserted = const <MeGroupRecord>[],
+    Iterable<String> deletedGroupIds = const <String>[],
+  })  : upserted = List<MeGroupRecord>.unmodifiable(upserted),
+        deletedGroupIds = List<String>.unmodifiable(deletedGroupIds);
+
+  final String ownerUserId;
+  final int version;
+  final GroupStoreMutationKind kind;
+  final List<MeGroupRecord> upserted;
+  final List<String> deletedGroupIds;
+
+  bool get isEmpty =>
+      upserted.isEmpty &&
+      deletedGroupIds.isEmpty &&
+      kind != GroupStoreMutationKind.reset;
+}
+
 /// 自托管群列表本地库（按登录账号隔离）。
 class GroupLocalStore {
   GroupLocalStore._();
@@ -31,10 +59,20 @@ class GroupLocalStore {
   Database? _db;
   final Map<String, List<MeGroupRecord>> _memoryByOwner = {};
   final Map<String, Map<String, MeGroupRecord>> _cacheByOwner = {};
+  final Map<String, int> _metadataWriteGenerations = <String, int>{};
+  int _metadataWriteSequence = 0;
   final Set<String> _fullyCachedOwners = <String>{};
   final Set<String> _indexTagBackfillDoneOwners = <String>{};
   bool _factoryReady = false;
   int _listDataRevision = 0;
+  late final ValueNotifier<GroupStoreCommit> commitListenable =
+      ValueNotifier<GroupStoreCommit>(
+    GroupStoreCommit(
+      ownerUserId: '',
+      version: 0,
+      kind: GroupStoreMutationKind.reset,
+    ),
+  );
 
   bool get _useMemoryOnly => kIsWeb;
 
@@ -43,6 +81,80 @@ class GroupLocalStore {
 
   void _bumpListDataRevision() {
     _listDataRevision++;
+  }
+
+  void _publishCommit({
+    required String ownerUserId,
+    required GroupStoreMutationKind kind,
+    Iterable<MeGroupRecord> upserted = const <MeGroupRecord>[],
+    Iterable<String> deletedGroupIds = const <String>[],
+  }) {
+    final upsertedList = upserted.toList(growable: false);
+    final deletedList = deletedGroupIds
+        .map((id) => id.trim())
+        .where((id) => id.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    if (kind != GroupStoreMutationKind.reset &&
+        upsertedList.isEmpty &&
+        deletedList.isEmpty) {
+      return;
+    }
+    _bumpListDataRevision();
+    commitListenable.value = GroupStoreCommit(
+      ownerUserId: ownerUserId,
+      version: _listDataRevision,
+      kind: kind,
+      upserted: upsertedList,
+      deletedGroupIds: deletedList,
+    );
+  }
+
+  String _metadataWriteKey(String owner, String groupId) {
+    return '$owner|${groupEquivalenceKey(groupId)}';
+  }
+
+  /// Returns a monotonic token for an async metadata write. A caller may
+  /// obtain it before starting a network request and pass it back to [upsert]
+  /// so an older response cannot commit after a newer request.
+  int beginMetadataWrite({
+    required String ownerUserId,
+    required String groupId,
+  }) {
+    final owner = _resolveOwner(ownerUserId);
+    final id = groupId.trim();
+    if (owner.isEmpty || id.isEmpty) {
+      return 0;
+    }
+    final generation = ++_metadataWriteSequence;
+    _metadataWriteGenerations[_metadataWriteKey(owner, id)] = generation;
+    return generation;
+  }
+
+  bool _isCurrentMetadataWrite({
+    required String owner,
+    required String groupId,
+    required int generation,
+  }) {
+    return generation > 0 &&
+        _metadataWriteGenerations[_metadataWriteKey(owner, groupId)] ==
+            generation;
+  }
+
+  @visibleForTesting
+  static bool acceptsMetadataRecord({
+    required MeGroupRecord? existing,
+    required MeGroupRecord incoming,
+  }) {
+    if (existing == null) {
+      return true;
+    }
+    // A server timestamp is authoritative when both sides have one. A
+    // missing timestamp remains compatible with the existing fallback path;
+    // async request ordering is protected by the generation gate above.
+    return existing.updatedAt <= 0 ||
+        incoming.updatedAt <= 0 ||
+        incoming.updatedAt >= existing.updatedAt;
   }
 
   /// 会话列表滚动等忙碌态：replaceAll 块间拉长 yield。
@@ -119,6 +231,8 @@ class GroupLocalStore {
         existing.groupName == incoming.groupName &&
         existing.displayAlias == incoming.displayAlias &&
         existing.avatarUrl == incoming.avatarUrl &&
+        existing.avatarPreviewUrl == incoming.avatarPreviewUrl &&
+        existing.avatarVersion == incoming.avatarVersion &&
         existing.notice == incoming.notice &&
         existing.memberCount == incoming.memberCount &&
         existing.myRole == incoming.myRole &&
@@ -142,6 +256,9 @@ class GroupLocalStore {
     };
     return normalized.where((item) {
       final old = existingByKey[groupEquivalenceKey(item.groupId)];
+      if (!acceptsMetadataRecord(existing: old, incoming: item)) {
+        return false;
+      }
       return old == null || !samePersistedGroupRecord(old, item);
     }).toList(growable: false);
   }
@@ -170,7 +287,7 @@ class GroupLocalStore {
     final path = p.join(basePath, _dbName);
     _db = await openDatabase(
       path,
-      version: 7,
+      version: 8,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE $_table (
@@ -180,6 +297,8 @@ class GroupLocalStore {
             group_name TEXT NOT NULL DEFAULT '',
             display_alias TEXT NOT NULL DEFAULT '',
             avatar_url TEXT NOT NULL DEFAULT '',
+            avatar_preview_url TEXT NOT NULL DEFAULT '',
+            avatar_version INTEGER NOT NULL DEFAULT 0,
             notice TEXT NOT NULL DEFAULT '',
             member_count INTEGER NOT NULL DEFAULT 0,
             my_role INTEGER NOT NULL DEFAULT 200,
@@ -248,6 +367,14 @@ class GroupLocalStore {
         if (oldVersion < 7) {
           await _createGroupSearchIndexTable(db);
           await _rebuildAllGroupSearchIndexes(db);
+        }
+        if (oldVersion < 8) {
+          await db.execute(
+            "ALTER TABLE $_table ADD COLUMN avatar_preview_url TEXT NOT NULL DEFAULT ''",
+          );
+          await db.execute(
+            'ALTER TABLE $_table ADD COLUMN avatar_version INTEGER NOT NULL DEFAULT 0',
+          );
         }
       },
     );
@@ -671,9 +798,8 @@ class GroupLocalStore {
     final db = await _openDb();
     await _createGroupSearchIndexTable(db);
     final args = <Object?>[owner, '%$needle%'];
-    final cursorClause = (cursor != null && cursor.trim().isNotEmpty)
-        ? ' AND group_id > ?'
-        : '';
+    final cursorClause =
+        (cursor != null && cursor.trim().isNotEmpty) ? ' AND group_id > ?' : '';
     if (cursorClause.isNotEmpty) {
       args.add(cursor!.trim());
     }
@@ -690,8 +816,7 @@ class GroupLocalStore {
           row['group_id']!.toString(),
     ];
     final hasMore = ids.length > pageSize;
-    final pageIds =
-        hasMore ? ids.sublist(0, pageSize) : List<String>.from(ids);
+    final pageIds = hasMore ? ids.sublist(0, pageSize) : List<String>.from(ids);
     return SearchIdPage(
       ids: pageIds,
       nextCursor: pageIds.isEmpty ? null : pageIds.last,
@@ -844,9 +969,7 @@ class GroupLocalStore {
       return const [];
     }
     final needle = keyword.trim().toLowerCase();
-    final cap = limit == null
-        ? null
-        : (limit <= 0 ? 0 : limit);
+    final cap = limit == null ? null : (limit <= 0 ? 0 : limit);
 
     if (_useMemoryOnly || _fullyCachedOwners.contains(owner)) {
       final source = _useMemoryOnly
@@ -973,7 +1096,6 @@ class GroupLocalStore {
         );
       }
       await batch.commit(noResult: true);
-      _bumpListDataRevision();
       if (rows.length < chunk) {
         break;
       }
@@ -1093,11 +1215,42 @@ class GroupLocalStore {
     if (owner.isEmpty) {
       return;
     }
+    final writeGenerations = <String, int>{
+      for (final item in normalized)
+        groupEquivalenceKey(item.groupId): beginMetadataWrite(
+          ownerUserId: owner,
+          groupId: item.groupId,
+        ),
+    };
     if (_useMemoryOnly || !SqfliteLifecycleGuard.instance.writesAllowed) {
-      _memoryByOwner[owner] = normalized;
-      _cacheRecords(owner, normalized);
+      final existing = List<MeGroupRecord>.from(
+        _memoryByOwner[owner] ?? const <MeGroupRecord>[],
+      );
+      final existingByKey = <String, MeGroupRecord>{
+        for (final item in existing) groupEquivalenceKey(item.groupId): item,
+      };
+      final guarded = normalized.map((item) {
+        final old = existingByKey[groupEquivalenceKey(item.groupId)];
+        return acceptsMetadataRecord(existing: old, incoming: item) ||
+                old == null
+            ? item
+            : old;
+      }).toList(growable: false);
+      _memoryByOwner[owner] = guarded;
+      _cacheRecords(owner, guarded);
       _fullyCachedOwners.add(owner);
-      _bumpListDataRevision();
+      _publishCommit(
+        ownerUserId: owner,
+        kind: GroupStoreMutationKind.replaceAll,
+        upserted: groupRecordsToUpsert(
+          existing: existing,
+          normalized: guarded,
+        ),
+        deletedGroupIds: groupIdsToDelete(
+          existing: existing,
+          normalized: guarded,
+        ),
+      );
       return;
     }
 
@@ -1113,25 +1266,69 @@ class GroupLocalStore {
     );
 
     final existing = existingSnapshot ?? await readAll(ownerUserId: owner);
-    final toDelete = groupIdsToDelete(
+    final rawToDelete = groupIdsToDelete(
       existing: existing,
       normalized: normalized,
     );
-    final toUpsert = groupRecordsToUpsert(
+    for (final id in rawToDelete) {
+      writeGenerations.putIfAbsent(
+        groupEquivalenceKey(id),
+        () => beginMetadataWrite(ownerUserId: owner, groupId: id),
+      );
+    }
+    final toDelete = rawToDelete.where((id) {
+      final generation = writeGenerations[groupEquivalenceKey(id)] ?? 0;
+      return _isCurrentMetadataWrite(
+        owner: owner,
+        groupId: id,
+        generation: generation,
+      );
+    }).toList(growable: false);
+    final rawToUpsert = groupRecordsToUpsert(
       existing: existing,
       normalized: normalized,
     );
+    final toUpsert = rawToUpsert.where((item) {
+      final generation =
+          writeGenerations[groupEquivalenceKey(item.groupId)] ?? 0;
+      return _isCurrentMetadataWrite(
+        owner: owner,
+        groupId: item.groupId,
+        generation: generation,
+      );
+    }).toList(growable: false);
     final db = await _openDb();
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
     final toUpsertIds = toUpsert.map((item) => item.groupId).toSet();
     final existingByKey = <String, MeGroupRecord>{
       for (final item in existing) groupEquivalenceKey(item.groupId): item,
     };
+    final cachedBase = <String, MeGroupRecord>{
+      for (final item in (_cacheByOwner[owner]?.values ?? existing))
+        groupEquivalenceKey(item.groupId): item,
+    };
     final cachedRecords = normalized.map((item) {
+      final generation =
+          writeGenerations[groupEquivalenceKey(item.groupId)] ?? 0;
+      if (!_isCurrentMetadataWrite(
+        owner: owner,
+        groupId: item.groupId,
+        generation: generation,
+      )) {
+        return cachedBase[groupEquivalenceKey(item.groupId)] ??
+            existingByKey[groupEquivalenceKey(item.groupId)] ??
+            item;
+      }
+      final old = existingByKey[groupEquivalenceKey(item.groupId)];
+      if (!acceptsMetadataRecord(existing: old, incoming: item) &&
+          old != null) {
+        // Keep the database and the in-memory UI cache on the same
+        // authoritative record when an old response is rejected.
+        return old;
+      }
       if (item.updatedAt > 0) {
         return item;
       }
-      final old = existingByKey[groupEquivalenceKey(item.groupId)];
       final updatedAt =
           toUpsertIds.contains(item.groupId) ? now : (old?.updatedAt ?? now);
       return item.copyWith(updatedAt: updatedAt);
@@ -1188,7 +1385,11 @@ class GroupLocalStore {
     if (resolvedToUpsert.isEmpty) {
       _cacheRecords(owner, cachedRecords);
       _fullyCachedOwners.add(owner);
-      _bumpListDataRevision();
+      _publishCommit(
+        ownerUserId: owner,
+        kind: GroupStoreMutationKind.replaceAll,
+        deletedGroupIds: toDelete,
+      );
       SqfliteLockProfileLog.event(
         'replaceAll_end',
         extras: <String, Object?>{
@@ -1239,7 +1440,12 @@ class GroupLocalStore {
 
     _cacheRecords(owner, cachedRecords);
     _fullyCachedOwners.add(owner);
-    _bumpListDataRevision();
+    _publishCommit(
+      ownerUserId: owner,
+      kind: GroupStoreMutationKind.replaceAll,
+      upserted: resolvedToUpsert,
+      deletedGroupIds: toDelete,
+    );
     try {
       await _rebuildGroupSearchIndexForOwnerStatic(db, owner);
     } catch (e) {
@@ -1280,14 +1486,15 @@ class GroupLocalStore {
         GroupLocalPerfFlags.coldStartUpsertRatio;
   }
 
-  Future<void> upsert({
+  Future<bool> upsert({
     required String ownerUserId,
     required MeGroupRecord record,
+    int? writeGeneration,
   }) async {
     final owner = _resolveOwner(ownerUserId);
     final id = record.groupId.trim();
     if (owner.isEmpty || id.isEmpty) {
-      return;
+      return false;
     }
     if (isForbiddenGroupStorageId(id)) {
       debugPrint(
@@ -1300,37 +1507,71 @@ class GroupLocalStore {
           'groupId': id,
         },
       );
-      return;
+      return false;
+    }
+    final generation =
+        writeGeneration ?? beginMetadataWrite(ownerUserId: owner, groupId: id);
+    if (!_isCurrentMetadataWrite(
+      owner: owner,
+      groupId: id,
+      generation: generation,
+    )) {
+      return false;
+    }
+    final existing = await read(groupId: id, ownerUserId: owner);
+    if (!acceptsMetadataRecord(existing: existing, incoming: record)) {
+      return false;
+    }
+    if (existing != null && samePersistedGroupRecord(existing, record)) {
+      return false;
     }
     final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+    final storedRecord =
+        record.updatedAt > 0 ? record : record.copyWith(updatedAt: now);
     if (_useMemoryOnly || !SqfliteLifecycleGuard.instance.writesAllowed) {
       final list = List<MeGroupRecord>.from(_memoryByOwner[owner] ?? const []);
       list.removeWhere((e) => e.groupId == id);
-      list.add(record);
+      list.add(storedRecord);
       list.sort((a, b) => b.joinedAt.compareTo(a.joinedAt));
       _memoryByOwner[owner] = list;
       _cacheRecords(owner, list);
-      _bumpListDataRevision();
-      return;
+      _publishCommit(
+        ownerUserId: owner,
+        kind: GroupStoreMutationKind.incremental,
+        upserted: <MeGroupRecord>[storedRecord],
+      );
+      return true;
     }
     final db = await _openDb();
+    if (!_isCurrentMetadataWrite(
+      owner: owner,
+      groupId: id,
+      generation: generation,
+    )) {
+      return false;
+    }
     await db.insert(
       _table,
-      _rowFromRecord(owner, record, now),
+      _rowFromRecord(owner, storedRecord, now),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
     try {
       await _createGroupSearchIndexTable(db);
-      await _upsertGroupSearchRow(db, owner, record);
+      await _upsertGroupSearchRow(db, owner, storedRecord);
     } catch (_) {}
     final cached = List<MeGroupRecord>.from(
       _cacheByOwner[owner]?.values ?? <MeGroupRecord>[],
     );
     cached.removeWhere((e) => ChatIdFormat.groupIdsEquivalent(e.groupId, id));
-    cached.add(record);
+    cached.add(storedRecord);
     cached.sort((a, b) => b.joinedAt.compareTo(a.joinedAt));
     _cacheRecords(owner, cached);
-    _bumpListDataRevision();
+    _publishCommit(
+      ownerUserId: owner,
+      kind: GroupStoreMutationKind.incremental,
+      upserted: <MeGroupRecord>[storedRecord],
+    );
+    return true;
   }
 
   Future<void> delete({
@@ -1344,17 +1585,26 @@ class GroupLocalStore {
     }
     if (_useMemoryOnly || !SqfliteLifecycleGuard.instance.writesAllowed) {
       final list = List<MeGroupRecord>.from(_memoryByOwner[owner] ?? const []);
+      final deleted = list
+          .where((e) => ChatIdFormat.groupIdsEquivalent(e.groupId, id))
+          .map((e) => e.groupId)
+          .toList(growable: false);
       list.removeWhere((e) => ChatIdFormat.groupIdsEquivalent(e.groupId, id));
       _memoryByOwner[owner] = list;
       _cacheRecords(owner, list);
-      _bumpListDataRevision();
+      _publishCommit(
+        ownerUserId: owner,
+        kind: GroupStoreMutationKind.incremental,
+        deletedGroupIds: deleted,
+      );
       return;
     }
     final storedIds = (await readAll(ownerUserId: owner))
         .where((item) => ChatIdFormat.groupIdsEquivalent(item.groupId, id))
         .map((item) => item.groupId)
         .toSet();
-    if (storedIds.isEmpty) {
+    final hadStoredRows = storedIds.isNotEmpty;
+    if (!hadStoredRows) {
       storedIds.add(id);
     }
     final db = await _openDb();
@@ -1374,7 +1624,13 @@ class GroupLocalStore {
       (key, _) => ChatIdFormat.groupIdsEquivalent(key, id),
     );
     _cacheByOwner[owner] = cached;
-    _bumpListDataRevision();
+    if (hadStoredRows) {
+      _publishCommit(
+        ownerUserId: owner,
+        kind: GroupStoreMutationKind.incremental,
+        deletedGroupIds: storedIds,
+      );
+    }
   }
 
   Future<void> patch({
@@ -1401,11 +1657,17 @@ class GroupLocalStore {
     }
     _memoryByOwner.remove(owner);
     _cacheByOwner.remove(owner);
+    _metadataWriteGenerations.removeWhere(
+      (key, _) => key.startsWith('$owner|'),
+    );
     _fullyCachedOwners.remove(owner);
     _indexTagBackfillDoneOwners.remove(owner);
     _memoryFullSyncMeta.remove(owner);
-    _bumpListDataRevision();
     if (_useMemoryOnly) {
+      _publishCommit(
+        ownerUserId: owner,
+        kind: GroupStoreMutationKind.reset,
+      );
       return;
     }
     final db = await _openDb();
@@ -1422,16 +1684,24 @@ class GroupLocalStore {
         whereArgs: [owner],
       );
     } catch (_) {}
+    _publishCommit(
+      ownerUserId: owner,
+      kind: GroupStoreMutationKind.reset,
+    );
   }
 
   Future<void> clearSession() async {
     // 登出只卸内存；磁盘多账号共存，注销走 clearForOwner。
     _memoryByOwner.clear();
     _cacheByOwner.clear();
+    _metadataWriteGenerations.clear();
     _fullyCachedOwners.clear();
     _indexTagBackfillDoneOwners.clear();
     _memoryFullSyncMeta.clear();
-    _bumpListDataRevision();
+    _publishCommit(
+      ownerUserId: '',
+      kind: GroupStoreMutationKind.reset,
+    );
   }
 
   /// 测试专用：整表清空（生产登出禁止调用）。
@@ -1439,11 +1709,15 @@ class GroupLocalStore {
   Future<void> wipeAllDiskForTest() async {
     _memoryByOwner.clear();
     _cacheByOwner.clear();
+    _metadataWriteGenerations.clear();
     _fullyCachedOwners.clear();
     _indexTagBackfillDoneOwners.clear();
     _memoryFullSyncMeta.clear();
-    _bumpListDataRevision();
     if (_useMemoryOnly) {
+      _publishCommit(
+        ownerUserId: '',
+        kind: GroupStoreMutationKind.reset,
+      );
       return;
     }
     final db = await _openDb();
@@ -1452,6 +1726,10 @@ class GroupLocalStore {
     try {
       await db.delete(_searchTable);
     } catch (_) {}
+    _publishCommit(
+      ownerUserId: '',
+      kind: GroupStoreMutationKind.reset,
+    );
   }
 
   MeGroupRecord _recordFromRow(Map<String, Object?> row) {
@@ -1461,6 +1739,8 @@ class GroupLocalStore {
       groupName: row['group_name']?.toString() ?? '',
       displayAlias: row['display_alias']?.toString() ?? '',
       avatarUrl: row['avatar_url']?.toString() ?? '',
+      avatarPreviewUrl: row['avatar_preview_url']?.toString() ?? '',
+      avatarVersion: (row['avatar_version'] as int?) ?? 0,
       notice: row['notice']?.toString() ?? '',
       memberCount: (row['member_count'] as int?) ?? 0,
       myRole: (row['my_role'] as int?) ?? 200,
@@ -1487,6 +1767,8 @@ class GroupLocalStore {
       'group_name': record.groupName,
       'display_alias': record.displayAlias,
       'avatar_url': record.avatarUrl,
+      'avatar_preview_url': record.avatarPreviewUrl,
+      'avatar_version': record.avatarVersion,
       'notice': record.notice,
       'member_count': record.memberCount,
       'my_role': record.myRole,

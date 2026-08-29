@@ -74,9 +74,19 @@ List<V2TimMessage> mergeChatMediaGalleryMessages({
   required bool Function(V2TimMessage) isPreviewable,
   int maxItems = ChatMediaGalleryExpandPolicy.maxItems,
 }) {
+  // The current authoritative chat window wins over a stale local-history or
+  // short-cache copy. In particular, a revoked seed row must suppress an older
+  // cached instance that still carries its image/video payload.
+  final unavailableSeed = seedNewestFirst
+      .where((message) => !isPreviewable(message))
+      .toList(growable: false);
   final combined = <V2TimMessage>[
     ...seedNewestFirst,
-    ...expanded,
+    for (final message in expanded)
+      if (!unavailableSeed.any(
+        (seedMessage) => isSameChatMediaMessage(seedMessage, message),
+      ))
+        message,
   ];
   final collected = collectChatMediaMessages(
     originList: combined,
@@ -374,6 +384,38 @@ class ChatMediaGalleryExpandCache {
       messagesOldestFirst: List<V2TimMessage>.unmodifiable(messages),
       expiresAt: DateTime.now().add(ChatMediaGalleryExpandPolicy.cacheTtl),
     );
+  }
+
+  static void removeMessage(String messageID, {String? conversationID}) {
+    final target = messageID.trim();
+    if (target.isEmpty) {
+      return;
+    }
+    final conversation = conversationID?.trim() ?? '';
+    final keys = _entries.keys.toList(growable: false);
+    for (final key in keys) {
+      if (conversation.isNotEmpty && !key.startsWith('$conversation|')) {
+        continue;
+      }
+      final entry = _entries[key];
+      if (entry == null) {
+        continue;
+      }
+      final retained = entry.messagesOldestFirst.where((message) {
+        return message.msgID?.trim() != target && message.id?.trim() != target;
+      }).toList(growable: false);
+      if (retained.length == entry.messagesOldestFirst.length) {
+        continue;
+      }
+      if (retained.isEmpty) {
+        _entries.remove(key);
+      } else {
+        _entries[key] = ChatMediaGalleryExpandCacheEntry(
+          messagesOldestFirst: List<V2TimMessage>.unmodifiable(retained),
+          expiresAt: entry.expiresAt,
+        );
+      }
+    }
   }
 
   static void _pruneExpired() {

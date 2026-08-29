@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/conversation_preview_history_sync.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/mobile_async_commit_guard.dart';
 
 /// Serializes chat history recovery and post-open retry work per conversation.
 class ChatHistoryRecoveryCoordinator {
@@ -25,6 +26,18 @@ class ChatHistoryRecoveryCoordinator {
       <String, _ConversationRecoveryState>{};
   final Map<String, Future<void>> _exclusiveTasks = <String, Future<void>>{};
   final Map<String, int> _activePriorityByKey = <String, int>{};
+  final MobileAsyncCommitGuard _commitGuard = MobileAsyncCommitGuard();
+  int _lifecycleEpoch = 0;
+
+  /// Invalidates delayed recovery callbacks during logout/page teardown.
+  void invalidateLifecycle() {
+    _lifecycleEpoch++;
+    _commitGuard.advancePage();
+    for (final state in _states.values) {
+      state.pendingTask = null;
+      state.pendingToken = null;
+    }
+  }
 
   void beginInitialLoad(String conversationKey) {
     final key = conversationKey.trim();
@@ -131,9 +144,14 @@ class ChatHistoryRecoveryCoordinator {
       return true;
     }
     final normalizedReason = reason.trim();
+    // im_reconnected (real socket disconnect+reconnect) must never be
+    // coalesced — it is the most authoritative recovery signal and the
+    // missing messages may only be retrievable via this path.
+    if (normalizedReason == 'im_reconnected') {
+      return false;
+    }
     if (normalizedReason != 'app_resumed' &&
-        normalizedReason != 'connect_success' &&
-        normalizedReason != 'im_reconnected') {
+        normalizedReason != 'connect_success') {
       return false;
     }
     final state = _states.putIfAbsent(key, _ConversationRecoveryState.new);
@@ -174,6 +192,8 @@ class ChatHistoryRecoveryCoordinator {
     if (key.isEmpty) {
       return;
     }
+    final commitToken = _commitGuard.begin('history-recovery', key: key);
+    final lifecycleEpoch = _lifecycleEpoch;
 
     if (shouldDropForPriority(conversationKey: key, priority: priority)) {
       return;
@@ -181,6 +201,9 @@ class ChatHistoryRecoveryCoordinator {
 
     if (priority > priorityInitial) {
       await waitForInitialLoadComplete(key);
+      if (lifecycleEpoch != _lifecycleEpoch) {
+        return;
+      }
       if (shouldDropForPriority(conversationKey: key, priority: priority)) {
         return;
       }
@@ -192,13 +215,23 @@ class ChatHistoryRecoveryCoordinator {
       if (shouldDropForPriority(conversationKey: key, priority: priority)) {
         return;
       }
+      if (lifecycleEpoch != _lifecycleEpoch) {
+        return;
+      }
+      if (!_commitGuard.canCommit(commitToken)) {
+        return;
+      }
       // While one recovery is active, retain only the newest accepted trigger.
       // Every waiter shares the same drain future, so the active request is
       // followed by at most one latest request instead of N queued refreshes.
       state.pendingTask = task;
       state.pendingPriority = priority;
       state.pendingReason = reason;
+      state.pendingToken = commitToken;
       await previous;
+      if (!_commitGuard.canCommit(commitToken)) {
+        return;
+      }
       return;
     }
 
@@ -208,8 +241,12 @@ class ChatHistoryRecoveryCoordinator {
     unawaited(() async {
       var nextTask = task;
       var nextPriority = priority;
+      var nextToken = commitToken;
       try {
         while (true) {
+          if (lifecycleEpoch != _lifecycleEpoch && nextToken == commitToken) {
+            break;
+          }
           await nextTask();
           final pending = state.pendingTask;
           if (pending == null) {
@@ -220,6 +257,12 @@ class ChatHistoryRecoveryCoordinator {
           state.pendingTask = null;
           state.pendingPriority = null;
           state.pendingReason = null;
+          final pendingToken = state.pendingToken;
+          state.pendingToken = null;
+          if (pendingToken == null || !_commitGuard.canCommit(pendingToken)) {
+            break;
+          }
+          nextToken = pendingToken;
           _activePriorityByKey[key] = nextPriority;
         }
         completion.complete();
@@ -231,6 +274,7 @@ class ChatHistoryRecoveryCoordinator {
         state.pendingTask = null;
         state.pendingPriority = null;
         state.pendingReason = null;
+        state.pendingToken = null;
       }
     }());
     await completion.future;
@@ -294,6 +338,8 @@ class ChatHistoryRecoveryCoordinator {
     _states.clear();
     _exclusiveTasks.clear();
     _activePriorityByKey.clear();
+    _lifecycleEpoch = 0;
+    _commitGuard.reset();
   }
 }
 
@@ -306,5 +352,6 @@ class _ConversationRecoveryState {
   Future<void> Function()? pendingTask;
   int? pendingPriority;
   String? pendingReason;
+  MobileAsyncCommitToken? pendingToken;
   final List<Completer<void>> initialLoadWaiters = <Completer<void>>[];
 }

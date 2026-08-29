@@ -1002,13 +1002,7 @@ class WalletApi {
       for (final item in list) {
         final userId = _text(item.userID);
         if (userId.isEmpty) continue;
-        final nickName = _text(item.nickName);
-        final name = nickName.isNotEmpty ? nickName : userId;
-        members.add(RedPacketMember(
-          userId: userId,
-          name: name,
-          avatar: _text(item.faceUrl),
-        ));
+        members.add(RedPacketMember.fromGroupMember(item));
       }
       nextSeq = data?.nextSeq?.toString() ?? '0';
     } while (nextSeq != '0');
@@ -1020,17 +1014,7 @@ class WalletApi {
     final list = await MeFriendApi.instance.loadFriendsForPickers();
     return list
         .map((item) {
-          final userId = _text(item.userID);
-          final remark = _text(item.friendRemark);
-          final nickName = _text(item.userProfile?.nickName);
-          final name = remark.isNotEmpty
-              ? remark
-              : (nickName.isNotEmpty ? nickName : userId);
-          return RedPacketMember(
-            userId: userId,
-            name: name,
-            avatar: _text(item.userProfile?.faceUrl),
-          );
+          return RedPacketMember.fromFriend(item);
         })
         .where((item) => item.userId.isNotEmpty)
         .toList();

@@ -48,6 +48,7 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_receipt.dart'
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKitMessageItem/tim_uikit_media_upload_overlay.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKitMessageItem/TIMUIKitMessageReaction/tim_uikit_message_reaction_wrapper.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_bubble_local_image.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_image_decode_admission.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_media_send_utils.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/history_pagination_anchor.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/image_edit/image_preview_editor.dart';
@@ -56,6 +57,7 @@ import 'package:tencent_cloud_chat_uikit/ui/utils/chat_media_gallery_session.dar
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_media_preview_builder.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_image_original_prefetch.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_jitter_diag.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_main_thread_perf.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_img_trace.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_message_preview_image_resolver.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/media_preview_header_utils.dart';
@@ -112,6 +114,100 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
   int _trackedDownloadProgress = -1;
   String? _archiveCachePath;
   final Set<String> _readyImageFrameKeys = <String>{};
+  final Map<String, Stopwatch> _imageFrameStopwatches = <String, Stopwatch>{};
+  final Map<String, String> _imageFrameSources = <String, String>{};
+  bool _galleryDecodeAdmitted = false;
+  bool _galleryRowVisible = false;
+  String? _galleryDecodeAdmissionKey;
+
+  String get _currentDecodeAdmissionKey {
+    final convID = widget.chatModel.conversationID.trim();
+    final stableId = readOutgoingStableId(widget.message) ??
+        widget.message.id?.trim() ??
+        widget.message.msgID?.trim() ??
+        '';
+    final fallback = 'state:${identityHashCode(this)}';
+    return '$convID|${stableId.isNotEmpty ? stableId : fallback}';
+  }
+
+  void _beginBubbleImageFrameTiming(String frameKey, {required String source}) {
+    if (!ChatMainThreadPerf.isEnabled ||
+        _readyImageFrameKeys.contains(frameKey) ||
+        _imageFrameStopwatches.containsKey(frameKey)) {
+      return;
+    }
+    _imageFrameSources[frameKey] = source;
+    _imageFrameStopwatches[frameKey] = Stopwatch()..start();
+  }
+
+  void _completeBubbleImageFrameTiming(
+    String frameKey, {
+    required bool wasSynchronouslyLoaded,
+  }) {
+    final stopwatch = _imageFrameStopwatches.remove(frameKey);
+    final source = _imageFrameSources.remove(frameKey);
+    if (stopwatch == null) {
+      return;
+    }
+    stopwatch.stop();
+    if (wasSynchronouslyLoaded) {
+      ChatMainThreadPerf.increment('image_decode_cache_hit');
+      return;
+    }
+    ChatMainThreadPerf.recordDurationMicros(
+      ChatMainThreadPerf.imageDecodeMs,
+      stopwatch.elapsedMicroseconds,
+      source: source ?? 'unknown',
+      conversationType: ChatMainThreadPerf.conversationTypeForId(
+          widget.chatModel.conversationID),
+    );
+  }
+
+  Widget _pendingDecodePlaceholder(
+    TUITheme? theme,
+    Size displaySize,
+  ) {
+    return SizedBox(
+      width: displaySize.width,
+      height: displaySize.height,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: ColoredBox(
+          color: theme?.weakDividerColor ?? const Color(0xFFE8E8E8),
+        ),
+      ),
+    );
+  }
+
+  bool _requestGalleryDecodeAdmission() {
+    if (_galleryDecodeAdmitted || _hasBubbleFrameReady()) {
+      return false;
+    }
+    // 历史长列表在滚动/回弹时会同时挂载多个网络图片。只让屏外行
+    // 进入逐帧 admission，避免缓存区内的图片在同一帧集中触发解码；
+    // 已可见的行仍立即出图，避免用户看到大片占位。
+    final staggered = shouldStaggerImageDecode(widget.message);
+    final deferOffscreen =
+        _shouldDeferHeavyBubbleDecode() && !_galleryRowVisible;
+    if (!staggered && !deferOffscreen) {
+      return false;
+    }
+    final key = _currentDecodeAdmissionKey;
+    _galleryDecodeAdmissionKey = key;
+    ChatImageDecodeAdmission.instance.request(
+      key: key,
+      visible: _galleryRowVisible,
+      onAdmit: () {
+        if (!mounted || _galleryDecodeAdmissionKey != key) {
+          return;
+        }
+        setState(() {
+          _galleryDecodeAdmitted = true;
+        });
+      },
+    );
+    return true;
+  }
 
   String _decodeProbePathKey(String pathOrUrl) {
     final value = pathOrUrl.trim();
@@ -345,6 +441,12 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
     final msgIdChanged = oldWidget.message.msgID != widget.message.msgID;
 
     if (pathChanged) {
+      final oldKey = _galleryDecodeAdmissionKey;
+      if (oldKey != null) {
+        ChatImageDecodeAdmission.instance.cancel(oldKey);
+      }
+      _galleryDecodeAdmissionKey = null;
+      _galleryDecodeAdmitted = !shouldStaggerImageDecode(widget.message);
       final path = _resolveSelfSendLocalImagePath();
       if (path != null && path != _localLayoutPath) {
         _localLayoutSize = null;
@@ -1600,16 +1702,24 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
     final bubbleFilterQuality =
         sourceIsThumb ? FilterQuality.medium : FilterQuality.high;
 
+    if ((selectedLocalPath != null || selectedNetworkUrl != null) &&
+        _requestGalleryDecodeAdmission()) {
+      return _pendingDecodePlaceholder(theme, displaySize);
+    }
+
     ImageFrameBuilder frameBuilderForKey(String frameKey) {
       return (BuildContext context, Widget child, int? frame,
           bool wasSynchronouslyLoaded) {
         if (frame != null || wasSynchronouslyLoaded) {
+          _completeBubbleImageFrameTiming(
+            frameKey,
+            wasSynchronouslyLoaded: wasSynchronouslyLoaded,
+          );
           _markBubbleFrameReady(frameKey);
           return child;
         }
         // 已解出过帧（含同气泡换 URL/路径）：保留 child，避免转场/补链闪灰。
-        if (_readyImageFrameKeys.contains(frameKey) ||
-            _hasBubbleFrameReady()) {
+        if (_readyImageFrameKeys.contains(frameKey) || _hasBubbleFrameReady()) {
           return child;
         }
         // 预览/聊天记录页的图片可能已在解码但尚未回调首帧；继续覆盖
@@ -1637,12 +1747,14 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
           dpr: dpr,
           metaImg: _imageMetaForAspectRatio(originalImg, smallImg),
         );
+        _beginBubbleImageFrameTiming('net:$imgPath', source: 'web');
         return SizedBox(
           width: displaySize.width,
           height: displaySize.height,
           child: Image.network(
             imgPath,
-            key: ValueKey<String>(_bubbleImageWidgetKey('web', urlOrPathFallback: imgPath)),
+            key: ValueKey<String>(
+                _bubbleImageWidgetKey('web', urlOrPathFallback: imgPath)),
             width: displaySize.width,
             height: displaySize.height,
             fit: imageFit,
@@ -1655,10 +1767,31 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
           ),
         );
       }
+      final localWarmHint = chatBubbleImageWarmDecodeHint(
+        chatMediaBubbleImageCacheKey(
+          widget.message.msgID,
+          urlFallback: imgPath,
+        ),
+      );
+      final localWarmHintFitsRequestedSize = localWarmHint != null &&
+          ((localWarmHint.decodeByWidth &&
+                  decodeTarget.width != null &&
+                  decodeTarget.width! <= localWarmHint.targetPx) ||
+              (!localWarmHint.decodeByWidth &&
+                  decodeTarget.height != null &&
+                  decodeTarget.height! <= localWarmHint.targetPx));
+      final effectiveLocalDecodeWidth =
+          localWarmHintFitsRequestedSize && localWarmHint.decodeByWidth
+              ? localWarmHint.targetPx
+              : decodeTarget.width;
+      final effectiveLocalDecodeHeight =
+          localWarmHintFitsRequestedSize && !localWarmHint.decodeByWidth
+              ? localWarmHint.targetPx
+              : decodeTarget.height;
       final ImageProvider localProvider = ResizeImage(
         FileImage(File(imgPath)),
-        width: decodeTarget.width,
-        height: decodeTarget.height,
+        width: effectiveLocalDecodeWidth,
+        height: effectiveLocalDecodeHeight,
       );
       _probeBubbleDecodeProvider(
         provider: localProvider,
@@ -1670,12 +1803,13 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
           smallImg: smallImg,
         ),
         displaySize: displaySize,
-        cacheW: decodeTarget.width ?? -1,
-        cacheH: decodeTarget.height ?? -1,
+        cacheW: effectiveLocalDecodeWidth ?? -1,
+        cacheH: effectiveLocalDecodeHeight ?? -1,
         deferHeavyDecode: deferHeavyDecode,
         dpr: dpr,
         metaImg: _imageMetaForAspectRatio(originalImg, smallImg),
       );
+      _beginBubbleImageFrameTiming('local:$imgPath', source: 'file');
       return SizedBox(
         width: displaySize.width,
         height: displaySize.height,
@@ -1689,8 +1823,8 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
           fit: imageFit,
           alignment: imageAlignment,
           filterQuality: bubbleFilterQuality,
-          cacheWidth: decodeTarget.width,
-          cacheHeight: decodeTarget.height,
+          cacheWidth: effectiveLocalDecodeWidth,
+          cacheHeight: effectiveLocalDecodeHeight,
           gaplessPlayback: true,
           frameBuilder: frameBuilderForKey('local:$imgPath'),
         ),
@@ -1708,11 +1842,14 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
       return (BuildContext context, Widget child, int? frame,
           bool wasSynchronouslyLoaded) {
         if (frame != null || wasSynchronouslyLoaded) {
+          _completeBubbleImageFrameTiming(
+            frameKey,
+            wasSynchronouslyLoaded: wasSynchronouslyLoaded,
+          );
           _markBubbleFrameReady(frameKey);
           return child;
         }
-        if (_readyImageFrameKeys.contains(frameKey) ||
-            _hasBubbleFrameReady()) {
+        if (_readyImageFrameKeys.contains(frameKey) || _hasBubbleFrameReady()) {
           return child;
         }
         if (selectedLocalPath != null &&
@@ -1736,6 +1873,13 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
       if (imageUrl == null || imageUrl.isEmpty) {
         return null;
       }
+      // Network images used to bypass the admission gate, so a fast upward
+      // scroll could start several expensive decodes in parallel. The gate is
+      // deliberately checked after resolving the URL so missing media still
+      // follows the normal failure path.
+      if (_requestGalleryDecodeAdmission()) {
+        return _pendingDecodePlaceholder(theme, displaySize);
+      }
       if (PlatformUtils().isWeb) {
         _probeBubbleDecodeProvider(
           provider: NetworkImage(imageUrl),
@@ -1753,6 +1897,7 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
           dpr: dpr,
           metaImg: _imageMetaForAspectRatio(originalImg, smallImg),
         );
+        _beginBubbleImageFrameTiming('net:$imageUrl', source: 'web');
         return SizedBox(
           width: displaySize.width,
           height: displaySize.height,
@@ -1773,17 +1918,37 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
           ),
         );
       }
+      final bubbleCacheKey = chatMediaBubbleImageCacheKey(
+        widget.message.msgID,
+        urlFallback: imageUrl,
+      );
       final networkImageProvider = CachedNetworkImageProvider(
         imageUrl,
-        cacheKey: chatMediaBubbleImageCacheKey(
-          widget.message.msgID,
-          urlFallback: imageUrl,
-        ),
+        cacheKey: bubbleCacheKey,
       );
+      // Route-entry prefetch registers the exact bounded decode key. Reuse it
+      // for this short-lived warm window so the first mounted bubble joins the
+      // same ImageCache entry instead of decoding a second size immediately.
+      final warmHint = chatBubbleImageWarmDecodeHint(bubbleCacheKey);
+      final warmHintFitsRequestedSize = warmHint != null &&
+          ((warmHint.decodeByWidth &&
+                  decodeTarget.width != null &&
+                  decodeTarget.width! <= warmHint.targetPx) ||
+              (!warmHint.decodeByWidth &&
+                  decodeTarget.height != null &&
+                  decodeTarget.height! <= warmHint.targetPx));
+      final effectiveDecodeWidth =
+          warmHintFitsRequestedSize && warmHint.decodeByWidth
+              ? warmHint.targetPx
+              : decodeTarget.width;
+      final effectiveDecodeHeight =
+          warmHintFitsRequestedSize && !warmHint.decodeByWidth
+              ? warmHint.targetPx
+              : decodeTarget.height;
       final ImageProvider networkProvider = ResizeImage(
         networkImageProvider,
-        width: decodeTarget.width,
-        height: decodeTarget.height,
+        width: effectiveDecodeWidth,
+        height: effectiveDecodeHeight,
       );
       _probeBubbleDecodeProvider(
         provider: networkProvider,
@@ -1795,12 +1960,13 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
           smallImg: smallImg,
         ),
         displaySize: displaySize,
-        cacheW: decodeTarget.width ?? -1,
-        cacheH: decodeTarget.height ?? -1,
+        cacheW: effectiveDecodeWidth ?? -1,
+        cacheH: effectiveDecodeHeight ?? -1,
         deferHeavyDecode: deferHeavyDecode,
         dpr: dpr,
         metaImg: _imageMetaForAspectRatio(originalImg, smallImg),
       );
+      _beginBubbleImageFrameTiming('net:$imageUrl', source: 'network');
       return SizedBox(
         width: displaySize.width,
         height: displaySize.height,
@@ -1896,10 +2062,10 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
                     ),
                   );
                 },
-                child: ClipRRect(
-                  borderRadius: _imageBorderRadius,
-                  child: buildImageContent(),
-                ),
+                // 内层不加圆角：气泡圆角由外层 ClipRRect 提供，飞行 shuttle
+                // 可自由做圆角渐变（10px → 0），避免双重圆角导致飞行末段
+                // 圆角无法真正归零。
+                child: buildImageContent(),
               ),
               _buildImageBottomGradient(),
               _buildImageWatermarkMeta(theme),
@@ -2137,9 +2303,10 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
     V2TimImage? smallImg,
   }) {
     return _resolveReceivedLocalChoice(
-      originalImg: originalImg,
-      smallImg: smallImg,
-    ) != null;
+          originalImg: originalImg,
+          smallImg: smallImg,
+        ) !=
+        null;
   }
 
   void _attachLocalPathToImageElem(String path, String? matchingUrl) {
@@ -2236,10 +2403,26 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
     try {
       await _messageService.downloadMessage(
         msgID: msgID,
+        message: widget.message,
         messageType: 3,
         imageType: 1,
         isSnapshot: false,
         reportError: false,
+        onDownloadFinished: (downloaded) {
+          globalModel.mergeMessageMediaMetadata(
+            downloaded,
+            conversationID: widget.chatModel.conversationID,
+          );
+          if (!mounted || _hasBubbleFrameReady()) {
+            return;
+          }
+          ChatJitterDiag.logSetState(
+            widget: 'TIMUIKitImageElem',
+            reason: 'thumbnail_downloaded',
+            msgId: msgID,
+          );
+          setState(() {});
+        },
       );
     } catch (e) {
       ChatImgTrace.log('[ChatImg] event=download_error msgId=$msgID err=$e');
@@ -2420,6 +2603,10 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
 
   @override
   void dispose() {
+    final key = _galleryDecodeAdmissionKey;
+    if (key != null) {
+      ChatImageDecodeAdmission.instance.cancel(key);
+    }
     super.dispose();
   }
 
@@ -2432,6 +2619,34 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
   }) {
     if (widget.message.imageElem == null) {
       return errorDisplay(context, theme);
+    }
+
+    if (isImageSourcePending(widget.message)) {
+      final persisted = readPersistedImageLayoutSize(widget.message);
+      final maxWidth = constraints.maxWidth.isFinite
+          ? min(constraints.maxWidth, 160.0)
+          : 160.0;
+      final ratio = persisted != null && persisted.height > 0
+          ? persisted.width / persisted.height
+          : 1.0;
+      final height = (maxWidth / ratio).clamp(80.0, 190.0).toDouble();
+      return SizedBox(
+        width: maxWidth,
+        height: height,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: ColoredBox(
+            color: theme.weakDividerColor ?? const Color(0xFFE8E8E8),
+            child: const Center(
+              child: SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+          ),
+        ),
+      );
     }
 
     final metaImg = _imageMetaForAspectRatio(originalImg, smallImg);
@@ -2575,7 +2790,7 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
     // 图片气泡因为 ProviderNotFound 直接退化成整块灰色占位。
     final uiStateStore =
         Provider.of<ChatUiStateStore?>(context, listen: true) ??
-        serviceLocator<ChatUiStateStore>();
+            serviceLocator<ChatUiStateStore>();
     final rowRevision = uiStateStore.rowRevision(convId, msgKey);
     _onRowRevisionUpdate(rowRevision);
 
@@ -2595,6 +2810,13 @@ class _TIMUIKitImageElem extends TIMUIKitState<TIMUIKitImageElem>
         'chat_img_vis_${widget.message.msgID ?? widget.message.id ?? widget.message.timestamp}',
       ),
       onVisibilityChanged: (info) {
+        final visible = info.visibleFraction > 0;
+        if (_galleryRowVisible != visible) {
+          _galleryRowVisible = visible;
+          if (!_galleryDecodeAdmitted) {
+            _requestGalleryDecodeAdmission();
+          }
+        }
         ChatImageOriginalPrefetch.onVisibilityChanged(widget.message, info);
       },
       child: TIMUIKitMessageReactionWrapper(

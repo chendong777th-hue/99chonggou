@@ -3,10 +3,13 @@ import 'dart:async';
 import 'package:extended_image/extended_image.dart';
 import 'package:flutter/material.dart';
 import 'package:tencent_cloud_chat_sdk/enum/message_elem_type.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_image.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_image.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_message_preview_image_resolver.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/image_edit/image_preview_edit_store.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/image_preview_resolution_utils.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/media_preview_video_utils.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/progressive_image_decode_budget.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/chat_media_preview_item.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/gestured_image.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/image_hero.dart';
@@ -68,6 +71,9 @@ class _ChatMediaGalleryImagePageState extends State<ChatMediaGalleryImagePage>
   ImageProvider? _originalRevealProvider;
   AnimationController? _fanController;
   ImagePreviewDisplayConfig? _loadedDisplay;
+  // Lock the Hero flight box size on first build so ORIGIN decode doesn't
+  // shift the dismiss Hero landing rect (visible "jump" on close).
+  Size? _heroLockedBoxSize;
   bool _originalFanRevealCompleted = false;
   bool _lowResolutionRefreshAttempted = false;
   bool _lowResolutionRefreshInFlight = false;
@@ -124,6 +130,51 @@ class _ChatMediaGalleryImagePageState extends State<ChatMediaGalleryImagePage>
     _fanController?.dispose();
     _fanController = null;
     _refreshedProvider = originalProvider;
+  }
+
+  /// Wraps the original image provider with a ResizeImage guard if the
+  /// image dimensions exceed [ProgressiveImageDecodeBudget.maxDecodePx].
+  /// This prevents OOM on low-end devices for 20MB+ images by capping
+  /// the decoded pixel count — mirroring QQ's tile-loading strategy.
+  ImageProvider _applyOomGuard(
+    ImageProvider original,
+    ImagePreviewDisplayConfig display,
+  ) {
+    // Check if we know the original dimensions.
+    final msg = widget.item.message;
+    final imageElem = msg.imageElem;
+    V2TimImage? originalImage;
+    for (final img in imageElem?.imageList ?? const <V2TimImage?>[]) {
+      if (img?.type == 0 && img!.width != null && img.width! > 0) {
+        originalImage = img;
+        break;
+      }
+    }
+    final origWidth = originalImage?.width;
+    final origHeight = originalImage?.height;
+    if (!ProgressiveImageDecodeBudget.needsProgressiveDecode(
+        origWidth, origHeight)) {
+      return original;
+    }
+    // Large image: wrap with ResizeImage to cap decode at maxDecodePx.
+    final screenWidthPx = ProgressiveImageDecodeBudget.previewCacheWidth(
+      MediaQuery.sizeOf(context).width,
+      MediaQuery.devicePixelRatioOf(context),
+    );
+    final dims = ProgressiveImageDecodeBudget.safeDecodeDimensions(
+      zoomLevel: 1.0,
+      originalWidth: origWidth,
+      originalHeight: origHeight,
+      screenWidthPx: screenWidthPx,
+    );
+    if (dims.cacheWidth == null && dims.cacheHeight == null) {
+      return original;
+    }
+    return ResizeImage(
+      original,
+      width: dims.cacheWidth,
+      height: dims.cacheHeight,
+    );
   }
 
   Future<void> _precachePreviewImage(ImageProvider provider) async {
@@ -301,19 +352,23 @@ class _ChatMediaGalleryImagePageState extends State<ChatMediaGalleryImagePage>
           return;
         }
         _lowResolutionRefreshAttempted = true;
+        // OOM guard: if the original image is very large (>40MP), wrap it
+        // with ResizeImage to cap the decoded pixel count. This mirrors
+        // QQ's tile-loading approach — never decode the full bitmap.
         final display = _loadedDisplay ??
             imagePreviewDisplayConfigForItem(
               sourceMessage: message,
               screenWidth: MediaQuery.sizeOf(context).width,
               screenHeight: MediaQuery.sizeOf(context).height,
             );
+        final safeProvider = _applyOomGuard(originalProvider, display);
         if (display.verticallyScrollable) {
           if (!mounted || !widget.isActive || widget.isGalleryScrolling) {
             _pendingOriginalRefresh = true;
             return;
           }
           try {
-            await _precachePreviewImage(originalProvider);
+            await _precachePreviewImage(safeProvider);
           } catch (_) {
             if (mounted) {
               _lowResolutionRefreshAttempted = true;
@@ -323,11 +378,11 @@ class _ChatMediaGalleryImagePageState extends State<ChatMediaGalleryImagePage>
           if (!mounted || !widget.isActive) {
             return;
           }
-          setState(() => _completeOriginalUpgrade(originalProvider));
+          setState(() => _completeOriginalUpgrade(safeProvider));
           return;
         }
         await _playOriginalFanReveal(
-          originalProvider: originalProvider,
+          originalProvider: safeProvider,
           display: display,
         );
       } finally {
@@ -406,6 +461,7 @@ class _ChatMediaGalleryImagePageState extends State<ChatMediaGalleryImagePage>
       screenWidth: screenSize.width,
       screenHeight: screenSize.height,
     );
+    final heroBoxSize = _heroLockedBoxSize ??= boxSize;
     final imageFit = imagePreviewPaintFit(display);
 
     Widget image = ExtendedImage(
@@ -533,6 +589,8 @@ class _ChatMediaGalleryImagePageState extends State<ChatMediaGalleryImagePage>
       image = HeroWidget(
         tag: widget.item.heroTag,
         slidePagekey: widget.slidePageKey,
+        animateCornerRadius: true,
+        cornerRadius: 10,
         child: image,
       );
     }
@@ -561,7 +619,7 @@ class _ChatMediaGalleryImagePageState extends State<ChatMediaGalleryImagePage>
     }
 
     image = MediaPreviewHeroLayout(
-      displaySize: boxSize,
+      displaySize: heroBoxSize,
       alignment: display.alignment,
       child: ImagePreviewDisplayBox(
         displaySize: boxSize,

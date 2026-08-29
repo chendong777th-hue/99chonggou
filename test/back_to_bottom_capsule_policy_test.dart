@@ -36,7 +36,7 @@ void main() {
     );
   });
 
-  test('shows after a one-screen leave, or on a fake window bottom', () {
+  test('shows after an active one-screen leave', () {
     expect(
       BackToBottomCapsulePolicy.shouldShow(
         physicallyAtBottom: false,
@@ -47,6 +47,10 @@ void main() {
       ),
       isTrue,
     );
+  });
+
+  test('keeps the capsule at the physical bottom when newer data is missing',
+      () {
     expect(
       BackToBottomCapsulePolicy.shouldShow(
         physicallyAtBottom: true,
@@ -56,6 +60,19 @@ void main() {
         programmaticScrollToBottom: false,
       ),
       isTrue,
+    );
+  });
+
+  test('viewport settling at bottom ignores a stale leave latch', () {
+    expect(
+      BackToBottomCapsulePolicy.shouldShow(
+        physicallyAtBottom: true,
+        leftBottomByOneScreen: true,
+        missingNewerThanViewport: false,
+        presentationBottomLocked: false,
+        programmaticScrollToBottom: false,
+      ),
+      isFalse,
     );
   });
 

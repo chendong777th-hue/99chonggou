@@ -89,8 +89,17 @@ bool groupJoinApplicationCanApproveForCurrentUser({
   final from = ChatIdFormat.rawUserUid(application.fromUser);
   final to = ChatIdFormat.rawUserUid(application.toUser);
   if (groupJoinApplicationIsInviteType(application)) {
-    final member = to.isNotEmpty ? to : from;
-    final operator = from.isNotEmpty ? from : member;
+    // Invite applications carry inviter in fromUser and invitee in toUser.
+    // If toUser is absent, the target is unknown; falling back to fromUser
+    // would render the inviter as both operator and invited member.
+    if (from.isEmpty || to.isEmpty || from == to) {
+      return (
+        operatorUserId: from,
+        memberUserIds: const <String>[],
+      );
+    }
+    final member = to;
+    final operator = from;
     return (
       operatorUserId: operator,
       memberUserIds: member.isEmpty ? const <String>[] : <String>[member],

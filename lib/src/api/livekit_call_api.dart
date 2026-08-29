@@ -3,6 +3,7 @@ import 'package:dio/dio.dart';
 import 'package:tencent_cloud_chat_demo/src/api/api_client.dart';
 import 'package:tencent_cloud_chat_demo/src/models/livekit_call_credentials.dart';
 import 'package:tencent_cloud_chat_demo/src/models/livekit_call_telemetry.dart';
+import 'package:tencent_cloud_chat_demo/src/services/call_result_record.dart';
 import 'package:tencent_cloud_chat_demo/utils/api_response_util.dart';
 
 class LiveKitCallApiException implements Exception {
@@ -60,6 +61,27 @@ class LiveKitCallApi {
 
   Future<void> hangup({required String callId}) =>
       _postAction('/calls/livekit/hangup', callId);
+
+  /// Fetch the authoritative CallSession snapshot. This endpoint is used
+  /// after reconnect/resume, unknown events, and action conflicts.
+  Future<CallSessionStatusSnapshot?> fetchStatus(
+      {required String callId}) async {
+    final id = callId.trim();
+    if (id.isEmpty) return null;
+    try {
+      final res = await _dio.get(
+        '/calls/livekit/status/${Uri.encodeComponent(id)}',
+        options: Options(headers: const {'Cache-Control': 'no-cache'}),
+      );
+      final payload = unwrapApiPayload(res.data);
+      if (payload is! Map) return null;
+      return CallSessionStatusSnapshot.fromJson(
+          Map<String, dynamic>.from(payload));
+    } on DioError catch (e) {
+      if (e.response?.statusCode == 404) return null;
+      throw _mapDio(e);
+    }
+  }
 
   Future<LiveKitCallCredentials> fetchToken({required String callId}) async {
     try {
@@ -124,9 +146,8 @@ class LiveKitCallApi {
     String message = dioMessage.isNotEmpty ? dioMessage : '通话请求失败';
     if (data is Map) {
       code = data['code']?.toString() ?? data['error']?.toString() ?? '';
-      message = data['message']?.toString() ??
-          data['msg']?.toString() ??
-          message;
+      message =
+          data['message']?.toString() ?? data['msg']?.toString() ?? message;
     }
     if (e.response?.statusCode == 409 && code.isEmpty) {
       code = 'CALL_ALREADY_ANSWERED';
@@ -158,6 +179,60 @@ class LiveKitCallApi {
   }
 }
 
+class CallSessionStatusSnapshot {
+  const CallSessionStatusSnapshot({
+    required this.callId,
+    required this.status,
+    this.roomName = '',
+    this.mediaType = 'audio',
+    this.callerUserId = '',
+    this.calleeUserId = '',
+    this.startedAtMs = 0,
+    this.acceptedAtMs = 0,
+    this.endedAtMs = 0,
+    this.durationSec = 0,
+  });
+
+  final String callId;
+  final CallSessionStatus status;
+  final String roomName;
+  final String mediaType;
+  final String callerUserId;
+  final String calleeUserId;
+  final int startedAtMs;
+  final int acceptedAtMs;
+  final int endedAtMs;
+  final int durationSec;
+
+  factory CallSessionStatusSnapshot.fromJson(Map<String, dynamic> json) {
+    final status = CallSessionStatusCodec.parse(json['status']) ??
+        CallSessionStatusCodec.parse(json['phase']) ??
+        CallSessionStatus.ended;
+    return CallSessionStatusSnapshot(
+      callId: (json['callId'] ?? json['id'] ?? '').toString().trim(),
+      status: status,
+      roomName: (json['roomName'] ?? json['room_name'] ?? '').toString(),
+      mediaType: (json['mediaType'] ?? 'audio').toString(),
+      callerUserId: (json['callerUserId'] ?? json['callerId'] ?? '').toString(),
+      calleeUserId: (json['calleeUserId'] ?? json['calleeId'] ?? '').toString(),
+      startedAtMs: _timestamp(json['startedAt']),
+      acceptedAtMs: _timestamp(json['acceptedAt']),
+      endedAtMs: _timestamp(json['endedAt']),
+      durationSec: _int(json['durationSec']),
+    );
+  }
+
+  static int _int(Object? raw) =>
+      raw is num ? raw.round() : int.tryParse(raw?.toString() ?? '') ?? 0;
+
+  static int _timestamp(Object? raw) {
+    if (raw is num)
+      return raw > 100000000000 ? raw.round() : raw.round() * 1000;
+    final parsed = DateTime.tryParse(raw?.toString() ?? '');
+    return parsed?.millisecondsSinceEpoch ?? _int(raw);
+  }
+}
+
 /// Test double for [resolveAcceptCredentials] unit tests.
 @visibleForTesting
 class LiveKitCallApiOverride extends LiveKitCallApi {
@@ -166,8 +241,10 @@ class LiveKitCallApiOverride extends LiveKitCallApi {
     required this.fetchTokenFn,
   }) : super._();
 
-  final Future<LiveKitCallCredentials> Function({required String callId}) acceptFn;
-  final Future<LiveKitCallCredentials> Function({required String callId}) fetchTokenFn;
+  final Future<LiveKitCallCredentials> Function({required String callId})
+      acceptFn;
+  final Future<LiveKitCallCredentials> Function({required String callId})
+      fetchTokenFn;
 
   @override
   Future<LiveKitCallCredentials> accept({required String callId}) =>

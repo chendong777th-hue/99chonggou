@@ -13,11 +13,23 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_signaling_info.dart'
 import 'package:tencent_cloud_chat_sdk/utils/utils.dart';
 import 'package:tencent_cloud_chat_demo/utils/custom_message/calling_message/call_bubble_direction.dart';
 import 'package:tencent_cloud_chat_demo/utils/custom_message/calling_message/call_message_visual.dart';
+import 'package:tencent_cloud_chat_demo/utils/custom_message/custom_message_parse_cache.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/services/display_name_store.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/services/group_member_store.dart';
 import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 
-enum CallProtocolType { unknown, send, accept, reject, cancel, hangup, timeout, lineBusy, switchToAudio, switchToAudioConfirm }
+enum CallProtocolType {
+  unknown,
+  send,
+  accept,
+  reject,
+  cancel,
+  hangup,
+  timeout,
+  lineBusy,
+  switchToAudio,
+  switchToAudioConfirm
+}
 
 //通话媒体类型
 enum CallStreamMediaType { unknown, audio, video }
@@ -99,7 +111,12 @@ class CallingMessageDataProvider {
       return false;
     }
     if (_participantType == CallParticipantType.c2c) {
-      return _isFinalState;
+      // LiveKit bubbles are a single callId lifecycle. Keep ringing and
+      // answered signals visible so the row can progress to its terminal
+      // state when the canonical store is updated.
+      return _protocolType != CallProtocolType.switchToAudio &&
+          _protocolType != CallProtocolType.switchToAudioConfirm &&
+          _protocolType != CallProtocolType.unknown;
     }
     switch (_protocolType) {
       case CallProtocolType.send:
@@ -128,6 +145,19 @@ class CallingMessageDataProvider {
     _setDirection();
     _setExcludeFromHistory();
     _setContent();
+  }
+
+  Map<String, dynamic>? _decodeCallMap(
+    String raw, {
+    required String parserVersion,
+  }) {
+    final message = _innerMessage;
+    if (message == null || raw.trim().isEmpty) return null;
+    return CustomMessageParseCache.instance.decodeMap(
+      message: message,
+      payload: raw,
+      parserVersion: parserVersion,
+    );
   }
 
   String getUserID() => callPeerID;
@@ -195,8 +225,11 @@ class CallingMessageDataProvider {
       }
     } else if (data is String && data.trim().startsWith('{')) {
       try {
-        final decoded = jsonDecode(data);
-        if (decoded is Map) {
+        final decoded = _decodeCallMap(
+          data,
+          parserVersion: 'call-nested-v1',
+        );
+        if (decoded != null) {
           final nested = decoded['call_end'] ?? decoded['callEnd'];
           if (nested is num && nested > 0) {
             return nested.round();
@@ -233,8 +266,7 @@ class CallingMessageDataProvider {
   }
 
   String get callNearDuplicateKey {
-    if (_hasPositiveCallEnd() &&
-        _participantType == CallParticipantType.c2c) {
+    if (_hasPositiveCallEnd() && _participantType == CallParticipantType.c2c) {
       final conv = conversationID.trim();
       if (conv.isNotEmpty) {
         return CallBubbleDedupeKey.c2cHangup(
@@ -304,7 +336,8 @@ class CallingMessageDataProvider {
   static CallMessageDirection? directionForMessage(V2TimMessage message) {
     try {
       final provider = CallingMessageDataProvider(message);
-      if (provider.isCallingSignal && provider.shouldDisplayInHistory &&
+      if (provider.isCallingSignal &&
+          provider.shouldDisplayInHistory &&
           provider.participantType == CallParticipantType.c2c) {
         return provider.direction;
       }
@@ -330,8 +363,11 @@ class CallingMessageDataProvider {
       if (raw == null || raw.isEmpty) {
         return;
       }
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) {
+      final decoded = _decodeCallMap(
+        raw,
+        parserVersion: 'call-outer-v1',
+      );
+      if (decoded == null) {
         return;
       }
       final signalingInfoData = Utils.formatJson(decoded);
@@ -354,8 +390,11 @@ class CallingMessageDataProvider {
     try {
       final signalingData = _signalingInfo?.data?.trim() ?? '';
       if (signalingData.isNotEmpty) {
-        final decoded = jsonDecode(signalingData);
-        if (decoded is Map) {
+        final decoded = _decodeCallMap(
+          signalingData,
+          parserVersion: 'call-signaling-v1',
+        );
+        if (decoded != null) {
           final nested = Utils.formatJson(decoded);
           // Keep outer businessID/action/actionType when nested payload omits them
           // (common for LiveKit lk_call wrappers). Losing `action` here used to
@@ -366,12 +405,15 @@ class CallingMessageDataProvider {
           nested['event'] ??= outerMap['event'];
           nested['mediaType'] ??=
               outerMap['mediaType'] ?? outerMap['media_type'];
-          nested['call_end'] ??=
-              outerMap['call_end'] ?? outerMap['durationSec'] ?? outerMap['duration'];
-          nested['inviteID'] ??=
-              outerMap['inviteID'] ?? outerMap['inviteId'] ?? outerMap['callId'];
-          nested['callId'] ??=
-              outerMap['callId'] ?? outerMap['inviteID'] ?? outerMap['inviteId'];
+          nested['call_end'] ??= outerMap['call_end'] ??
+              outerMap['durationSec'] ??
+              outerMap['duration'];
+          nested['inviteID'] ??= outerMap['inviteID'] ??
+              outerMap['inviteId'] ??
+              outerMap['callId'];
+          nested['callId'] ??= outerMap['callId'] ??
+              outerMap['inviteID'] ??
+              outerMap['inviteId'];
           nested['inviter'] ??= outerMap['inviter'] ?? outerMap['callerId'];
           nested['callerId'] ??= outerMap['callerId'] ?? outerMap['inviter'];
           nested['calleeId'] ??= outerMap['calleeId'];
@@ -401,10 +443,10 @@ class CallingMessageDataProvider {
       nestedMap = Map<String, dynamic>.from(nestedRaw);
     } else if (nestedRaw is String && nestedRaw.trim().startsWith('{')) {
       try {
-        final decoded = jsonDecode(nestedRaw);
-        if (decoded is Map) {
-          nestedMap = Map<String, dynamic>.from(decoded);
-        }
+        nestedMap = _decodeCallMap(
+          nestedRaw,
+          parserVersion: 'call-nested-v1',
+        );
       } catch (_) {}
     }
     if (nestedMap == null) {
@@ -417,8 +459,9 @@ class CallingMessageDataProvider {
         nestedMap['inviteID'] ?? nestedMap['inviteId'] ?? nestedMap['callId'];
     data['callerId'] ??= nestedMap['callerId'] ?? nestedMap['inviter'];
     data['calleeId'] ??= nestedMap['calleeId'];
-    data['call_end'] ??=
-        nestedMap['call_end'] ?? nestedMap['durationSec'] ?? nestedMap['duration'];
+    data['call_end'] ??= nestedMap['call_end'] ??
+        nestedMap['durationSec'] ??
+        nestedMap['duration'];
     data['mediaType'] ??= nestedMap['mediaType'] ?? nestedMap['media_type'];
     data['businessID'] ??= nestedMap['businessID'];
     data['actionType'] ??= nestedMap['actionType'];
@@ -428,13 +471,12 @@ class CallingMessageDataProvider {
   void _normalizeLiveKitCallFields() {
     final data = _jsonData;
     if (data == null) return;
-    final businessId = data['businessID']?.toString().trim().toLowerCase() ?? '';
+    final businessId =
+        data['businessID']?.toString().trim().toLowerCase() ?? '';
     final raw = _innerMessage?.customElem?.data?.toLowerCase() ?? '';
     final isLk = businessId == 'lk_call' || raw.contains('lk_call');
-    var action = (data['action'] ?? data['event'] ?? '')
-        .toString()
-        .trim()
-        .toLowerCase();
+    var action =
+        (data['action'] ?? data['event'] ?? '').toString().trim().toLowerCase();
     if (!isLk && action.isEmpty) {
       return;
     }
@@ -460,10 +502,10 @@ class CallingMessageDataProvider {
       nestedMap = Map<String, dynamic>.from(nested);
     } else if (nested is String && nested.trim().startsWith('{')) {
       try {
-        final decoded = jsonDecode(nested);
-        if (decoded is Map) {
-          nestedMap = Map<String, dynamic>.from(decoded);
-        }
+        nestedMap = _decodeCallMap(
+          nested,
+          parserVersion: 'call-nested-v1',
+        );
       } catch (_) {}
     }
     if (nestedMap != null) {
@@ -490,13 +532,14 @@ class CallingMessageDataProvider {
       }
       data['action'] ??= nestedMap['action'] ?? nestedMap['event'];
       data['event'] ??= nestedMap['event'] ?? nestedMap['action'];
-      data['mediaType'] ??=
-          nestedMap['mediaType'] ?? nestedMap['media_type'];
+      data['mediaType'] ??= nestedMap['mediaType'] ?? nestedMap['media_type'];
       data['data'] = nestedMap;
     }
 
-    final durationRaw =
-        data['duration'] ?? data['durationSec'] ?? data['totalTime'] ?? data['call_end'];
+    final durationRaw = data['duration'] ??
+        data['durationSec'] ??
+        data['totalTime'] ??
+        data['call_end'];
     final durationSec = durationRaw is num
         ? durationRaw.round()
         : int.tryParse(durationRaw?.toString() ?? '') ?? 0;
@@ -514,10 +557,8 @@ class CallingMessageDataProvider {
       data['call_type'] ??= 1;
     }
 
-    action = (data['action'] ?? data['event'] ?? '')
-        .toString()
-        .trim()
-        .toLowerCase();
+    action =
+        (data['action'] ?? data['event'] ?? '').toString().trim().toLowerCase();
     // Nested TIM wrappers may only keep actionType; synthesize action so
     // _setProtocolType can resolve invite/cancel/hangup instead of unknown.
     if (action.isEmpty) {
@@ -647,8 +688,15 @@ class CallingMessageDataProvider {
     }
     final action = (json['action'] ?? json['event'] ?? '').toString().trim();
     if (action.isNotEmpty &&
-        const {'invite', 'hangup', 'reject', 'cancel', 'accept', 'timeout', 'busy'}
-            .contains(action.toLowerCase())) {
+        const {
+          'invite',
+          'hangup',
+          'reject',
+          'cancel',
+          'accept',
+          'timeout',
+          'busy'
+        }.contains(action.toLowerCase())) {
       return true;
     }
     final data = json['data'];
@@ -675,8 +723,11 @@ class CallingMessageDataProvider {
       return null;
     }
     try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) {
+      final decoded = _decodeCallMap(
+        raw,
+        parserVersion: 'call-outer-v1',
+      );
+      if (decoded == null) {
         return null;
       }
       final map = Utils.formatJson(decoded);
@@ -766,7 +817,8 @@ class CallingMessageDataProvider {
       return;
     }
 
-    final businessID = _jsonData!['businessID']?.toString().trim().toLowerCase();
+    final businessID =
+        _jsonData!['businessID']?.toString().trim().toLowerCase();
     final cmd = _callCmd();
     final action = (_jsonData!['action'] ?? '').toString().trim().toLowerCase();
     final raw = _innerMessage?.customElem?.data?.toLowerCase() ?? '';
@@ -786,8 +838,7 @@ class CallingMessageDataProvider {
         action == 'reject' ||
         action == 'cancel') {
       _isCallingSignal = true;
-    } else if (_innerMessage != null &&
-        looksLikeCallMessage(_innerMessage!)) {
+    } else if (_innerMessage != null && looksLikeCallMessage(_innerMessage!)) {
       _isCallingSignal = true;
     } else {
       _isCallingSignal = false;
@@ -896,9 +947,7 @@ class CallingMessageDataProvider {
         _innerMessage?.customElem?.data?.toLowerCase().contains('lk_call') ??
             false;
     if (action.isNotEmpty &&
-        (businessId == 'av_call' ||
-            businessId == 'lk_call' ||
-            rawContainsLk)) {
+        (businessId == 'av_call' || businessId == 'lk_call' || rawContainsLk)) {
       switch (action) {
         case 'invite':
           _protocolType = CallProtocolType.send;
@@ -1074,10 +1123,9 @@ class CallingMessageDataProvider {
   }
 
   _setParticipantType() {
-    final groupID = (_signalingInfo?.groupID ??
-            _jsonData?['groupID']?.toString() ??
-            '')
-        .trim();
+    final groupID =
+        (_signalingInfo?.groupID ?? _jsonData?['groupID']?.toString() ?? '')
+            .trim();
     if (_protocolType == CallProtocolType.unknown && !_isCallingSignal) {
       _participantType = CallParticipantType.unknown;
       return;
@@ -1246,7 +1294,6 @@ class CallingMessageDataProvider {
     }
   }
 
-
   _setOperatorId() {
     if (_protocolType == CallProtocolType.unknown) {
       return;
@@ -1404,7 +1451,8 @@ class CallingMessageDataProvider {
               );
       } else if (_protocolType == CallProtocolType.cancel) {
         final loginUserId = _safeCurrentLoginUserId();
-        final cancelledByMe = CallBubbleDirection.resolveC2CTerminalActionBySelf(
+        final cancelledByMe =
+            CallBubbleDirection.resolveC2CTerminalActionBySelf(
           protocolType: _protocolType,
           callerId: _callerId,
           operatorId: _operatorId,
@@ -1428,7 +1476,8 @@ class CallingMessageDataProvider {
               );
       } else if (_protocolType == CallProtocolType.hangup) {
         final callEnd = _jsonData?['call_end'];
-        final time = callEnd != null ? _getShowTime(_safeInt(callEnd)) : '00:00';
+        final time =
+            callEnd != null ? _getShowTime(_safeInt(callEnd)) : '00:00';
         _content =
             '${i18n.t(zhHans: '通话时长', zhHant: '通話時長', en: 'Call duration', ja: '通話時間', ko: '통화 시간')}：$time';
       } else if (_protocolType == CallProtocolType.timeout) {
@@ -1671,8 +1720,10 @@ class CallingMessageDataProvider {
       }
     }
 
-    final peerID = _normalizeC2CPeerID(callPeerID.isNotEmpty ? callPeerID : userID);
-    if (peerID.isNotEmpty && (_participantType == CallParticipantType.c2c || groupID.isEmpty)) {
+    final peerID =
+        _normalizeC2CPeerID(callPeerID.isNotEmpty ? callPeerID : userID);
+    if (peerID.isNotEmpty &&
+        (_participantType == CallParticipantType.c2c || groupID.isEmpty)) {
       final name = DisplayNameStore.instance.c2c(peerID);
       if (name != null && name.trim().isNotEmpty) {
         return name.trim();

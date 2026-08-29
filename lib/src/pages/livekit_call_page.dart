@@ -259,7 +259,8 @@ class _LiveKitCallPageState extends State<LiveKitCallPage> with RouteAware {
         return;
       }
       final route = ModalRoute.of(context);
-      if (route?.settings.name == LiveKitCallNavigator.routeName) {
+      if (route?.settings.name == LiveKitCallNavigator.routeName &&
+          route?.isCurrent == true) {
         final nav = Navigator.of(context, rootNavigator: true);
         if (nav.canPop()) {
           nav.pop();

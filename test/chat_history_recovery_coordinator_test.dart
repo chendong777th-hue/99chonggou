@@ -193,6 +193,35 @@ void main() {
       await Future.wait<void>(<Future<void>>[first, stale, latest]);
       expect(order, <int>[1, 3]);
     });
+
+    test('lifecycle invalidation drops pending recovery without running it',
+        () async {
+      const key = 'lifecycle-chat';
+      final gate = Completer<void>();
+      var runs = 0;
+      final first = ChatHistoryRecoveryCoordinator.instance.runExclusive(
+        conversationKey: key,
+        reason: 'first',
+        priority: ChatHistoryRecoveryCoordinator.priorityUser,
+        task: () async {
+          runs++;
+          await gate.future;
+        },
+      );
+      for (var i = 0; i < 20 && runs == 0; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 5));
+      }
+      final pending = ChatHistoryRecoveryCoordinator.instance.runExclusive(
+        conversationKey: key,
+        reason: 'pending',
+        priority: ChatHistoryRecoveryCoordinator.priorityUser,
+        task: () async => runs++,
+      );
+      ChatHistoryRecoveryCoordinator.instance.invalidateLifecycle();
+      gate.complete();
+      await Future.wait<void>(<Future<void>>[first, pending]);
+      expect(runs, 1);
+    });
   });
 
   group('ChatHistoryRecoveryCoordinator initial load gate', () {

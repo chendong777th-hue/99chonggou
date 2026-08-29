@@ -46,4 +46,25 @@ void main() {
       hasLength(6),
     );
   });
+
+  test('duration samples emit a bounded p50/p95 summary', () {
+    final lines = <String>[];
+    ChatMainThreadPerf.debugForceEnabled = true;
+    ChatMainThreadPerf.debugSink = lines.add;
+    ChatMainThreadPerf.resetCounters();
+
+    for (var i = 1; i <= 30; i++) {
+      ChatMainThreadPerf.recordDurationMicros(
+        ChatMainThreadPerf.frameRasterMs,
+        i * 1000,
+        source: 'frame',
+      );
+    }
+
+    expect(
+      ChatMainThreadPerf.durationSamplesForTest(ChatMainThreadPerf.frameRasterMs),
+      hasLength(30),
+    );
+    expect(lines, isEmpty);
+  });
 }

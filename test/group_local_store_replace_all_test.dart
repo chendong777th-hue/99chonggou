@@ -341,6 +341,137 @@ void main() {
       );
     });
 
+    test('upsert rejects an older timestamped metadata response', () async {
+      await GroupLocalStore.instance.upsert(
+        ownerUserId: owner,
+        record: _rec('@TGS#STALE', name: 'new', updatedAt: 200),
+      );
+      expect(
+        await GroupLocalStore.instance.upsert(
+          ownerUserId: owner,
+          record: _rec('@TGS#STALE', name: 'old', updatedAt: 100),
+        ),
+        isFalse,
+      );
+
+      final stored = await GroupLocalStore.instance.read(
+        groupId: '@TGS#STALE',
+        ownerUserId: owner,
+      );
+      expect(stored?.groupName, 'new');
+      expect(stored?.updatedAt, 200);
+    });
+
+    test('publishes one versioned incremental commit after persistence',
+        () async {
+      final before = GroupLocalStore.instance.listDataRevision;
+
+      final accepted = await GroupLocalStore.instance.upsert(
+        ownerUserId: owner,
+        record: _rec('@TGS#COMMIT', name: 'committed', updatedAt: 200),
+      );
+
+      final commit = GroupLocalStore.instance.commitListenable.value;
+      expect(accepted, isTrue);
+      expect(commit.version, before + 1);
+      expect(commit.ownerUserId, owner);
+      expect(commit.kind, GroupStoreMutationKind.incremental);
+      expect(commit.upserted.single.groupName, 'committed');
+      expect(commit.deletedGroupIds, isEmpty);
+    });
+
+    test('unchanged upsert does not create a second Store version', () async {
+      final record = _rec('@TGS#NOOP', name: 'same', updatedAt: 200);
+      await GroupLocalStore.instance.upsert(
+        ownerUserId: owner,
+        record: record,
+      );
+      final committedVersion = GroupLocalStore.instance.listDataRevision;
+
+      final accepted = await GroupLocalStore.instance.upsert(
+        ownerUserId: owner,
+        record: record,
+      );
+
+      expect(accepted, isFalse);
+      expect(GroupLocalStore.instance.listDataRevision, committedVersion);
+    });
+
+    test('replaceAll publishes only changed rows and deleted identities',
+        () async {
+      await GroupLocalStore.instance.replaceAll(
+        ownerUserId: owner,
+        records: <MeGroupRecord>[
+          _rec('@TGS#KEEP', name: 'keep', updatedAt: 100),
+          _rec('@TGS#DELETE', name: 'delete', updatedAt: 100),
+        ],
+      );
+
+      await GroupLocalStore.instance.replaceAll(
+        ownerUserId: owner,
+        records: <MeGroupRecord>[
+          _rec('@TGS#KEEP', name: 'changed', updatedAt: 101),
+          _rec('@TGS#NEW', name: 'new', updatedAt: 101),
+        ],
+      );
+
+      final commit = GroupLocalStore.instance.commitListenable.value;
+      expect(commit.kind, GroupStoreMutationKind.replaceAll);
+      expect(
+        commit.upserted.map((record) => record.groupId),
+        containsAll(<String>['@TGS#KEEP', '@TGS#NEW']),
+      );
+      expect(commit.deletedGroupIds, contains('@TGS#DELETE'));
+    });
+
+    test('replaceAll keeps the newer record in memory cache too', () async {
+      await GroupLocalStore.instance.replaceAll(
+        ownerUserId: owner,
+        records: [_rec('@TGS#CACHE_STALE', name: 'new', updatedAt: 200)],
+      );
+      await GroupLocalStore.instance.replaceAll(
+        ownerUserId: owner,
+        records: [_rec('@TGS#CACHE_STALE', name: 'old', updatedAt: 100)],
+      );
+
+      expect(
+        GroupLocalStore.instance
+            .readCached(groupId: '@TGS#CACHE_STALE', ownerUserId: owner)
+            ?.groupName,
+        'new',
+      );
+    });
+
+    test('older async write generation cannot commit after a newer one',
+        () async {
+      final first = GroupLocalStore.instance.beginMetadataWrite(
+        ownerUserId: owner,
+        groupId: '@TGS#GEN',
+      );
+      final second = GroupLocalStore.instance.beginMetadataWrite(
+        ownerUserId: owner,
+        groupId: '@TGS#GEN',
+      );
+      expect(second, greaterThan(first));
+
+      await GroupLocalStore.instance.upsert(
+        ownerUserId: owner,
+        record: _rec('@TGS#GEN', name: 'old', updatedAt: 100),
+        writeGeneration: first,
+      );
+      await GroupLocalStore.instance.upsert(
+        ownerUserId: owner,
+        record: _rec('@TGS#GEN', name: 'new', updatedAt: 101),
+        writeGeneration: second,
+      );
+
+      final stored = await GroupLocalStore.instance.read(
+        groupId: '@TGS#GEN',
+        ownerUserId: owner,
+      );
+      expect(stored?.groupName, 'new');
+    });
+
     test('replaceAll filters forbidden c2c_ records', () async {
       await GroupLocalStore.instance.replaceAll(
         ownerUserId: owner,

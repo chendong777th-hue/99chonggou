@@ -1,16 +1,27 @@
 import 'package:tencent_cloud_chat_demo/src/services/archived_conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_background_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/call_result_repository.dart';
 import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_folder_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_folder_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_preview_cache.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_local/friend_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_game/privileged_game_user_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_game/sangong_my_config_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_member_local_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_join_application_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_notice_ack_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_notice_entry_settings_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_notice_marquee_dismiss_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_unread_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_system_notice_history_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_system_notice_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/device_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/message_media_metadata_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/message_history_coverage_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/moments/moments_local_prefs.dart';
 import 'package:tencent_cloud_chat_demo/src/services/moments/moments_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/moments/moments_store.dart';
@@ -19,9 +30,7 @@ import 'package:tencent_cloud_chat_demo/src/services/red_packet_local_store.dart
 import 'package:tencent_cloud_chat_demo/src/services/user_profile_local/user_profile_local_store.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 
-/// 注销账号时按 owner 清除 App 本地磁盘数据（多账号行隔离删除）。
-///
-/// 常规登出不得调用本类；常规登出只卸内存，保留 SQLite / prefs。
+/// 退出或切换账号时按 owner 清除 App 本地数据（多账号行隔离删除）。
 class LocalAccountDataPurge {
   LocalAccountDataPurge._();
 
@@ -40,11 +49,17 @@ class LocalAccountDataPurge {
     await _safe(() => GroupLocalStore.instance.clearForOwner(owner));
     await _safe(() => GroupMemberLocalStore.instance.clearForOwner(owner));
     await _safe(() => MessageMediaMetadataStore.instance.clearForOwner(owner));
+    await _safe(
+        () => MessageHistoryCoverageStore.instance.clearForOwner(owner));
     await _safe(() => PushTokenUploadLocalStore.instance.clearForOwner(owner));
     await _safe(() => PrivilegedGameUserStore.instance.clearOwner(owner));
     await _safe(() => SangongMyConfigStore.instance.clearOwner(owner));
     await _safe(() => ConversationFolderStore.instance.clearForOwner(owner));
+    await _safe(
+      () => ConversationFolderSyncService.instance.clearForOwner(owner),
+    );
     await _safe(() => ConversationPinSyncService.instance.clearForOwner(owner));
+    await _safe(() => ConversationPreviewCache.clearForOwner(owner));
     await _safe(
       () => ArchivedConversationSyncService.instance.clearForOwner(owner),
     );
@@ -54,7 +69,22 @@ class LocalAccountDataPurge {
     await _safe(() => MomentsLocalPrefs.clearForOwner(owner));
     await _safe(() => MomentsStore.clearDraftForOwner(owner));
     await _safe(() => ChatBackgroundService.instance.clearForOwner(owner));
+    await _safe(() => CallResultRepository.instance.clearForOwner(owner));
+    await _safe(() => DeviceSyncService.instance.clearForOwner(owner));
+    await _safe(
+        () => GroupJoinApplicationService.instance.clearForOwner(owner));
+    await _safe(() => GroupNoticeAckService.instance.clearForOwner(owner));
+    await _safe(
+      () => GroupNoticeEntrySettingsService.instance.clearForOwner(owner),
+    );
+    await _safe(
+      () => GroupNoticeMarqueeDismissService.instance.clearForOwner(owner),
+    );
     await _safe(() => GroupNoticeUnreadService.instance.clearForOwner(owner));
+    await _safe(
+      () => GroupSystemNoticeHistoryService.instance.clearForOwner(owner),
+    );
+    await _safe(() => GroupSystemNoticeService.instance.clearForOwner(owner));
   }
 
   Future<void> _safe(Future<void> Function() action) async {

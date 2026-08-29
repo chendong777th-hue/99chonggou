@@ -25,8 +25,12 @@ import 'package:tencent_cloud_chat_demo/src/api/api_client.dart';
 import 'package:tencent_cloud_chat_demo/src/api/auth_api.dart';
 import 'package:tencent_cloud_chat_demo/src/services/auth_bootstrap_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/auth_session_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_diagnostics.dart';
+import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/chat_history_recovery_coordinator.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_flags.dart';
 import 'package:tencent_cloud_chat_demo/src/services/sqflite_lifecycle_host.dart';
 import 'package:tencent_cloud_chat_demo/src/services/sqflite_lock_profile_log.dart';
@@ -47,6 +51,7 @@ import 'package:tencent_cloud_chat_demo/src/ui/components/app_search_bar.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/forward_pick_pages.dart';
 import 'package:tencent_cloud_chat_demo/utils/friend_mutual_utils.dart';
 import 'package:tencent_cloud_chat_demo/utils/dio_error_message.dart';
+import 'package:tencent_cloud_chat_demo/utils/chat_image_message_prefetch.dart';
 import 'package:tencent_cloud_chat_demo/src/services/platform_official_account_service.dart';
 import 'package:tencent_cloud_chat_demo/src/platform/listener_store.dart';
 import 'package:tencent_cloud_chat_demo/src/platform/tim_web_script_loader.dart';
@@ -81,7 +86,10 @@ import 'package:tencent_cloud_chat_uikit/ui/controller/tim_uikit_chat_controller
 import 'package:tencent_cloud_chat_uikit/ui/utils/error_message_converter.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/platform.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/emoji.dart';
+import 'package:audio_session/audio_session.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/sound_record.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/sound_player_voice_route_bridge.dart';
+import 'package:tencent_cloud_chat_demo/src/services/voice_output_route_service.dart';
 
 bool isInitScreenUtils = false;
 
@@ -94,11 +102,8 @@ class TencentChatApp extends StatefulWidget {
 
 class _TencentChatAppState extends State<TencentChatApp>
     with WidgetsBindingObserver {
-  static const bool _sessionLogEnabled = false;
-
   void _sessionLog(String message) {
-    if (!_sessionLogEnabled) return;
-    print(message);
+    SessionDiagnostics.log(message);
   }
 
   var subscription;
@@ -124,6 +129,8 @@ class _TencentChatAppState extends State<TencentChatApp>
   bool _refreshingUserSig = false;
   Timer? _splashWatchdog;
   Future<void>? _initSdkTask;
+  int _startupAttempt = 0;
+  bool _startupSettled = false;
 
   static const Duration _connectSuccessDedupWindow = Duration(seconds: 20);
   static const Duration _resumeCheckDelay = Duration(milliseconds: 200);
@@ -142,6 +149,7 @@ class _TencentChatAppState extends State<TencentChatApp>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     scheduleSqfliteLifecycle(state);
+    ChatImageMessagePrefetch.handleAppLifecycleState(state);
     SqfliteLockProfileLog.lifecycle(state);
     NotificationSettingsService.instance.setLifecycle(state);
     DeviceSyncService.instance.setAppLifecycle(state);
@@ -149,12 +157,15 @@ class _TencentChatAppState extends State<TencentChatApp>
 
     if (state == AppLifecycleState.resumed) {
       if (kIsWeb) {
-        unawaited(WebImRealtimeWatchdog.catchUpNow(reason: 'lifecycle_resumed'));
+        unawaited(
+            WebImRealtimeWatchdog.catchUpNow(reason: 'lifecycle_resumed'));
       }
       _scheduleResumeCheck();
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden ||
         state == AppLifecycleState.detached) {
+      ChatHistoryRecoveryCoordinator.instance.invalidateLifecycle();
+      ConversationSyncService.instance.invalidateLifecycle();
       _lastEnteredBackgroundAt = DateTime.now();
       _resumeTimer?.cancel();
       _resumePhase1Timer?.cancel();
@@ -162,7 +173,6 @@ class _TencentChatAppState extends State<TencentChatApp>
       _presence?.stopHeartbeat();
       unawaited(SoundPlayer.stop());
     }
-
   }
 
   @override
@@ -196,8 +206,13 @@ class _TencentChatAppState extends State<TencentChatApp>
   }
 
   Future<void> _checkIfConnected() async {
+    final sessionGeneration = SessionIdentityService.instance.generation;
     final recovery = await LoginCoordinator.instance.recoverOnForeground();
-    if (!mounted) return;
+    if (!mounted ||
+        !SessionIdentityService.instance
+            .isGenerationCurrent(sessionGeneration)) {
+      return;
+    }
 
     switch (recovery.action) {
       case LoginRecoveryAction.goLogin:
@@ -221,14 +236,21 @@ class _TencentChatAppState extends State<TencentChatApp>
           );
         }
         _lastForegroundRecoveryAt = DateTime.now();
-        _onImLoggedIn(runForegroundRecovery: true);
+        _onImLoggedInForSession(
+          runForegroundRecovery: true,
+          expectedIdentity: SessionIdentityService.instance.capture(
+            ownerUserId: recovery.userId,
+          ),
+        );
         return;
       case LoginRecoveryAction.restartColdStart:
         await initIMSDKAndAddIMListeners();
         if (!mounted) return;
-        InitStep.checkLogin(
-          cachedBuildContext ?? context,
-          initIMSDKAndAddIMListeners,
+        unawaited(
+          InitStep.checkLogin(
+            cachedBuildContext ?? context,
+            initIMSDKAndAddIMListeners,
+          ),
         );
         return;
     }
@@ -241,14 +263,37 @@ class _TencentChatAppState extends State<TencentChatApp>
     } catch (_) {}
   }
 
-  void _onImLoggedIn({required bool runForegroundRecovery}) {
+  void _onImLoggedInForSession({
+    required bool runForegroundRecovery,
+    required SessionIdentity expectedIdentity,
+    int? listenerEpoch,
+  }) {
+    bool isCurrent() =>
+        _isListenerSessionCurrent(expectedIdentity, listenerEpoch);
+    if (!isCurrent()) {
+      return;
+    }
     _presence?.startHeartbeat();
-    unawaited(ListenerStore.afterLogin());
+    unawaited(ListenerStore.afterLogin(expectedIdentity: expectedIdentity));
     unawaited(
         NotificationSettingsService.instance.consumePendingConversationOpen());
     if (runForegroundRecovery) {
-      _runLoggedInSideEffects();
+      _runLoggedInSideEffects(
+        expectedIdentity: expectedIdentity,
+        listenerEpoch: listenerEpoch,
+      );
     }
+  }
+
+  bool _isListenerSessionCurrent(
+    SessionIdentity identity,
+    int? listenerEpoch,
+  ) {
+    return (listenerEpoch == null ||
+            AuthBootstrapService.instance.isImListenerEpochCurrent(
+              listenerEpoch,
+            )) &&
+        SessionIdentityService.instance.isCurrent(identity);
   }
 
   bool _shouldSkipConnectSuccessRecovery() {
@@ -259,13 +304,20 @@ class _TencentChatAppState extends State<TencentChatApp>
     return DateTime.now().difference(last) < _connectSuccessDedupWindow;
   }
 
-  void _runLoggedInSideEffects() {
-    unawaited(ListenerStore.afterLogin());
+  void _runLoggedInSideEffects({
+    required SessionIdentity expectedIdentity,
+    int? listenerEpoch,
+  }) {
+    bool isCurrent() =>
+        _isListenerSessionCurrent(expectedIdentity, listenerEpoch);
+    if (!isCurrent()) {
+      return;
+    }
+    unawaited(ListenerStore.afterLogin(expectedIdentity: expectedIdentity));
     final backgroundAt = _lastEnteredBackgroundAt;
     _lastEnteredBackgroundAt = null;
-    final background = backgroundAt == null
-        ? null
-        : DateTime.now().difference(backgroundAt);
+    final background =
+        backgroundAt == null ? null : DateTime.now().difference(backgroundAt);
     final intensity = ResumeForegroundPolicy.intensityFor(background);
 
     ConversationRefreshBus.instance.hold(
@@ -293,24 +345,30 @@ class _TencentChatAppState extends State<TencentChatApp>
     _resumePhase2Timer?.cancel();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (!mounted || !isCurrent()) return;
       _resumePhase1Timer = Timer(ResumeForegroundPolicy.phase1Delay, () {
-        if (!mounted) return;
+        if (!mounted || !isCurrent()) return;
         unawaited(() async {
+          if (!isCurrent()) return;
           await NotificationSettingsService.instance.applyFromSettings();
+          if (!isCurrent()) return;
           await NotificationSettingsService.instance
               .consumePendingConversationOpen();
+          if (!isCurrent()) return;
           await ImRecoveryService.instance.afterOnline(
             reason: 'app_resumed',
             intensity: intensity,
           );
-        }().catchError((_) {}));
+          if (!isCurrent()) return;
+        }()
+            .catchError((_) {}));
       });
 
       _resumePhase2Timer = Timer(ResumeForegroundPolicy.phase2Delay, () {
-        if (!mounted) return;
+        if (!mounted || !isCurrent()) return;
         DeviceSyncService.instance.onAppResumed();
-        if (ResumeForegroundPolicy.shouldRunHeavySideEffects(intensity)) {
+        if (isCurrent() &&
+            ResumeForegroundPolicy.shouldRunHeavySideEffects(intensity)) {
           unawaited(
             LocationUploadService.instance.maybeUpload(reason: 'app_resumed'),
           );
@@ -321,30 +379,62 @@ class _TencentChatAppState extends State<TencentChatApp>
   }
 
   void _scheduleOfficialAccountEnsure() {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) {
+      return;
+    }
     _officialAccountTask ??= Future<void>.delayed(
       Duration.zero,
-    ).then((_) async {
-      final login = await TencentImSDKPlugin.v2TIMManager.getLoginUser();
-      final userId = login.data?.trim() ?? '';
-      if (userId.isEmpty) {
-        return false;
-      }
-      await PlatformOfficialAccountService.loadDismissedState();
-      return PlatformOfficialAccountService.ensureSubscribed();
-    }).catchError((_) => false).whenComplete(() {
-      _officialAccountTask = null;
-    });
+    )
+        .then((_) async {
+          if (!SessionIdentityService.instance.isCurrent(identity)) {
+            return false;
+          }
+          final login = await TencentImSDKPlugin.v2TIMManager.getLoginUser();
+          final userId = login.data?.trim() ?? '';
+          if (userId.isEmpty ||
+              userId != identity.ownerUserId ||
+              !SessionIdentityService.instance.isCurrent(identity)) {
+            return false;
+          }
+          await PlatformOfficialAccountService.loadDismissedState();
+          if (!SessionIdentityService.instance.isCurrent(identity)) {
+            return false;
+          }
+          return PlatformOfficialAccountService.ensureSubscribed();
+        })
+        .catchError((_) => false)
+        .whenComplete(() {
+          _officialAccountTask = null;
+        });
   }
 
-  onKickedOffline({bool updateLoginState = true}) async {
+  Future<void> onKickedOffline({
+    bool updateLoginState = true,
+    SessionIdentity? expectedIdentity,
+  }) async {
     try {
+      if (expectedIdentity == null &&
+          AuthSessionService.instance.isInAuthFlow) {
+        return;
+      }
+      final identity =
+          expectedIdentity ?? SessionIdentityService.instance.capture();
+      if (identity.ownerUserId.isEmpty ||
+          !SessionIdentityService.instance.isCurrent(identity)) {
+        return;
+      }
       if (updateLoginState) {
         LoginCoordinator.instance.markKickedOffline(
           message: TIM_t("您的账号已在其它终端登录"),
         );
       }
+      if (!SessionIdentityService.instance.isCurrent(identity)) {
+        return;
+      }
       await AccountSessionService.instance.clearForLogout(
         reason: 'kicked_offline',
+        expectedIdentity: identity,
       );
       if (mounted) {
         InitStep.directToLogin(cachedBuildContext ?? context);
@@ -353,16 +443,66 @@ class _TencentChatAppState extends State<TencentChatApp>
     } catch (_) {}
   }
 
+  Future<void> _confirmKickedOffline(
+    SessionIdentity identity, {
+    required int listenerEpoch,
+  }) async {
+    // The SDK callback has no user id. Give an account-boundary logout a
+    // chance to finish, then reject callbacks that belong to a superseded
+    // session before touching token or local data.
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    if (!mounted ||
+        !AuthBootstrapService.instance
+            .isImListenerEpochCurrent(listenerEpoch) ||
+        !SessionIdentityService.instance.isCurrent(identity)) {
+      return;
+    }
+    final nativeUserId =
+        await AuthBootstrapService.instance.getNativeLoginUserId();
+    if (nativeUserId == null || nativeUserId.isEmpty) {
+      // This callback has no user id of its own. Without a live native owner
+      // there is no safe account to clear.
+      SessionDiagnostics.log('SESSION_LOG kick ignored native_owner_empty');
+      return;
+    }
+    if (nativeUserId != identity.ownerUserId) {
+      SessionDiagnostics.log(
+        'SESSION_LOG kick ignored native_owner_changed '
+        'captured=${identity.ownerUserId} native=$nativeUserId',
+      );
+      return;
+    }
+    if (!AuthBootstrapService.instance
+            .isImListenerEpochCurrent(listenerEpoch) ||
+        !SessionIdentityService.instance.isCurrent(identity) ||
+        AuthSessionService.instance.isInAuthFlow) {
+      return;
+    }
+    await onKickedOffline(expectedIdentity: identity);
+  }
+
   Future<String> getLanguage() async {
     return "zh-Hans";
   }
 
-  getLoginUserInfo() async {
+  Future<void> getLoginUserInfo() async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) {
+      return;
+    }
     final res = await _sdkInstance.getLoginUser();
-    if (res.code == 0) {
+    final nativeUserId = ChatIdFormat.rawUserUid(res.data);
+    if (res.code == 0 &&
+        nativeUserId == identity.ownerUserId &&
+        SessionIdentityService.instance.isCurrent(identity)) {
       final result = await _sdkInstance.getUsersInfo(userIDList: [res.data!]);
 
-      if (result.code == 0) {
+      if (result.code == 0 &&
+          result.data != null &&
+          result.data!.isNotEmpty &&
+          ChatIdFormat.rawUserUid(result.data!.first.userID) ==
+              identity.ownerUserId &&
+          SessionIdentityService.instance.isCurrent(identity)) {
         Provider.of<LoginUserInfo>(context, listen: false)
             .setLoginUserInfo(result.data![0]);
       }
@@ -479,25 +619,56 @@ class _TencentChatAppState extends State<TencentChatApp>
         normalized.contains('请先登录');
   }
 
-  Future<void> _handleUserSigExpired() async {
+  Future<void> _handleUserSigExpiredForIdentity(
+    SessionIdentity expectedIdentity, {
+    required int listenerEpoch,
+  }) async {
+    if (!AuthBootstrapService.instance
+            .isImListenerEpochCurrent(listenerEpoch) ||
+        !SessionIdentityService.instance.isCurrent(expectedIdentity)) {
+      return;
+    }
     if (_refreshingUserSig) return;
     _refreshingUserSig = true;
     LoginCoordinator.instance.markSessionRefreshing();
     _setConnectStatus(ConnectStatus.connecting);
     try {
       final ok = await AuthBootstrapService.instance.refreshUserSigAndRelogin();
+      if (!AuthBootstrapService.instance
+              .isImListenerEpochCurrent(listenerEpoch) ||
+          !SessionIdentityService.instance.isCurrent(expectedIdentity)) {
+        return;
+      }
       if (ok) {
         final res = await TencentImSDKPlugin.v2TIMManager.getLoginUser();
         LoginCoordinator.instance.markImReady(userId: res.data?.trim());
         _setConnectStatus(ConnectStatus.success);
-        _onImLoggedIn(runForegroundRecovery: true);
+        _onImLoggedInForSession(
+          runForegroundRecovery: true,
+          expectedIdentity: expectedIdentity,
+          listenerEpoch: listenerEpoch,
+        );
+        return;
+      }
+      if (!AuthBootstrapService.instance.lastUserSigRefreshWasAuthFailure) {
+        // 网络抖动或 IM 临时重连失败不能清空业务登录态。
+        LoginCoordinator.instance.markFailed(
+          LoginErrorType.imLoginFailed,
+          message: 'UserSig refresh temporarily unavailable',
+          isBusinessAuthenticated: true,
+          isHomeEntered: true,
+        );
+        _setConnectStatus(ConnectStatus.failed);
         return;
       }
       LoginCoordinator.instance.markSessionExpired(
         message: TIM_t("账号已过期，请重新登录"),
       );
       ToastUtils.toast(TIM_t("账号已过期，请重新登录"));
-      await onKickedOffline(updateLoginState: false);
+      await onKickedOffline(
+        updateLoginState: false,
+        expectedIdentity: expectedIdentity,
+      );
     } catch (e, st) {
       LoginCoordinator.instance.markFailed(
         LoginErrorType.imLoginFailed,
@@ -521,21 +692,25 @@ class _TencentChatAppState extends State<TencentChatApp>
     }
     // 以本页 init 门闩为准：SDK 已按同 AppID 初始化时只同步标志，绝不因
     // AuthBootstrap 标志被误清而 UnInit（否则登录重试会拆掉仍在跑的 IM）。
-    if (_isInitIMSDK && _initializedSdkAppId == resolved) {
-      if (!AuthBootstrapService.imSdkInitialized ||
-          AuthBootstrapService.initializedSdkAppId != resolved) {
-        AuthBootstrapService.imSdkInitialized = true;
-        AuthBootstrapService.initializedSdkAppId = resolved;
-        _sessionLog(
-          'SESSION_LOG IM_INIT resync_flags sdkAppId=$resolved',
-        );
-      } else {
-        _sessionLog(
-          'SESSION_LOG IM_INIT skip reason=already_initialized '
-          'sdkAppId=$resolved',
-        );
-      }
+    if (_isInitIMSDK &&
+        _initializedSdkAppId == resolved &&
+        AuthBootstrapService.imSdkInitialized &&
+        AuthBootstrapService.initializedSdkAppId == resolved) {
+      _sessionLog(
+        'SESSION_LOG IM_INIT skip reason=already_initialized '
+        'sdkAppId=$resolved',
+      );
       return;
+    }
+    if (_isInitIMSDK &&
+        (!AuthBootstrapService.imSdkInitialized ||
+            AuthBootstrapService.initializedSdkAppId != resolved)) {
+      // Another account boundary may have called unInitSDK. The per-widget
+      // marker must follow the native SDK, otherwise the next login returns
+      // early without actually initializing it again.
+      _isInitIMSDK = false;
+      _initializedSdkAppId = null;
+      _sessionLog('SESSION_LOG IM_INIT local marker stale; reinitialize');
     }
     final needsTeardown = _isInitIMSDK ||
         AuthBootstrapService.imSdkInitialized ||
@@ -564,6 +739,7 @@ class _TencentChatAppState extends State<TencentChatApp>
 
   Future<void> _teardownImSdkForReinit({required String reason}) async {
     _sessionLog('SESSION_LOG IM_INIT teardown reason=$reason');
+    AuthBootstrapService.instance.invalidateImListenerEpoch();
     try {
       await _coreInstance.logout().timeout(const Duration(seconds: 3));
     } catch (_) {}
@@ -586,10 +762,13 @@ class _TencentChatAppState extends State<TencentChatApp>
       return;
     }
     _isInitIMSDK = true;
+    final listenerEpoch =
+        AuthBootstrapService.instance.registerImListenerEpoch();
     final rootContext = AppNavigator.context ?? cachedBuildContext;
     if (rootContext == null) {
       _isInitIMSDK = false;
-      _sessionLog('SESSION_LOG IM_INIT done success=false reason=no_root_context');
+      _sessionLog(
+          'SESSION_LOG IM_INIT done success=false reason=no_root_context');
       return;
     }
     final LocalSetting localSetting =
@@ -649,6 +828,10 @@ class _TencentChatAppState extends State<TencentChatApp>
       loglevel: LogLevelEnum.V2TIM_LOG_NONE,
       listener: V2TimSDKListener(
         onConnectFailed: (code, error) {
+          if (!AuthBootstrapService.instance
+              .isImListenerEpochCurrent(listenerEpoch)) {
+            return;
+          }
           ImConnectStatusService.markSocketDisconnected();
           if (NetworkStatusService.instance.status.value ==
               NetworkReachability.offline) {
@@ -662,13 +845,33 @@ class _TencentChatAppState extends State<TencentChatApp>
           _setConnectStatus(ConnectStatus.failed);
         },
         onConnectSuccess: () {
+          if (!AuthBootstrapService.instance
+              .isImListenerEpochCurrent(listenerEpoch)) {
+            return;
+          }
+          final connectListenerEpoch = listenerEpoch;
+          final connectIdentity = SessionIdentityService.instance.capture();
+          if (connectIdentity.ownerUserId.isEmpty ||
+              !_isListenerSessionCurrent(
+                connectIdentity,
+                connectListenerEpoch,
+              )) {
+            return;
+          }
+          bool isCurrent() => _isListenerSessionCurrent(
+                connectIdentity,
+                connectListenerEpoch,
+              );
           if (kIsWeb) {
             // 先尽量重绑（listener 已在则立刻生效）；afterLogin 后再 force 一次，
             // 覆盖「连接成功时 Dart listener 尚未挂上」的竞态。
             TimWebScriptLoader.rebindRealtimeListeners();
             unawaited(
-              ListenerStore.afterLogin().then((_) {
-                TimWebScriptLoader.rebindRealtimeListeners();
+              ListenerStore.afterLogin(expectedIdentity: connectIdentity)
+                  .then((_) {
+                if (isCurrent()) {
+                  TimWebScriptLoader.rebindRealtimeListeners();
+                }
               }),
             );
           }
@@ -677,12 +880,14 @@ class _TencentChatAppState extends State<TencentChatApp>
           ImConnectStatusService.onSdkConnectSuccess(
             context: cachedBuildContext ?? context,
           );
+          if (!isCurrent()) return;
           LoginCoordinator.instance.markImReady();
           if (kIsWeb) {
             // 首屏先渲染，再补会话列表，避免与 bootstrap 抢主线程。
             // 断线重连时也要 reset 补拉，避免漏掉断线窗口内的会话更新。
             unawaited(
               Future<void>.delayed(const Duration(milliseconds: 400), () {
+                if (!isCurrent()) return Future<void>.value();
                 return ConversationSyncService.instance.syncFromSdk(
                   reason: needsCatchUp
                       ? 'web_im_reconnected'
@@ -700,26 +905,46 @@ class _TencentChatAppState extends State<TencentChatApp>
               needsCatchUp ? 'im_reconnected' : 'connect_success';
           if (_shouldSkipConnectSuccessRecovery() && !needsCatchUp) {
             if (!kIsWeb) {
-              unawaited(ListenerStore.afterLogin());
+              unawaited(
+                Future<void>(() async {
+                  if (!isCurrent()) return;
+                  await ListenerStore.afterLogin(
+                    expectedIdentity: connectIdentity,
+                  );
+                }),
+              );
             }
             unawaited(
-              ImRecoveryService.instance.refreshForegroundChatIfNeeded(
-                reason: recoveryReason,
-              ),
+              Future<void>(() async {
+                if (!isCurrent()) return;
+                await ImRecoveryService.instance
+                    .refreshForegroundChatIfNeeded(reason: recoveryReason);
+              }),
             );
             return;
           }
           ToastUtils.log(TIM_t("即时通信服务连接成功"));
-          _onImLoggedIn(runForegroundRecovery: true);
+          _onImLoggedInForSession(
+            runForegroundRecovery: true,
+            expectedIdentity: connectIdentity,
+            listenerEpoch: connectListenerEpoch,
+          );
           if (needsCatchUp) {
             unawaited(
-              ImRecoveryService.instance.refreshForegroundChatIfNeeded(
-                reason: 'im_reconnected',
-              ),
+              Future<void>(() async {
+                if (!isCurrent()) return;
+                await ImRecoveryService.instance.refreshForegroundChatIfNeeded(
+                  reason: 'im_reconnected',
+                );
+              }),
             );
           }
         },
         onConnecting: () {
+          if (!AuthBootstrapService.instance
+              .isImListenerEpochCurrent(listenerEpoch)) {
+            return;
+          }
           if (AuthSessionService.instance.isInAuthFlow) return;
           ImConnectStatusService.onSdkConnecting(
             context: cachedBuildContext ?? context,
@@ -727,17 +952,60 @@ class _TencentChatAppState extends State<TencentChatApp>
           _setConnectStatus(ConnectStatus.connecting);
         },
         onKickedOffline: () {
+          if (!AuthBootstrapService.instance
+              .isImListenerEpochCurrent(listenerEpoch)) {
+            return;
+          }
+          if (AuthSessionService.instance.isInAuthFlow) {
+            return;
+          }
+          final identity = SessionIdentityService.instance.capture();
+          if (identity.ownerUserId.isEmpty) {
+            return;
+          }
           ToastUtils.toast(TIM_t("您的账号已在其它终端登录"));
-          onKickedOffline();
+          unawaited(
+            _confirmKickedOffline(
+              identity,
+              listenerEpoch: listenerEpoch,
+            ),
+          );
         },
         onSelfInfoUpdated: (info) {
+          if (!AuthBootstrapService.instance
+              .isImListenerEpochCurrent(listenerEpoch)) {
+            return;
+          }
+          final current = SessionIdentityService.instance.capture();
+          final infoUserId = ChatIdFormat.rawUserUid(info.userID);
+          if (current.ownerUserId.isEmpty ||
+              infoUserId.isEmpty ||
+              current.ownerUserId != infoUserId) {
+            return;
+          }
           Provider.of<LoginUserInfo>(rootContext, listen: false)
               .setLoginUserInfo(info);
         },
         onUserSigExpired: () {
-          unawaited(_handleUserSigExpired());
+          if (!AuthBootstrapService.instance
+              .isImListenerEpochCurrent(listenerEpoch)) {
+            return;
+          }
+          final identity = SessionIdentityService.instance.capture();
+          if (identity.ownerUserId.isNotEmpty) {
+            unawaited(
+              _handleUserSigExpiredForIdentity(
+                identity,
+                listenerEpoch: listenerEpoch,
+              ),
+            );
+          }
         },
         onUserStatusChanged: (statusList) {
+          if (!AuthBootstrapService.instance
+              .isImListenerEpochCurrent(listenerEpoch)) {
+            return;
+          }
           final ids =
               statusList.map((s) => s.userID).whereType<String>().toList();
           if (ids.isEmpty) return;
@@ -802,8 +1070,21 @@ class _TencentChatAppState extends State<TencentChatApp>
     }
   }
 
-  initApp() {
-    InitStep.checkLogin(context, initIMSDKAndAddIMListeners);
+  void initApp() {
+    final attempt = ++_startupAttempt;
+    _startupSettled = false;
+    _splashWatchdog?.cancel();
+    _splashWatchdog = Timer(const Duration(seconds: 12), () {
+      unawaited(_escalateIfStillOnSplash(attempt));
+    });
+    final startup = InitStep.checkLogin(context, initIMSDKAndAddIMListeners);
+    unawaited(startup.whenComplete(() {
+      if (!mounted || attempt != _startupAttempt) return;
+      _startupSettled = true;
+      _splashWatchdog?.cancel();
+      _splashWatchdog = null;
+      _sessionLog('SESSION_LOG startup settled attempt=$attempt');
+    }));
   }
 
   initScreenUtils() {
@@ -839,89 +1120,40 @@ class _TencentChatAppState extends State<TencentChatApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _installVoiceRouteBridge();
     if (kIsWeb) {
       WebImRealtimeWatchdog.start();
     }
     AuthBootstrapService.instance.setImSdkInitializer(
       initIMSDKAndAddIMListeners,
     );
-    _splashWatchdog = Timer(const Duration(seconds: 12), () {
-      unawaited(_escalateIfStillOnSplash());
-    });
     initApp();
     initRouteListener();
   }
 
-  Future<void> _escalateIfStillOnSplash() async {
-    if (!mounted) return;
-    final loginRes = await TencentImSDKPlugin.v2TIMManager.getLoginUser();
-    final userId = loginRes.data?.trim() ?? '';
+  /// 注入 UIKit 的语音路由桥接——app 层 VoiceOutputRouteService 的适配器。
+  void _installVoiceRouteBridge() {
+    SoundPlayerVoiceRouteBridge.install(_AppVoiceRouteBridge());
+  }
+
+  Future<void> _escalateIfStillOnSplash(int attempt) async {
+    if (!mounted || attempt != _startupAttempt || _startupSettled) return;
+    // The watchdog is observational. The restore task owns navigation and
+    // credential deletion; a slow network/IM response must never be mistaken
+    // for an invalid account and clear a valid token.
     final token = ApiClient.instance.token;
-    final hasValidToken = ApiClient.isValidJwt(token);
-    final ctx = AppNavigator.context ?? cachedBuildContext ?? context;
-
-    if (userId.isNotEmpty && hasValidToken) {
-      UserSigResult? sig;
-      try {
-        sig = await AuthBootstrapService.instance.verifyBusinessImIdentity(
-          reason: 'splash_watchdog',
-        );
-      } on DioError catch (e) {
-        if (DioErrorMessage.isAuthFailure(e)) {
-          await AccountSessionService.instance.clearForLogout(
-            reason: 'splash_auth_failure',
-          );
-          InitStep.leaveLaunchScreen(
-            toHome: false,
-            context: ctx,
-            initIMSDK: initIMSDKAndAddIMListeners,
-          );
-        }
-        return;
-      } catch (_) {
-        return;
-      }
-      if (sig != null) {
-        await AuthBootstrapService.instance.primeUIKitSession(sig);
-        await AuthBootstrapService.instance.refreshImUIKitLists();
-        ImConnectStatusService.applyForColdStartHome(ctx);
-        InitStep.leaveLaunchScreen(toHome: true, context: ctx);
-        _onImLoggedIn(runForegroundRecovery: true);
-        unawaited(
-          ListenerStore.afterLogin().timeout(
-            const Duration(seconds: 8),
-            onTimeout: () {},
-          ),
-        );
-        return;
-      }
-      await AccountSessionService.instance.clearForLogout(
-        reason: 'splash_identity_mismatch',
-      );
-      InitStep.leaveLaunchScreen(
-        toHome: false,
-        context: ctx,
-        initIMSDK: initIMSDKAndAddIMListeners,
-      );
-      return;
-    }
-
-    if (!hasValidToken) {
-      if (userId.isNotEmpty) {
-        await AccountSessionService.instance.clearForLogout(
-          reason: 'splash_invalid_token',
-        );
-      }
-      InitStep.leaveLaunchScreen(
-        toHome: false,
-        context: ctx,
-        initIMSDK: initIMSDKAndAddIMListeners,
-      );
-    }
+    _sessionLog(
+      'SESSION_LOG startup watchdog pending attempt=$attempt '
+      'tokenValid=${ApiClient.isValidJwt(token)} '
+      'hasOwner=${ApiClient.instance.authenticatedUserId.isNotEmpty} '
+      'route=${AppNavigator.currentRouteName ?? 'root'}',
+    );
   }
 
   @override
   dispose() {
+    ChatHistoryRecoveryCoordinator.instance.invalidateLifecycle();
+    ConversationSyncService.instance.invalidateLifecycle();
     _splashWatchdog?.cancel();
     _resumeTimer?.cancel();
     _resumePhase1Timer?.cancel();
@@ -962,5 +1194,94 @@ class _TencentChatAppState extends State<TencentChatApp>
       );
     }
     return const LaunchPage();
+  }
+}
+
+/// app 层 VoiceOutputRouteService 的 UIKit bridge 适配器。
+class _AppVoiceRouteBridge implements SoundPlayerVoiceRouteBridge {
+  @override
+  SoundPlayerVoiceRoute get currentRoute =>
+      VoiceOutputRouteService.currentRoute == VoiceOutputRoute.speaker
+          ? SoundPlayerVoiceRoute.speaker
+          : SoundPlayerVoiceRoute.earpiece;
+
+  @override
+  bool get isSpeaker => VoiceOutputRouteService.isSpeaker;
+
+  @override
+  ValueListenable<SoundPlayerVoiceRoute> get routeNotifier {
+    final source = VoiceOutputRouteService.routeNotifier;
+    return _RouteNotifierAdapter(source);
+  }
+
+  @override
+  AudioSessionConfiguration playbackConfigFor(SoundPlayerVoiceRoute route) {
+    final mapped = _mapRoute(route);
+    return VoiceOutputRouteService.playbackConfigFor(mapped);
+  }
+
+  @override
+  AudioSessionConfiguration voiceChatConfigFor(SoundPlayerVoiceRoute route) {
+    final mapped = _mapRoute(route);
+    return VoiceOutputRouteService.voiceChatConfigFor(mapped);
+  }
+
+  @override
+  Future<bool> applyCurrentRoute({
+    bool configureSession = false,
+    bool forRecording = false,
+    bool activate = false,
+  }) {
+    return VoiceOutputRouteService.applyCurrentRoute(
+      configureSession: configureSession,
+      forRecording: forRecording,
+      activate: activate,
+    );
+  }
+
+  @override
+  Future<bool> setRoute(
+    SoundPlayerVoiceRoute target, {
+    bool configureSession = true,
+    bool forRecording = false,
+    bool activate = true,
+    bool forceApply = false,
+  }) {
+    return VoiceOutputRouteService.setRoute(
+      _mapRoute(target),
+      configureSession: configureSession,
+      forRecording: forRecording,
+      activate: activate,
+      forceApply: forceApply,
+    );
+  }
+
+  static VoiceOutputRoute _mapRoute(SoundPlayerVoiceRoute route) {
+    return route == SoundPlayerVoiceRoute.speaker
+        ? VoiceOutputRoute.speaker
+        : VoiceOutputRoute.earpiece;
+  }
+}
+
+class _RouteNotifierAdapter extends ValueNotifier<SoundPlayerVoiceRoute> {
+  _RouteNotifierAdapter(ValueListenable<VoiceOutputRoute> source)
+      : super(_map(source.value)) {
+    source.addListener(_onChanged);
+    _source = source;
+  }
+
+  ValueListenable<VoiceOutputRoute>? _source;
+
+  void _onChanged() {
+    final source = _source;
+    if (source != null) {
+      value = _map(source.value);
+    }
+  }
+
+  static SoundPlayerVoiceRoute _map(VoiceOutputRoute route) {
+    return route == VoiceOutputRoute.speaker
+        ? SoundPlayerVoiceRoute.speaker
+        : SoundPlayerVoiceRoute.earpiece;
   }
 }

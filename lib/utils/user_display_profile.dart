@@ -26,7 +26,8 @@ class UserDisplayProfile {
       return null;
     }
     final record = UserProfileLocalService.instance.readCached(id) ??
-        UserProfileLocalService.instance.readCached(ChatIdFormat.rawUserUid(id));
+        UserProfileLocalService.instance
+            .readCached(ChatIdFormat.rawUserUid(id));
     if (record == null) {
       return null;
     }
@@ -51,10 +52,16 @@ class UserDisplayProfile {
         conversationShowName: conversationShowName ?? fallbackName,
       );
     }
+    // A group name card is specific to this membership and wins. For the
+    // public profile, the local profile store wins over stale message snapshots.
+    final local = UserProfileLocalService.instance.readCached(userId);
     final resolved = memberDisplayName(
-      friendRemark: imRemark,
+      friendRemark: nameCard?.trim().isNotEmpty == true
+          ? imRemark
+          : (local?.friendRemark ?? imRemark),
       nameCard: nameCard,
-      nickName: imNickName,
+      nickName:
+          local?.nickname.isNotEmpty == true ? local!.nickname : imNickName,
       storeName: DisplayNameStore.instance.c2c(userId),
       userID: userId,
     );

@@ -57,7 +57,7 @@ void main() {
       expect(provider.content, contains('32'));
     });
 
-    test('invite-only lk_call mid-state is hidden from history', () {
+    test('invite-only c2c lk_call ringing state is visible', () {
       final payload = jsonEncode(<String, dynamic>{
         'businessID': 'lk_call',
         'action': 'invite',
@@ -70,7 +70,7 @@ void main() {
       final provider = CallingMessageDataProvider(message);
       expect(provider.isCallingSignal, isTrue);
       expect(provider.protocolType, CallProtocolType.send);
-      expect(provider.shouldDisplayInHistory, isFalse);
+      expect(provider.shouldDisplayInHistory, isTrue);
     });
 
     test('callDirection marker incoming wins even when isSelf true', () {
@@ -118,7 +118,7 @@ void main() {
   });
 
   group('CallBubbleDedupe.normalizeCallHistoryMessages', () {
-    test('drops invite/accept but keeps terminal hangup', () {
+    test('same call lifecycle keeps terminal hangup over ringing', () {
       final invite = _callCustomMessage(
         jsonEncode(<String, dynamic>{
           'businessID': 'lk_call',
@@ -181,6 +181,126 @@ void main() {
       );
       expect(normalized.length, 1);
       expect(normalized.single.msgID, 'im_hangup_prefer');
+      expect(
+        CallingMessageDataProvider(normalized.single).protocolType,
+        CallProtocolType.hangup,
+      );
+    });
+
+    test('three repeated c2c terminal rows collapse to one bubble', () {
+      final rows = <V2TimMessage>[];
+      for (var i = 0; i < 3; i++) {
+        final row = _callCustomMessage(
+          jsonEncode(<String, dynamic>{
+            'businessID': 'lk_call',
+            'action': 'hangup',
+            'callId': 'call_repeated_c2c',
+            'duration': 11,
+            'callerId': 'self_a',
+            'calleeId': 'peer_a',
+          }),
+        );
+        row.msgID = 'im_hangup_repeated_$i';
+        row.timestamp = 1784077600 + i;
+        rows.add(row);
+      }
+
+      final normalized = CallBubbleDedupe.normalizeCallHistoryMessages(rows);
+
+      expect(normalized, hasLength(1));
+      expect(normalized.single.msgID, 'im_hangup_repeated_2');
+      expect(CallBubbleDedupe.extractInviteId(normalized.single),
+          'call_repeated_c2c');
+    });
+
+    test('local terminal plus two IM hangups collapse to one IM bubble', () {
+      const callId = 'call_mixed_three_sources';
+      final local = _callCustomMessage(
+        jsonEncode(<String, dynamic>{
+          'businessID': 'lk_call',
+          'action': 'hangup',
+          'callId': callId,
+          'duration': 11,
+        }),
+      );
+      local.msgID = 'local_call_bubble_$callId';
+      local.timestamp = 1784077660;
+      local.localCustomData = jsonEncode(<String, dynamic>{
+        'localCallBubble': true,
+        'callId': callId,
+        'inviteID': callId,
+        'conversationID': 'c2c_peer_a',
+        'call_end': 11,
+        'durationSec': 11,
+      });
+
+      final firstIm = _callCustomMessage(
+        jsonEncode(<String, dynamic>{
+          'businessID': 'lk_call',
+          'action': 'hangup',
+          'callId': callId,
+          'duration': 11,
+        }),
+      );
+      firstIm.msgID = 'im_hangup_mixed_1';
+      firstIm.timestamp = 1784077661;
+
+      final secondIm = _callCustomMessage(
+        jsonEncode(<String, dynamic>{
+          'businessID': 'lk_call',
+          'action': 'hangup',
+          'callId': callId,
+          'duration': 11,
+        }),
+      );
+      secondIm.msgID = 'im_hangup_mixed_2';
+      secondIm.timestamp = 1784077662;
+
+      final normalized = CallBubbleDedupe.normalizeCallHistoryMessages(
+        <V2TimMessage>[local, firstIm, secondIm],
+      );
+
+      expect(normalized, hasLength(1));
+      expect(normalized.single.msgID, 'im_hangup_mixed_2');
+      expect(normalized.single.localCustomData, isEmpty);
+    });
+
+    test('late ringing tip cannot replace terminal row for same callId', () {
+      const callId = 'call_terminal_monotonic';
+      final terminal = _callCustomMessage(
+        jsonEncode(<String, dynamic>{
+          'businessID': 'lk_call',
+          'action': 'hangup',
+          'callId': callId,
+          'duration': 11,
+        }),
+      );
+      terminal.msgID = 'local_call_bubble_$callId';
+      terminal.timestamp = 1784077670;
+      terminal.localCustomData = jsonEncode(<String, dynamic>{
+        'localCallBubble': true,
+        'callId': callId,
+        'conversationID': 'c2c_peer_a',
+        'call_end': 11,
+      });
+
+      final lateInvite = _callCustomMessage(
+        jsonEncode(<String, dynamic>{
+          'businessID': 'lk_call',
+          'action': 'invite',
+          'callId': callId,
+        }),
+      );
+      lateInvite.msgID = 'im_late_invite';
+      lateInvite.timestamp = 1784077671;
+
+      final normalized = CallBubbleDedupe.normalizeCallHistoryMessages(
+        <V2TimMessage>[terminal, lateInvite],
+        preserveTipIdentity: true,
+      );
+
+      expect(normalized, hasLength(1));
+      expect(normalized.single.msgID, 'local_call_bubble_$callId');
       expect(
         CallingMessageDataProvider(normalized.single).protocolType,
         CallProtocolType.hangup,

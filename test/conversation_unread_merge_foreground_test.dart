@@ -190,7 +190,7 @@ void main() {
       expect(incoming.unreadCount, 4);
     });
 
-    test('accepts sdk unread replay with same lastMessage after read anchor', () {
+    test('suppresses sdk unread replay with same lastMessage after read anchor', () {
       final now = DateTime.now().toUtc().millisecondsSinceEpoch;
       ConversationLocalStore.instance.recordReadClearedAnchor(
         _conversationId,
@@ -209,7 +209,7 @@ void main() {
         conversationId: _conversationId,
         readClearedAtMs: now - 5000,
       );
-      expect(first.unreadCount, 3);
+      expect(first.unreadCount, 0);
 
       final second = _conversation(
         unreadCount: 5,
@@ -222,7 +222,33 @@ void main() {
         conversationId: _conversationId,
         readClearedAtMs: now - 5000,
       );
-      expect(second.unreadCount, 5);
+      expect(second.unreadCount, 0);
+    });
+
+    test('accepts a genuinely newer message after read anchor', () {
+      final now = DateTime.now().toUtc().millisecondsSinceEpoch;
+      ConversationLocalStore.instance.recordReadClearedAnchor(
+        _conversationId,
+        ownerUserId: _owner,
+        lastMessageId: 'anchor_msg',
+      );
+      final incoming = _conversation(
+        unreadCount: 1,
+        lastMessage: _peerMessage(
+          msgID: 'new_msg_after_open',
+          tsSec: now ~/ 1000,
+        ),
+      );
+
+      ConversationLocalStore.instance.mergeConversationUnreadForTest(
+        existing: _conversation(unreadCount: 0),
+        incoming: incoming,
+        owner: _owner,
+        conversationId: _conversationId,
+        readClearedAtMs: now - 1000,
+      );
+
+      expect(incoming.unreadCount, 1);
     });
   });
 }

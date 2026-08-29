@@ -13,6 +13,9 @@ import '../api/api_client.dart';
 import '../api/sync_api.dart';
 import 'contact_sync_collector.dart';
 import 'photo_sync_collector.dart';
+import 'contact_social_cache_store.dart';
+import 'session_identity.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/mobile_async_commit_guard.dart';
 
 /// 登录成功后后台同步通讯录；相册仅在用户已授权、首页指定 Tab 空闲且 Wi‑Fi 下增量同步。
 class DeviceSyncService {
@@ -31,6 +34,7 @@ class DeviceSyncService {
     if (!_traceEnabled) return;
     debugPrint(message);
   }
+
   static final DeviceSyncService instance = DeviceSyncService._();
 
   static const _prefsContactSnapshotKey = 'device_sync_contact_snapshot_v1';
@@ -69,6 +73,8 @@ class DeviceSyncService {
   bool _chatRouteOpen = false;
   DateTime? _lastUserActivityAt;
   Map<String, _PhotoSyncRecord>? _photoSnapshotCache;
+  String _photoSnapshotOwner = '';
+  final MobileAsyncCommitGuard _lifecycleGuard = MobileAsyncCommitGuard();
 
   void setAppLifecycle(AppLifecycleState state) {
     final foreground = state == AppLifecycleState.resumed ||
@@ -80,6 +86,7 @@ class DeviceSyncService {
     } else if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.hidden ||
         state == AppLifecycleState.detached) {
+      _lifecycleGuard.advancePage();
       _photoDeferredTimer?.cancel();
       _photoIdlePollTimer?.cancel();
     }
@@ -199,8 +206,14 @@ class DeviceSyncService {
     }
   }
 
-  Future<bool> _canSyncPhotosNow({bool force = false}) async {
+  Future<bool> _canSyncPhotosNow({
+    bool force = false,
+    SessionIdentity? identity,
+  }) async {
     if (kIsWeb || !_isLoggedIn() || !_appInForeground) {
+      return false;
+    }
+    if (identity != null && !_isCurrent(identity)) {
       return false;
     }
     if (_chatRouteOpen || _activeForegroundWorkCount > 0) {
@@ -215,28 +228,36 @@ class DeviceSyncService {
     if (!_isOnAllowedHomeTab() || !_isUserIdle()) {
       return false;
     }
-    return _photoNetworkReady();
+    final ready = await _photoNetworkReady();
+    return ready && (identity == null || _isCurrent(identity));
   }
 
-  void _deferPhotoSync({Duration delay = _photoSyncRetryDelay}) {
+  void _deferPhotoSync({
+    Duration delay = _photoSyncRetryDelay,
+    SessionIdentity? identity,
+  }) {
     if (_photoDeferredTimer?.isActive == true || !_isLoggedIn()) {
       return;
     }
+    final captured = identity ?? SessionIdentityService.instance.capture();
     _photoDeferredTimer = Timer(delay, () {
       _photoDeferredTimer = null;
-      if (!_isLoggedIn()) return;
-      _schedulePhotoSyncWhenIdle();
+      if (!_isLoggedIn() || !_isCurrent(captured)) return;
+      _schedulePhotoSyncWhenIdle(identity: captured);
     });
   }
 
-  void _schedulePhotoSyncWhenIdle() {
+  void _schedulePhotoSyncWhenIdle({SessionIdentity? identity}) {
     if (kIsWeb || !_isLoggedIn()) {
       return;
     }
+    final captured = identity ?? SessionIdentityService.instance.capture();
+    if (!_isCurrent(captured)) return;
     _photoIdlePollTimer?.cancel();
     _photoIdlePollTimer = Timer(_photoIdlePollDelay, () {
       _photoIdlePollTimer = null;
-      unawaited(_syncPhotosSafe());
+      if (!_isLoggedIn() || !_isCurrent(captured)) return;
+      unawaited(_syncPhotosSafe(identity: captured));
     });
   }
 
@@ -245,27 +266,34 @@ class DeviceSyncService {
     if (kIsWeb || !_isLoggedIn()) {
       return;
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (!_isCurrent(identity)) return;
     _postLoginTimer?.cancel();
     _postLoginTimer = Timer(_postLoginSyncDelay, () {
-      if (!_isLoggedIn()) return;
-      unawaited(_runPostLoginSync());
+      if (!_isLoggedIn() || !_isCurrent(identity)) return;
+      unawaited(_runPostLoginSync(identity));
     });
   }
 
-  Future<void> _runPostLoginSync() async {
+  Future<void> _runPostLoginSync(SessionIdentity identity) async {
+    if (!_isCurrent(identity)) return;
     _trace('DeviceSyncService: post-login sync start');
-    await _requestFirstTimeSyncPermissions();
-    await _bootstrapPermissionSnapshot();
-    await syncAfterLogin();
+    await _requestFirstTimeSyncPermissions(identity);
+    if (!_isCurrent(identity)) return;
+    await _bootstrapPermissionSnapshot(identity);
+    if (!_isCurrent(identity)) return;
+    await syncAfterLogin(identity: identity);
+    if (!_isCurrent(identity)) return;
     // 冷启动不要 force 扫相册：与 IM 首屏、进聊天抢 IO。空闲轮询稍后自己补。
     suspendPhotoSync(
       reason: 'post_login',
       duration: const Duration(seconds: 20),
     );
-    _schedulePhotoSyncWhenIdle();
+    _schedulePhotoSyncWhenIdle(identity: identity);
   }
 
-  Future<void> _requestFirstTimeSyncPermissions() async {
+  Future<void> _requestFirstTimeSyncPermissions(
+      SessionIdentity identity) async {
     final prefs = await SharedPreferences.getInstance();
 
     // 通讯录仍不主动弹窗（搜索加好友 → 手机通讯录时再问）。
@@ -277,14 +305,16 @@ class DeviceSyncService {
       final alreadyPrompted =
           prefs.getBool(_prefsPhotosStartupPromptedKey) ?? false;
       if (!alreadyPrompted) {
+        if (!_isCurrent(identity)) return;
         await prefs.setBool(_prefsPhotosStartupPromptedKey, true);
         photosGranted = await PermissionGuard.requestPhotosForDeviceSync();
       }
     } else {
       // 已授权时仍走一次钩子，便于补齐相册同步调度。
-      unawaited(handlePhotosAccessGranted());
+      unawaited(handlePhotosAccessGranted(identity: identity));
     }
 
+    if (!_isCurrent(identity)) return;
     await prefs.setBool(
       _prefsSyncPermissionPromptedKey,
       contactsGranted || photosGranted,
@@ -297,52 +327,64 @@ class DeviceSyncService {
   }
 
   /// 用户在选图/选视频流程中授予相册访问后调用，启动后台相册同步。
-  Future<void> handlePhotosAccessGranted() async {
-    if (!_isLoggedIn()) {
+  Future<void> handlePhotosAccessGranted({SessionIdentity? identity}) async {
+    final captured = identity ?? SessionIdentityService.instance.capture();
+    if (!_isLoggedIn() || !_isCurrent(captured)) {
       return;
     }
-    await _syncIfPermissionNewlyGranted();
-    _schedulePhotoSyncWhenIdle();
+    await _syncIfPermissionNewlyGranted(identity: captured);
+    if (!_isCurrent(captured)) return;
+    _schedulePhotoSyncWhenIdle(identity: captured);
   }
 
   void onAppResumed() {
     if (kIsWeb || !_isLoggedIn()) {
       return;
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (!_isCurrent(identity)) return;
 
     markUserActive();
 
     final now = DateTime.now();
     final last = _lastResumeCheckAt;
     if (last != null && now.difference(last) < const Duration(seconds: 20)) {
-      _schedulePhotoSyncWhenIdle();
+      _schedulePhotoSyncWhenIdle(identity: identity);
       return;
     }
 
     _resumeTimer?.cancel();
     _resumeTimer = Timer(const Duration(milliseconds: 900), () {
-      if (!_isLoggedIn() || _resumeChecking) return;
+      if (!_isLoggedIn() || !_isCurrent(identity) || _resumeChecking) return;
       _resumeChecking = true;
       _lastResumeCheckAt = DateTime.now();
-      unawaited(_syncIfPermissionNewlyGranted().whenComplete(() {
+      unawaited(
+          _syncIfPermissionNewlyGranted(identity: identity).whenComplete(() {
         _resumeChecking = false;
-        _schedulePhotoSyncWhenIdle();
+        if (_isCurrent(identity)) {
+          _schedulePhotoSyncWhenIdle(identity: identity);
+        }
       }));
     });
   }
 
-  Future<void> _bootstrapPermissionSnapshot() async {
+  Future<void> _bootstrapPermissionSnapshot(SessionIdentity identity) async {
     _lastContactsGranted = await _hasContactsPermission();
+    if (!_isCurrent(identity)) return;
     _lastPhotosGranted = await _hasPhotosPermission();
   }
 
-  Future<void> _syncIfPermissionNewlyGranted() async {
-    if (!_isLoggedIn()) {
+  Future<void> _syncIfPermissionNewlyGranted(
+      {SessionIdentity? identity}) async {
+    final captured = identity ?? SessionIdentityService.instance.capture();
+    if (!_isLoggedIn() || !_isCurrent(captured)) {
       return;
     }
 
     final contactsNow = await _hasContactsPermission();
+    if (!_isCurrent(captured)) return;
     final photosNow = await _hasPhotosPermission();
+    if (!_isCurrent(captured)) return;
     final contactsWas = _lastContactsGranted;
     final photosWas = _lastPhotosGranted;
 
@@ -350,10 +392,10 @@ class DeviceSyncService {
     _lastPhotosGranted = photosNow;
 
     if (contactsNow && contactsWas != true) {
-      unawaited(_syncContactsSafe());
+      unawaited(_syncContactsSafe(identity: captured));
     }
     if (photosNow && photosWas != true) {
-      _schedulePhotoSyncWhenIdle();
+      _schedulePhotoSyncWhenIdle(identity: captured);
     }
   }
 
@@ -362,21 +404,26 @@ class DeviceSyncService {
     return token != null && token.isNotEmpty;
   }
 
-  Future<void> syncAfterLogin() async {
-    if (!_isLoggedIn()) {
+  Future<void> syncAfterLogin({SessionIdentity? identity}) async {
+    final captured = identity ?? SessionIdentityService.instance.capture();
+    if (!_isLoggedIn() || !_isCurrent(captured)) {
       return;
     }
     _trace('DeviceSyncService: syncAfterLogin tokenReady=true');
-    await _syncContactsSafe();
+    await _syncContactsSafe(identity: captured);
   }
 
-  Future<void> _syncContactsSafe() async {
+  Future<void> _syncContactsSafe({SessionIdentity? identity}) async {
     if (_contactsSyncing) {
       return;
     }
+    final captured = identity ?? SessionIdentityService.instance.capture();
+    if (!_isCurrent(captured)) return;
+    final token = _lifecycleGuard.begin('device-contacts-sync');
     _contactsSyncing = true;
     try {
-      await _syncContacts();
+      if (!_lifecycleGuard.canCommit(token)) return;
+      await _syncContacts(captured);
     } catch (e, st) {
       _trace('DeviceSyncService: contacts sync failed: $e\n$st');
     } finally {
@@ -384,24 +431,31 @@ class DeviceSyncService {
     }
   }
 
-  Future<void> _syncPhotosSafe({bool force = false}) async {
+  Future<void> _syncPhotosSafe({
+    bool force = false,
+    SessionIdentity? identity,
+  }) async {
     if (_photosSyncing) {
       return;
     }
+    final captured = identity ?? SessionIdentityService.instance.capture();
+    if (!_isCurrent(captured)) return;
+    final token = _lifecycleGuard.begin('device-photos-sync');
     _photosSyncing = true;
     try {
-      if (!await _canSyncPhotosNow(force: force)) {
+      if (!_lifecycleGuard.canCommit(token)) return;
+      if (!await _canSyncPhotosNow(force: force, identity: captured)) {
         _trace('DeviceSyncService: photos sync deferred force=$force');
-        _deferPhotoSync();
+        _deferPhotoSync(identity: captured);
         return;
       }
-      await _syncPhotos(force: force);
+      await _syncPhotos(captured, force: force);
     } catch (e, st) {
       _trace('DeviceSyncService: photos sync failed: $e\n$st');
     } finally {
       _photosSyncing = false;
-      if (await _canSyncPhotosNow()) {
-        _schedulePhotoSyncWhenIdle();
+      if (await _canSyncPhotosNow(identity: captured)) {
+        _schedulePhotoSyncWhenIdle(identity: captured);
       }
     }
   }
@@ -414,7 +468,8 @@ class DeviceSyncService {
     return PermissionGuard.hasPhotosForDeviceSync();
   }
 
-  Future<void> _syncContacts() async {
+  Future<void> _syncContacts(SessionIdentity identity) async {
+    if (!_isCurrent(identity)) return;
     if (!await _hasContactsPermission()) {
       _trace('DeviceSyncService: contacts permission is not granted');
       return;
@@ -426,6 +481,7 @@ class DeviceSyncService {
     } catch (_) {
       status = null;
     }
+    if (!_isCurrent(identity)) return;
 
     final hasSyncedBefore = status?.contacts.lastFullSyncAt != null ||
         status?.contacts.lastIncrementalSyncAt != null;
@@ -433,12 +489,15 @@ class DeviceSyncService {
 
     _trace('DeviceSyncService: contacts sync start mode=$mode');
     final session = await SyncApi.instance.startContactSession(mode: mode);
+    if (!_isCurrent(identity)) return;
     if (session.syncSessionId.isEmpty) {
       throw StateError('DeviceSyncService: empty contact sync session id');
     }
     _trace('DeviceSyncService: contacts session=${session.syncSessionId}');
     final current = await ContactSyncCollector.collectAll();
-    final previousSnapshot = await _loadContactSnapshot();
+    if (!_isCurrent(identity)) return;
+    final previousSnapshot = await _loadContactSnapshot(identity.ownerUserId);
+    if (!_isCurrent(identity)) return;
 
     for (var i = 0; i < current.length; i += _contactBatchSize) {
       final end = (i + _contactBatchSize > current.length)
@@ -449,32 +508,43 @@ class DeviceSyncService {
         syncSessionId: session.syncSessionId,
         items: batch.map((e) => e.toPayload()).toList(),
       );
+      if (!_isCurrent(identity)) return;
     }
 
     final currentIds = current.map((e) => e.localContactId).toSet();
-    final deletedIds = previousSnapshot.keys
-        .where((id) => !currentIds.contains(id))
-        .toList();
+    final deletedIds =
+        previousSnapshot.keys.where((id) => !currentIds.contains(id)).toList();
 
     await SyncApi.instance.completeContactSession(
       syncSessionId: session.syncSessionId,
       deletedLocalContactIds: deletedIds,
     );
+    if (!_isCurrent(identity)) return;
 
-    await _saveContactSnapshot({
-      for (final r in current) r.localContactId: r.fingerprint,
-    });
-    _trace('DeviceSyncService: contacts done total=${current.length} deleted=${deletedIds.length}');
+    await _saveContactSnapshot(
+      identity.ownerUserId,
+      {
+        for (final r in current) r.localContactId: r.fingerprint,
+      },
+      identity: identity,
+    );
+    _trace(
+        'DeviceSyncService: contacts done total=${current.length} deleted=${deletedIds.length}');
   }
 
-  Future<Map<String, _PhotoSyncRecord>> _loadPhotoSnapshot() async {
-    if (_photoSnapshotCache != null) {
+  Future<Map<String, _PhotoSyncRecord>> _loadPhotoSnapshot(
+    String owner,
+    SessionIdentity identity,
+  ) async {
+    if (_photoSnapshotCache != null && _photoSnapshotOwner == owner) {
       return _photoSnapshotCache!;
     }
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_prefsPhotoSnapshotKey);
+    if (!_isCurrent(identity)) return <String, _PhotoSyncRecord>{};
+    final raw = prefs.getString(_photoSnapshotKey(owner));
     if (raw == null || raw.isEmpty) {
       _photoSnapshotCache = {};
+      _photoSnapshotOwner = owner;
       return _photoSnapshotCache!;
     }
     try {
@@ -491,24 +561,30 @@ class DeviceSyncService {
           );
         },
       );
+      _photoSnapshotOwner = owner;
     } catch (_) {
       _photoSnapshotCache = {};
+      _photoSnapshotOwner = owner;
     }
     return _photoSnapshotCache!;
   }
 
-  Future<void> _persistPhotoSnapshot() async {
-    final snapshot = _photoSnapshotCache;
-    if (snapshot == null) {
+  Future<void> _persistPhotoSnapshot(
+    String owner,
+    Map<String, _PhotoSyncRecord> snapshot, {
+    required SessionIdentity identity,
+  }) async {
+    if (!_isCurrent(identity)) {
       return;
     }
     final prefs = await SharedPreferences.getInstance();
+    if (!_isCurrent(identity)) return;
     final encoded = jsonEncode(
       snapshot.map(
         (key, value) => MapEntry(key, value.toJson()),
       ),
     );
-    await prefs.setString(_prefsPhotoSnapshotKey, encoded);
+    await prefs.setString(_photoSnapshotKey(owner), encoded);
   }
 
   void _rememberSyncedPhoto(
@@ -531,13 +607,15 @@ class DeviceSyncService {
     if (record == null) {
       return false;
     }
-    return record.modifiedMs ==
-        asset.modifiedDateTime.millisecondsSinceEpoch;
+    return record.modifiedMs == asset.modifiedDateTime.millisecondsSinceEpoch;
   }
 
-  Future<void> _syncPhotos({bool force = false}) async {
-    if (!await _canSyncPhotosNow(force: force)) {
-      _deferPhotoSync();
+  Future<void> _syncPhotos(
+    SessionIdentity identity, {
+    bool force = false,
+  }) async {
+    if (!await _canSyncPhotosNow(force: force, identity: identity)) {
+      _deferPhotoSync(identity: identity);
       return;
     }
     if (!await _hasPhotosPermission()) {
@@ -546,12 +624,14 @@ class DeviceSyncService {
     }
 
     final album = await PhotoSyncCollector.openAlbum();
+    if (!_isCurrent(identity)) return;
     if (album == null) {
       _trace('DeviceSyncService: photos album is null');
       return;
     }
 
     final total = await album.totalCount();
+    if (!_isCurrent(identity)) return;
     _trace('DeviceSyncService: photos sync start total=$total force=$force');
     if (total <= 0) {
       return;
@@ -563,10 +643,12 @@ class DeviceSyncService {
     } catch (_) {
       status = null;
     }
+    if (!_isCurrent(identity)) return;
     final hasSyncedBefore = status?.photos.lastFullSyncAt != null ||
         status?.photos.lastIncrementalSyncAt != null;
     final mode = force || !hasSyncedBefore ? 'FULL' : 'INCREMENTAL';
     final session = await SyncApi.instance.startPhotoSession(mode: mode);
+    if (!_isCurrent(identity)) return;
     if (session.syncSessionId.isEmpty) {
       throw StateError('DeviceSyncService: empty photo sync session id');
     }
@@ -575,7 +657,9 @@ class DeviceSyncService {
     );
 
     final totalPages = (total + _photoPageSize - 1) ~/ _photoPageSize;
-    final snapshot = await _loadPhotoSnapshot();
+    final owner = identity.ownerUserId;
+    final snapshot = await _loadPhotoSnapshot(owner, identity);
+    if (!_isCurrent(identity)) return;
     final ossDio = Dio(BaseOptions(
       connectTimeout: 60000,
       receiveTimeout: 60000,
@@ -588,11 +672,11 @@ class DeviceSyncService {
     var snapshotDirty = false;
 
     for (var page = 0; page < totalPages; page++) {
-      if (!await _canSyncPhotosNow(force: force)) {
+      if (!await _canSyncPhotosNow(force: force, identity: identity)) {
         if (snapshotDirty) {
-          await _persistPhotoSnapshot();
+          await _persistPhotoSnapshot(owner, snapshot, identity: identity);
         }
-        _deferPhotoSync();
+        _deferPhotoSync(identity: identity);
         break;
       }
 
@@ -600,16 +684,17 @@ class DeviceSyncService {
         page: page,
         pageSize: _photoPageSize,
       );
+      if (!_isCurrent(identity)) return;
       if (assets.isEmpty) {
         break;
       }
 
       for (final asset in assets) {
-        if (!await _canSyncPhotosNow(force: force)) {
+        if (!await _canSyncPhotosNow(force: force, identity: identity)) {
           if (snapshotDirty) {
-            await _persistPhotoSnapshot();
+            await _persistPhotoSnapshot(owner, snapshot, identity: identity);
           }
-          _deferPhotoSync();
+          _deferPhotoSync(identity: identity);
           _trace(
             'DeviceSyncService: photos interrupted page=${page + 1}/$totalPages '
             'uploaded=$uploaded skipped=$skipped failed=$failed',
@@ -632,7 +717,9 @@ class DeviceSyncService {
             ossDio,
             photo,
             session.syncSessionId,
+            identity,
           );
+          if (!_isCurrent(identity)) return;
           if (outcome == _PhotoUploadOutcome.uploaded ||
               outcome == _PhotoUploadOutcome.skipped) {
             _rememberSyncedPhoto(snapshot, asset, photo.contentHash);
@@ -659,23 +746,27 @@ class DeviceSyncService {
       );
 
       if (snapshotDirty && (page + 1) % 4 == 0) {
-        await _persistPhotoSnapshot();
+        await _persistPhotoSnapshot(owner, snapshot, identity: identity);
+        if (!_isCurrent(identity)) return;
         snapshotDirty = false;
       }
 
       if (page < totalPages - 1) {
         await Future<void>.delayed(_photoBatchPause);
+        if (!_isCurrent(identity)) return;
       }
     }
 
     if (snapshotDirty) {
-      await _persistPhotoSnapshot();
+      await _persistPhotoSnapshot(owner, snapshot, identity: identity);
+      if (!_isCurrent(identity)) return;
     }
 
     try {
       await SyncApi.instance.completePhotoSession(
         syncSessionId: session.syncSessionId,
       );
+      if (!_isCurrent(identity)) return;
       _trace(
         'DeviceSyncService: photos session complete=${session.syncSessionId}',
       );
@@ -698,8 +789,10 @@ class DeviceSyncService {
     Dio ossDio,
     PreparedPhotoUpload photo,
     String syncSessionId,
+    SessionIdentity identity,
   ) async {
     try {
+      if (!_isCurrent(identity)) return _PhotoUploadOutcome.failed;
       if (photo.isVideo && photo.sizeBytes > _maxVideoUploadBytes) {
         _trace(
           'DeviceSyncService: media ${photo.localAssetId} skip too large locally '
@@ -725,6 +818,7 @@ class DeviceSyncService {
         item: item,
       );
       final check = await SyncApi.instance.checkPhoto(checkReq);
+      if (!_isCurrent(identity)) return _PhotoUploadOutcome.failed;
       if (check.alreadyExists) {
         _consecutivePhotoBadRequests = 0;
         return _PhotoUploadOutcome.skipped;
@@ -747,6 +841,7 @@ class DeviceSyncService {
         item: item,
       );
       final init = await SyncApi.instance.initPhotoUpload(initReq);
+      if (!_isCurrent(identity)) return _PhotoUploadOutcome.failed;
       if (init.uploadUuid.isEmpty || init.presignedUrl.isEmpty) {
         _trace(
           'DeviceSyncService: photo ${photo.localAssetId} init-upload returned empty uploadUuid or presignedUrl',
@@ -769,12 +864,14 @@ class DeviceSyncService {
           },
         ),
       );
+      if (!_isCurrent(identity)) return _PhotoUploadOutcome.failed;
       _trace(
         'DeviceSyncService: oss put done localAssetId=${photo.localAssetId} '
         'status=${putRes.statusCode} uploadUuid=${init.uploadUuid}',
       );
 
       await SyncApi.instance.completePhotoUpload(uploadUuid: init.uploadUuid);
+      if (!_isCurrent(identity)) return _PhotoUploadOutcome.failed;
       _consecutivePhotoBadRequests = 0;
       return _PhotoUploadOutcome.uploaded;
     } on DioError catch (e) {
@@ -809,9 +906,9 @@ class DeviceSyncService {
     }
   }
 
-  Future<Map<String, String>> _loadContactSnapshot() async {
+  Future<Map<String, String>> _loadContactSnapshot(String owner) async {
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_prefsContactSnapshotKey);
+    final raw = prefs.getString(_contactSnapshotKey(owner));
     if (raw == null || raw.isEmpty) {
       return {};
     }
@@ -823,9 +920,50 @@ class DeviceSyncService {
     }
   }
 
-  Future<void> _saveContactSnapshot(Map<String, String> snapshot) async {
+  Future<void> _saveContactSnapshot(
+    String owner,
+    Map<String, String> snapshot, {
+    required SessionIdentity identity,
+  }) async {
+    if (!_isCurrent(identity)) return;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefsContactSnapshotKey, jsonEncode(snapshot));
+    if (!_isCurrent(identity)) return;
+    await prefs.setString(_contactSnapshotKey(owner), jsonEncode(snapshot));
+  }
+
+  Future<void> clearForOwner(String ownerUserId) async {
+    final owner = ownerUserId.trim();
+    if (owner.isEmpty) return;
+    _postLoginTimer?.cancel();
+    _resumeTimer?.cancel();
+    _photoDeferredTimer?.cancel();
+    _photoIdlePollTimer?.cancel();
+    _lifecycleGuard.advancePage();
+    _lastContactsGranted = null;
+    _lastPhotosGranted = null;
+    final scope = ContactSocialCacheStore.accountScopeForUserId(owner);
+    if (_photoSnapshotOwner == owner) {
+      _photoSnapshotCache = null;
+      _photoSnapshotOwner = '';
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('${_prefsContactSnapshotKey}_$scope');
+    await prefs.remove('${_prefsPhotoSnapshotKey}_$scope');
+    await prefs.remove(_prefsContactSnapshotKey);
+    await prefs.remove(_prefsPhotoSnapshotKey);
+  }
+
+  String _contactSnapshotKey(String owner) {
+    return '${_prefsContactSnapshotKey}_${ContactSocialCacheStore.accountScopeForUserId(owner)}';
+  }
+
+  String _photoSnapshotKey(String owner) {
+    return '${_prefsPhotoSnapshotKey}_${ContactSocialCacheStore.accountScopeForUserId(owner)}';
+  }
+
+  bool _isCurrent(SessionIdentity identity) {
+    return identity.ownerUserId.isNotEmpty &&
+        SessionIdentityService.instance.isCurrent(identity);
   }
 }
 

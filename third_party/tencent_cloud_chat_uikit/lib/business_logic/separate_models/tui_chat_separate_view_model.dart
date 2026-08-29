@@ -13,6 +13,7 @@ import 'package:tencent_cloud_chat_demo/src/utils/conversation_preview_history_s
 import 'package:tencent_cloud_chat_demo/src/services/silent_archive_service.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/web_chat_open_policy.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_open_perf_log.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/mobile_async_commit_guard.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_sdk/enum/get_group_message_read_member_list_filter.dart';
 import 'package:tencent_cloud_chat_sdk/enum/group_member_filter_enum.dart';
@@ -42,6 +43,8 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_text_elem.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_text_elem.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_video_elem.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_video_elem.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_sound_elem.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_sound_elem.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_list_result.dart'
@@ -50,6 +53,8 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_change_info.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_change_info.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_receipt.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_receipt.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_online_url.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_online_url.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_msg_create_info_result.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_msg_create_info_result.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_user_full_info.dart'
@@ -65,6 +70,11 @@ import 'package:tencent_cloud_chat_uikit/business_logic/services/group_member_st
 import 'package:tencent_cloud_chat_uikit/data_services/profile/user_profile_local_bridge.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/controllers/history_pagination_controller.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/chat_ui_state_store.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_reconciliation_coordinator.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_history_coverage.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_history_batch.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_delta.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_reconciliation_identity.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
 import 'package:tencent_cloud_chat_uikit/ui/controllers/chat_composer_ui_state.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_conversation_view_model.dart';
@@ -125,14 +135,20 @@ class _ResolvedSendTarget {
 
 class OptimisticImagePlaceholderInput {
   const OptimisticImagePlaceholderInput({
-    required this.imagePath,
+    this.imagePath = '',
     this.imageWidth,
     this.imageHeight,
+    this.sourcePending = false,
+    this.batchId,
+    this.batchIndex,
   });
 
   final String imagePath;
   final int? imageWidth;
   final int? imageHeight;
+  final bool sourcePending;
+  final String? batchId;
+  final int? batchIndex;
 }
 
 class TUIChatSeparateViewModel extends ChangeNotifier {
@@ -178,6 +194,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
   bool _roamingReconcileInFlight = false;
   String conversationID = "";
   ConvType? conversationType;
+  final MobileAsyncCommitGuard _mediaCommitGuard = MobileAsyncCommitGuard();
 
   /// C2C / 群聊历史都以 IM SDK 云端页为准。运营公众号仍走本地兜底。
   bool get usesOfficialSdkHistory {
@@ -190,8 +207,16 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     return false;
   }
 
-  bool get haveMoreData => _pagination.haveMoreData;
-  set haveMoreData(bool value) => _pagination.haveMoreData = value;
+  bool get haveMoreData =>
+      _pagination.haveMoreData ||
+      globalModel.memoryWindowMissingOlder(conversationID);
+  set haveMoreData(bool value) {
+    _pagination.haveMoreData = value;
+    if (!value) {
+      globalModel.clearMemoryWindowMissingOlder(conversationID);
+    }
+  }
+
   bool get haveMoreLatestData =>
       _pagination.haveMoreLatestData ||
       globalModel.memoryWindowMissingNewer(conversationID);
@@ -311,9 +336,20 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
   Map<String, V2TimMessage> _readReceiptMap = {};
   Timer? _readReceiptFlushTimer;
   Timer? _groupMarkReadDebounce;
+  int _chatOpenGeneration = 0;
+  Future<void>? _openProfileEnrichmentInFlight;
+  List<V2TimGroupMemberFullInfo?>? _preGroupMemberListForOpen;
+  int _groupMarkReadNotLoggedInRetries = 0;
   int _lastGroupMarkReadAtMs = 0;
   static const _groupMarkReadMinIntervalMs = 5000;
   static const _groupMarkReadFrequencyBlockBackoffMs = 12000;
+  static const _groupMarkReadNotLoggedInRetryLimit = 5;
+
+  bool _isChatGenerationCurrent(int generation, String convID) {
+    return !_disposed &&
+        generation == _chatOpenGeneration &&
+        conversationID == _storageConversationId(convID);
+  }
 
   set groupUserShowName(Map<String, String> value) {
     _groupUserShowName = value;
@@ -616,6 +652,8 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
   }
 
   void getUserShowName(List<String> userIDs) async {
+    final generation = _chatOpenGeneration;
+    final scheduledConversationID = conversationID;
     final List<String> filteredList = userIDs
         .where((element) => !_groupUserShowName.containsKey(element))
         .toList();
@@ -629,6 +667,9 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       final res = await TencentImSDKPlugin.manager
           ?.getGroupManager()
           .getGroupMembersInfo(groupID: groupID, memberList: filteredList);
+      if (!_isChatGenerationCurrent(generation, scheduledConversationID)) {
+        return;
+      }
       if (res?.code == 0 && res?.data != null) {
         final data = res!.data!;
         GroupMemberStore.instance.putMembers(groupID, data);
@@ -665,7 +706,16 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     setInputField = onChangeInputField;
     conversationType = convType;
     // 消息列表 / hydrate / 归档一律用裸会话 ID（@TGS#…），勿带 group_。
+    final previousConversationID = conversationID;
     conversationID = _storageConversationId(convID);
+    if (previousConversationID != conversationID) {
+      _mediaCommitGuard.advanceConversation();
+    }
+    _disposed = false;
+    final initGeneration = ++_chatOpenGeneration;
+    final initConversationID = conversationID;
+    _preGroupMemberListForOpen = preGroupMemberList;
+    _openProfileEnrichmentInFlight = null;
     _pagination.resetForConversationInit();
 
     var warmOnStorage = globalModel.rawMessageCount(conversationID);
@@ -688,7 +738,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     if (idMismatchRisk) {
       final aliasWindow = globalModel.rawMessageList(convID);
       if (aliasWindow != null && aliasWindow.isNotEmpty) {
-        globalModel.setMessageList(
+        final commit = globalModel.setMessageList(
           conversationID,
           List<V2TimMessage>.from(aliasWindow),
           needResetNewMessageCount: false,
@@ -702,7 +752,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
           conversationID,
           mayHaveOlder: mayOlder,
         );
-        warmOnStorage = globalModel.rawMessageCount(conversationID);
+        warmOnStorage = commit.rawCount;
         ChatHistoryTrace.log(
           'init_conv_migrate_alias_window',
           conversationID: conversationID,
@@ -735,7 +785,6 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     }
     haveMoreLatestData = false;
 
-    _disposed = false;
     _groupType = null;
     isGroupExist = true;
     _groupInfo = null;
@@ -799,69 +848,14 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
           globalModel.rawMessageCount(convID) > 0;
       if (!skipOpenNotify) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!_disposed) {
+          if (_isChatGenerationCurrent(
+            initGeneration,
+            initConversationID,
+          )) {
             _notify();
           }
         });
       }
-      Future.delayed(const Duration(milliseconds: 10), () async {
-        Future.delayed(const Duration(milliseconds: 1200), () {
-          globalModel.refreshGroupApplicationList();
-        });
-        loadGroupInfo(groupID ?? convID);
-        final resolvedGid = groupID ?? convID;
-        if (preGroupMemberList != null) {
-          groupMemberList =
-              List<V2TimGroupMemberFullInfo?>.from(preGroupMemberList);
-
-          // Update GroupMemberStore with preGroupMemberList
-          GroupMemberStore.instance.putMembers(resolvedGid, preGroupMemberList);
-
-          final fromList = preGroupMemberList.firstWhereOrNull(
-              (e) => e?.userID == selfModel.loginInfo?.userID);
-          if (fromList != null) {
-            selfMemberInfo = _mergeSelfMemberPreservingActiveMute(
-              existing: selfMemberInfo,
-              incoming: fromList,
-            );
-          }
-          groupMemberListComplete = true;
-        } else {
-          if (selfMemberInfo == null) {
-            await loadSelfMemberInfo(groupID: resolvedGid);
-          }
-          // 等冷开并行 peek 注入后再跑一次 open-shell（含 self + sender）。
-          unawaited(_loadGroupMembersOpenShellOnce(groupID: resolvedGid));
-        }
-        if (selfMemberInfo == null) {
-          await loadSelfMemberInfo(groupID: resolvedGid);
-        }
-      });
-    } else {
-      Future.delayed(const Duration(milliseconds: 10), () async {
-        final List<V2TimFriendInfoResult>? friendRes =
-            await _friendshipServices.getFriendsInfo(userIDList: [convID]);
-        if (friendRes != null && friendRes.isNotEmpty) {
-          final V2TimFriendInfoResult friendInfoResult = friendRes[0];
-          currentChatUserInfo = V2TimGroupMemberFullInfo(
-              userID: convID,
-              faceUrl: friendInfoResult.friendInfo?.userProfile?.faceUrl,
-              nickName: friendInfoResult.friendInfo?.userProfile?.nickName,
-              friendRemark: friendInfoResult.friendInfo?.friendRemark);
-        } else {
-          final List<V2TimUserFullInfo>? userRes =
-              await _friendshipServices.getUsersInfo(userIDList: [convID]);
-          if (userRes != null && userRes.isNotEmpty) {
-            final V2TimUserFullInfo userFullInfo = userRes[0];
-            currentChatUserInfo = V2TimGroupMemberFullInfo(
-              userID: convID,
-              faceUrl: userFullInfo.faceUrl,
-              nickName: userFullInfo.nickName,
-            );
-          }
-        }
-        _notify();
-      });
     }
 
     final hasWarmOnStorage =
@@ -876,6 +870,91 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     globalModel.removeRoamingSyncListener(_onRoamingSyncFinished);
     globalModel.addRoamingSyncListener(_onRoamingSyncFinished);
     _isInit = true;
+  }
+
+  /// Runs profile/member work only after the host chat reaches Interactive.
+  /// It is single-flight for the current conversation generation.
+  Future<void> runPostOpenProfileEnrichment() {
+    final inFlight = _openProfileEnrichmentInFlight;
+    if (inFlight != null) return inFlight;
+    final generation = _chatOpenGeneration;
+    final scheduledConversationID = conversationID;
+    final task = _runPostOpenProfileEnrichmentImpl(
+      generation: generation,
+      scheduledConversationID: scheduledConversationID,
+    );
+    _openProfileEnrichmentInFlight = task;
+    return task.whenComplete(() {
+      if (identical(_openProfileEnrichmentInFlight, task)) {
+        _openProfileEnrichmentInFlight = null;
+      }
+    });
+  }
+
+  Future<void> _runPostOpenProfileEnrichmentImpl({
+    required int generation,
+    required String scheduledConversationID,
+  }) async {
+    bool current() =>
+        _isChatGenerationCurrent(generation, scheduledConversationID);
+    if (!current()) return;
+    if (conversationType == ConvType.group) {
+      globalModel.refreshGroupApplicationList();
+      final resolvedGid = _groupID ?? scheduledConversationID;
+      await loadGroupInfo(resolvedGid);
+      if (!current()) return;
+      final preloaded = _preGroupMemberListForOpen;
+      if (preloaded != null) {
+        groupMemberList = List<V2TimGroupMemberFullInfo?>.from(preloaded);
+        GroupMemberStore.instance.putMembers(resolvedGid, preloaded);
+        final fromList = preloaded.firstWhereOrNull(
+          (member) => member?.userID == selfModel.loginInfo?.userID,
+        );
+        if (fromList != null) {
+          selfMemberInfo = _mergeSelfMemberPreservingActiveMute(
+            existing: selfMemberInfo,
+            incoming: fromList,
+          );
+        }
+        groupMemberListComplete = true;
+      } else {
+        if (selfMemberInfo == null) {
+          await loadSelfMemberInfo(groupID: resolvedGid);
+          if (!current()) return;
+        }
+        await _loadGroupMembersOpenShellOnce(groupID: resolvedGid);
+      }
+      if (current() && selfMemberInfo == null) {
+        await loadSelfMemberInfo(groupID: resolvedGid);
+      }
+      return;
+    }
+    final friendRes = await _friendshipServices.getFriendsInfo(
+      userIDList: <String>[scheduledConversationID],
+    );
+    if (!current()) return;
+    if (friendRes != null && friendRes.isNotEmpty) {
+      final friend = friendRes.first.friendInfo;
+      currentChatUserInfo = V2TimGroupMemberFullInfo(
+        userID: scheduledConversationID,
+        faceUrl: friend?.userProfile?.faceUrl,
+        nickName: friend?.userProfile?.nickName,
+        friendRemark: friend?.friendRemark,
+      );
+    } else {
+      final users = await _friendshipServices.getUsersInfo(
+        userIDList: <String>[scheduledConversationID],
+      );
+      if (!current()) return;
+      if (users != null && users.isNotEmpty) {
+        currentChatUserInfo = V2TimGroupMemberFullInfo(
+          userID: scheduledConversationID,
+          faceUrl: users.first.faceUrl,
+          nickName: users.first.nickName,
+        );
+      }
+    }
+    if (current()) _notify();
   }
 
   void _onRoamingSyncFinished() {
@@ -1529,7 +1608,28 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
   }
 
   /// 内存窗口裁掉较新端后，回到真正的全局最新底部。
-  Future<bool> reloadNewestMessageWindow({int? count}) async {
+  Future<bool> reloadNewestMessageWindow({
+    int? count,
+    bool allowWhileReadingHistory = false,
+  }) async {
+    final currentPosition = globalModel.getMessageListPosition(conversationID);
+    if (!allowWhileReadingHistory &&
+        (globalModel.isMemoryWindowSuppressed(conversationID) ||
+            globalModel.isReadingHistory(conversationID) ||
+            currentPosition == HistoryMessagePosition.awayTwoScreen ||
+            currentPosition == HistoryMessagePosition.notShowLatest)) {
+      ChatHistoryTrace.log(
+        'reload_newest_message_window_deferred_reading_history',
+        conversationID: conversationID,
+        extras: <String, Object?>{
+          'position': currentPosition.name,
+          'memorySuppressed':
+              globalModel.isMemoryWindowSuppressed(conversationID),
+          'missingNewer': globalModel.memoryWindowMissingNewer(conversationID),
+        },
+      );
+      return false;
+    }
     final fetchCount = count ?? HistoryMessageDartConstant.getCount;
     ChatHistoryTrace.log(
       'reload_newest_message_window_start',
@@ -1545,17 +1645,37 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       HistoryMessagePosition.bottom,
       notify: false,
     );
-    final ok = await loadChatRecord(
-      count: fetchCount,
-      forceReloadNewest: true,
-      direction: LoadDirection.previous,
-    );
+    bool ok;
+    try {
+      ok = await loadChatRecord(
+        count: fetchCount,
+        forceReloadNewest: true,
+        direction: LoadDirection.previous,
+      );
+    } catch (_) {
+      // The temporary bottom state is an implementation detail of this
+      // reload. Do not leave the message model at bottom when the fetch did
+      // not complete, otherwise unread/bottom decisions race with a false
+      // position on the next inbound message.
+      globalModel.setMessageListPosition(
+        conversationID,
+        currentPosition,
+        notify: true,
+      );
+      rethrow;
+    }
     if (ok) {
       globalModel.clearMemoryWindowMissingNewer(conversationID);
       haveMoreLatestData = false;
       globalModel.setMessageListPosition(
         conversationID,
         HistoryMessagePosition.bottom,
+        notify: true,
+      );
+    } else {
+      globalModel.setMessageListPosition(
+        conversationID,
+        currentPosition,
         notify: true,
       );
     }
@@ -1621,7 +1741,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
             lastMsgSeq: lastMsgSeq,
           );
     _lastPeekIsFinished = peekResult.isFinished;
-    if (usesOfficialSdkHistory) {
+    if (usesOfficialSdkHistory && conversationType == ConvType.c2c) {
       _rememberC2cSdkOlderPage(peekResult.messageList);
     }
     var messages = peekResult.messageList;
@@ -2019,6 +2139,13 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
 
   /// 用户上滑读历史或列表仍在滚动时，暂停暖开后台补旧，避免与视口/窗口裁剪对打。
   bool _shouldDeferBackgroundHistoryFill(String convId) {
+    // Context-menu dismissal owns the list geometry until its restore gate
+    // settles. Background warm-fill must not commit another page in that
+    // window, otherwise it changes the sliver extent underneath the anchor.
+    if (globalModel.isMessageContextMenuOverlayOpen ||
+        globalModel.isContextMenuViewportRestoreActive(convId)) {
+      return true;
+    }
     if (globalModel.isChatListUserScrolling) {
       return true;
     }
@@ -2138,6 +2265,8 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
         );
         return;
       }
+      final menuGeneration =
+          globalModel.messageContextMenuTransactionGeneration;
       final existing = List<V2TimMessage>.from(
         globalModel.mergedAliasMessageList(convId),
       );
@@ -2145,7 +2274,9 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
         return;
       }
       final isOfficialFill = usesOfficialSdkHistory;
-      final oldest = isOfficialFill
+      final isC2cOfficialFill =
+          isOfficialFill && conversationType == ConvType.c2c;
+      final oldest = isC2cOfficialFill
           ? HistoryPaginationAnchor.c2cOfficialOlderCursor(
               newestFirstWindow: existing,
               lastSdkPageTail: _c2cSdkOlderPageTail,
@@ -2216,6 +2347,20 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
         );
         return;
       }
+      // The request may have started before a context menu opened. Re-check
+      // the transaction generation immediately before mutating the visible
+      // projection so an in-flight page cannot cross the menu boundary.
+      if (menuGeneration !=
+              globalModel.messageContextMenuTransactionGeneration ||
+          globalModel.isMessageContextMenuOverlayOpen ||
+          globalModel.isContextMenuViewportRestoreActive(convId)) {
+        _deferFillTowardOlderHistoryResume(
+          generation: generation,
+          convId: convId,
+          fetchCount: fetchCount,
+        );
+        return;
+      }
       _commitHistoricalMessages(
         peek.messageList,
         markInitialLoaded: true,
@@ -2224,7 +2369,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       );
       // SDK 游标必须与已提交窗口保持一致。请求完成后若因用户滚动而延期，
       // 不能提前推进游标，否则手动上拉会从未写入页的尾部继续，整页历史被跳过。
-      if (isOfficialFill) {
+      if (isC2cOfficialFill) {
         _rememberC2cSdkOlderPage(peek.messageList);
       }
       _notify();
@@ -2351,32 +2496,68 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       },
     );
 
-    final storageId = _storageConversationId(conversationID);
-    final userID = conversationType == ConvType.c2c ? storageId : null;
-    final groupID = conversationType == ConvType.group ? storageId : null;
     final isGroup = conversationType == ConvType.group;
+    if (!isGroup) {
+      ChatHistoryTrace.log(
+        'gap_im_fill_skip',
+        conversationID: convId,
+        extras: const <String, Object?>{
+          'reason': 'c2c_boundary_requires_exact_message_identity',
+        },
+      );
+      if (thenArchive) {
+        _scheduleArchiveWindowReconcile(fetchCount: fetchCount);
+      }
+      return;
+    }
+    if (globalModel.hasActiveHistoryReconciliation(convId)) {
+      ChatHistoryTrace.log(
+        'gap_im_fill_skip',
+        conversationID: convId,
+        extras: const <String, Object?>{
+          'reason': 'reconciliation_request_active',
+        },
+      );
+      if (thenArchive) {
+        _scheduleArchiveWindowReconcile(fetchCount: fetchCount);
+      }
+      return;
+    }
+
+    final storageId = _storageConversationId(conversationID);
+    final groupID = storageId.isEmpty ? null : storageId;
+    final networkBefore = globalModel.messageReconciliationNetworkState;
+    final reconciliationRequest = globalModel.beginHistoryReconciliation(
+      conversationID: convId,
+      requestedSource: MessageReconciliationSource.cloud,
+      networkState: networkBefore,
+    );
     final collected = <V2TimMessage>[];
+    var reconciliationCommitted = false;
+    var fetchFailed = false;
+    var added = 0;
 
     try {
-      for (final gap in gaps) {
-        if (_disposed ||
-            generation != _openShellGeneration ||
-            convId != conversationID) {
-          return;
-        }
-        if (gap.olderIndex < 0 ||
-            gap.newerIndex < 0 ||
-            gap.olderIndex >= ascending.length ||
-            gap.newerIndex >= ascending.length) {
-          continue;
-        }
-        final older = ascending[gap.olderIndex];
-        final newer = ascending[gap.newerIndex];
-        final olderSeq = HistoryPaginationAnchor.messageSeq(older);
-        final newerSeq = HistoryPaginationAnchor.messageSeq(newer);
-        final useSeq = isGroup && olderSeq > 0 && newerSeq > 0;
-
-        if (useSeq) {
+      try {
+        for (final gap in gaps) {
+          if (_disposed ||
+              generation != _openShellGeneration ||
+              convId != conversationID) {
+            return;
+          }
+          if (gap.olderIndex < 0 ||
+              gap.newerIndex < 0 ||
+              gap.olderIndex >= ascending.length ||
+              gap.newerIndex >= ascending.length) {
+            continue;
+          }
+          final older = ascending[gap.olderIndex];
+          final newer = ascending[gap.newerIndex];
+          final olderSeq = HistoryPaginationAnchor.messageSeq(older);
+          final newerSeq = HistoryPaginationAnchor.messageSeq(newer);
+          if (olderSeq <= 0 || newerSeq <= 0) {
+            continue;
+          }
           collected.addAll(
             await _fillOneGapByGroupSeq(
               generation: generation,
@@ -2390,95 +2571,102 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
               newerSec: gap.newerTimestampSec,
             ),
           );
-        } else {
-          collected.addAll(
-            await _fillOneGapByCloudTime(
-              generation: generation,
-              convId: convId,
-              userID: userID,
-              groupID: groupID,
-              older: older,
-              newer: newer,
-              olderSec: gap.olderTimestampSec,
-              newerSec: gap.newerTimestampSec,
-            ),
-          );
         }
+      } catch (e) {
+        fetchFailed = true;
+        ChatHistoryTrace.log(
+          'gap_im_fill_skip',
+          conversationID: convId,
+          extras: <String, Object?>{
+            'reason': 'error',
+            'error': e.toString(),
+          },
+        );
       }
-    } catch (e) {
-      ChatHistoryTrace.log(
-        'gap_im_fill_skip',
-        conversationID: convId,
-        extras: <String, Object?>{
-          'reason': 'error',
-          'error': e.toString(),
-        },
-      );
-    }
 
-    if (_disposed ||
-        generation != _openShellGeneration ||
-        convId != conversationID) {
-      return;
-    }
+      if (_disposed ||
+          generation != _openShellGeneration ||
+          convId != conversationID ||
+          (fetchFailed && collected.isEmpty)) {
+        return;
+      }
 
-    var added = 0;
-    if (collected.isNotEmpty) {
       var filtered =
           await ArchiveHistoryProvider.filterMessagesAfterHistoryClear(
         conversationID: convId,
         messages: collected,
       );
       filtered = _dedupeMessages(filtered);
-      if (filtered.isNotEmpty) {
-        final mayCommit = await _awaitWarmOpenCommitGate(
-          generation: generation,
-          convId: convId,
-        );
-        if (!mayCommit) {
-          return;
-        }
-        final beforeIdentity = TUIChatGlobalModel.historyIdentitySignature(
-          TUIChatGlobalModel.dedupeMessages(
-            List<V2TimMessage>.from(
-              globalModel.messageListMap[convId] ?? ascending,
-            ),
+      final mayCommit = await _awaitWarmOpenCommitGate(
+        generation: generation,
+        convId: convId,
+      );
+      if (!mayCommit) {
+        return;
+      }
+      final beforeIdentity = TUIChatGlobalModel.historyIdentitySignature(
+        TUIChatGlobalModel.dedupeMessages(
+          List<V2TimMessage>.from(
+            globalModel.messageListMap[convId] ?? ascending,
           ),
-        );
-        _commitHistoricalMessages(
-          filtered,
-          markInitialLoaded: true,
-          mayHaveOlder: globalModel.mayHaveOlderHistory(convId),
-          // gap 批次不是完整 peek 窗：必须 merge，禁止 replace 挤掉 tip 邻居。
-          replaceWithPeekWindow: false,
-        );
-        ChatHistoryTrace.log(
-          'gap_fill_commit_merge_not_replace',
-          conversationID: convId,
-          extras: <String, Object?>{
-            'filtered': filtered.length,
-            'generation': generation,
-          },
-        );
-        ChatOpenPerfLog.mark(
-          'gap_fill_commit_merge_not_replace',
-          conversationID: convId,
-          extras: <String, Object?>{
-            'filtered': filtered.length,
-            'generation': generation,
-          },
-        );
-        final afterIdentity = TUIChatGlobalModel.historyIdentitySignature(
-          TUIChatGlobalModel.dedupeMessages(
-            List<V2TimMessage>.from(
-              globalModel.messageListMap[convId] ?? const <V2TimMessage>[],
-            ),
+        ),
+      );
+      final networkAfter = globalModel.messageReconciliationNetworkState;
+      final provenance = MessageReconciliationProvenance.resolve(
+        requestedSource: MessageReconciliationSource.cloud,
+        beforeRequest: networkBefore,
+        afterResponse: networkAfter,
+      );
+      final commit = globalModel.completeHistoryReconciliation(
+        request: reconciliationRequest,
+        history: filtered,
+        actualSource: provenance.actualSource,
+        networkState: provenance.networkState,
+        historyCommitSource: 'warm_open_group_gap_fill',
+        batchKind: MessageHistoryBatchKind.gapFill,
+        clearEpoch:
+            globalModel.messageHistoryCoverageFor(convId)?.clearEpoch ?? 0,
+      );
+      if (commit == null) {
+        return;
+      }
+      reconciliationCommitted = true;
+      ChatHistoryTrace.log(
+        'gap_fill_commit_reconciled',
+        conversationID: convId,
+        extras: <String, Object?>{
+          'filtered': filtered.length,
+          'generation': generation,
+          'cloudProven': provenance.cloudResponseProven,
+        },
+      );
+      ChatOpenPerfLog.mark(
+        'gap_fill_commit_reconciled',
+        conversationID: convId,
+        extras: <String, Object?>{
+          'filtered': filtered.length,
+          'generation': generation,
+        },
+      );
+      final afterIdentity = TUIChatGlobalModel.historyIdentitySignature(
+        TUIChatGlobalModel.dedupeMessages(
+          List<V2TimMessage>.from(
+            globalModel.messageListMap[convId] ?? const <V2TimMessage>[],
           ),
+        ),
+      );
+      added = beforeIdentity == afterIdentity ? 0 : filtered.length;
+      if (added > 0) {
+        _notify();
+      }
+    } finally {
+      if (!reconciliationCommitted) {
+        globalModel.failHistoryReconciliation(
+          request: reconciliationRequest,
+          reason: fetchFailed
+              ? 'warm_open_group_gap_fill_error'
+              : 'warm_open_group_gap_fill_stale',
         );
-        added = beforeIdentity == afterIdentity ? 0 : filtered.length;
-        if (added > 0) {
-          _notify();
-        }
       }
     }
 
@@ -2640,84 +2828,6 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
         }
         cursor = pageOldest;
       }
-    }
-    return _dedupeMessages(out);
-  }
-
-  Future<List<V2TimMessage>> _fillOneGapByCloudTime({
-    required int generation,
-    required String convId,
-    required String? userID,
-    required String? groupID,
-    required V2TimMessage older,
-    required V2TimMessage newer,
-    required int olderSec,
-    required int newerSec,
-  }) async {
-    if (olderSec <= 0 || newerSec <= 0 || newerSec <= olderSec) {
-      ChatHistoryTrace.log(
-        'gap_im_fill_skip',
-        conversationID: convId,
-        extras: <String, Object?>{'reason': 'bad_time_range'},
-      );
-      return const <V2TimMessage>[];
-    }
-    final range = ArchiveWindowReconciler.cloudTimeRangeForGap(
-      olderSec: olderSec,
-      newerSec: newerSec,
-    );
-    final out = <V2TimMessage>[];
-    V2TimMessage? cursor = newer;
-    for (var pageIdx = 0;
-        pageIdx < ArchiveWindowReconciler.maxCloudPagesPerGap;
-        pageIdx++) {
-      if (_disposed || generation != _openShellGeneration) {
-        break;
-      }
-      final response = await _messageService.getHistoryMessageListWithComplete(
-        count: HistoryMessageDartConstant.getCount,
-        getType: HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_OLDER_MSG,
-        userID: userID,
-        groupID: groupID,
-        lastMsgID: pageIdx == 0 ? null : cursor?.msgID,
-        lastMsgSeq:
-            pageIdx == 0 ? -1 : HistoryPaginationAnchor.messageSeq(cursor!),
-        lastMsg: pageIdx == 0 ? null : cursor,
-        timeBegin: pageIdx == 0 ? range.timeBegin : null,
-        timePeriod: pageIdx == 0 ? range.timePeriod : null,
-      );
-      final page = response?.messageList ?? const <V2TimMessage>[];
-      final between = ArchiveWindowReconciler.filterStrictlyBetweenSec(
-        page,
-        olderSec: olderSec,
-        newerSec: newerSec,
-        timestampSecOf: _messageTimestampSec,
-      );
-      out.addAll(between);
-      ChatHistoryTrace.log(
-        'gap_im_fill_batch',
-        conversationID: convId,
-        extras: <String, Object?>{
-          'mode': 'time',
-          'cloudCount': page.length,
-          'betweenCount': between.length,
-          'page': pageIdx,
-          'timeBegin': range.timeBegin,
-          'timePeriod': range.timePeriod,
-        },
-      );
-      if (page.isEmpty || (response?.isFinished ?? true)) {
-        break;
-      }
-      final asc = TUIChatGlobalModel.sortMessagesChronologicallyAsc(page);
-      if (asc.isEmpty) {
-        break;
-      }
-      final pageOldest = asc.first;
-      if (_messageTimestampSec(pageOldest) <= olderSec) {
-        break;
-      }
-      cursor = pageOldest;
     }
     return _dedupeMessages(out);
   }
@@ -3747,9 +3857,16 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     // 先出 loading，SDK 落盘与转写并行，避免菜单点下去先卡在 persist。
     final loadingPersist = _persistLocalCustomData(message, localCustomData);
     final text = await _transcribeVoiceMessage(message, msgID);
-    await loadingPersist;
+    void publishVoiceToTextState() {
+      message.localCustomData = json.encode(localCustomData.toMap());
+      globalModel.markMessageChangedByMessage(conversationID, message);
+      _notify();
+    }
+
     if (text == null || text.isEmpty) {
       localCustomData.voiceToTextStatus = 'error';
+      publishVoiceToTextState();
+      await loadingPersist;
       await _persistLocalCustomData(message, localCustomData);
       serviceLocator<CoreServicesImpl>().callOnCallback(TIMCallback(
         type: TIMCallbackType.INFO,
@@ -3761,6 +3878,28 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
 
     localCustomData.voiceToText = text;
     localCustomData.voiceToTextStatus = 'done';
+    publishVoiceToTextState();
+    await loadingPersist;
+    await _persistLocalCustomData(message, localCustomData);
+  }
+
+  /// Persists only the local presentation preference for a voice transcript.
+  /// This intentionally uses message localCustomData, so the original message
+  /// and its cross-device payload remain unchanged.
+  Future<void> setVoiceToTextExpanded(
+    V2TimMessage message, {
+    required bool expanded,
+  }) async {
+    final transcript = TencentUtils.checkString(message.localCustomData);
+    final localCustomData = LocalCustomDataModel.fromMap(
+      json.decode(transcript ?? '{}'),
+    );
+    if (TencentUtils.checkString(localCustomData.voiceToText) == null ||
+        localCustomData.isVoiceToTextExpanded == expanded) {
+      return;
+    }
+
+    localCustomData.setVoiceToTextExpanded(expanded);
     await _persistLocalCustomData(message, localCustomData);
   }
 
@@ -3922,21 +4061,31 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       return directUrl;
     }
 
-    for (var attempt = 0; attempt < 30; attempt++) {
+    const maxAttempts = 10;
+    const perAttemptTimeout = Duration(seconds: 2);
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
       if (_disposed) {
         return null;
       }
-      final onlineUrlResult = await _messageService.getMessageOnlineUrl(
-          msgID: msgID, reportError: false);
-      if (onlineUrlResult.code == 0) {
+      V2TimValueCallback<V2TimMessageOnlineUrl>? onlineUrlResult;
+      try {
+        onlineUrlResult = await _messageService
+            .getMessageOnlineUrl(msgID: msgID, reportError: false)
+            .timeout(perAttemptTimeout);
+      } catch (_) {
+        onlineUrlResult = null;
+      }
+      if (onlineUrlResult?.code == 0) {
         final onlineUrl =
-            TencentUtils.checkString(onlineUrlResult.data?.soundElem?.url);
+            TencentUtils.checkString(onlineUrlResult?.data?.soundElem?.url);
         if (onlineUrl != null) {
           message.soundElem?.url = onlineUrl;
           return onlineUrl;
         }
       }
-      await Future.delayed(const Duration(milliseconds: 500));
+      if (attempt + 1 < maxAttempts) {
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
     }
     return null;
   }
@@ -3949,9 +4098,19 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       return;
     }
     _readReceiptMap[message.msgID!] = message;
+    final generation = _chatOpenGeneration;
+    final scheduledConversationID = conversationID;
     _readReceiptFlushTimer?.cancel();
     _readReceiptFlushTimer = Timer(const Duration(milliseconds: 300), () {
-      _setMsgReadReceipt(_readReceiptMap.values.toList());
+      if (!_isChatGenerationCurrent(generation, scheduledConversationID)) {
+        return;
+      }
+      // Detach the bounded batch before the async SDK call. Keeping every
+      // previously seen message in the map caused long-lived chat pages to
+      // retain an ever-growing receipt set and rescan it on every flush.
+      final batch = _readReceiptMap.values.toList(growable: false);
+      _readReceiptMap.clear();
+      _setMsgReadReceipt(batch);
     });
   }
 
@@ -3986,9 +4145,12 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
 
   void _scheduleDeferredGroupMarkRead(
       {Duration delay = const Duration(milliseconds: 1500)}) {
+    final generation = _chatOpenGeneration;
+    final scheduledConversationID = conversationID;
     _groupMarkReadDebounce?.cancel();
     _groupMarkReadDebounce = Timer(delay, () {
-      if (_disposed || globalModel.isChatListUserScrolling) {
+      if (!_isChatGenerationCurrent(generation, scheduledConversationID) ||
+          globalModel.isChatListUserScrolling) {
         return;
       }
       unawaited(markMessageAsRead(force: true));
@@ -4008,10 +4170,6 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       return _messageService.markC2CMessageAsRead(
           userID: currentConversationID);
     }
-    if (PlatformUtils().isWeb) {
-      return null;
-    }
-
     if (!force && globalModel.isChatListUserScrolling) {
       _scheduleDeferredGroupMarkRead();
       return null;
@@ -4027,6 +4185,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
         groupID: currentConversationID);
     if (res.code == 0) {
       _lastGroupMarkReadAtMs = DateTime.now().millisecondsSinceEpoch;
+      _groupMarkReadNotLoggedInRetries = 0;
     } else {
       debugPrint(
         'markGroupMessageAsRead failed: code=${res.code}, desc=${res.desc}',
@@ -4037,6 +4196,17 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
         _scheduleDeferredGroupMarkRead(
           delay: const Duration(
               milliseconds: _groupMarkReadFrequencyBlockBackoffMs),
+        );
+      }
+      // 页面可能先于 IM 登录完成。6014 只表示 SDK 当前未登录，不是业务
+      // 会话失效；延迟有限次数重试，待登录成功后补发已读标记。
+      if (res.code == 6014 &&
+          !_disposed &&
+          _groupMarkReadNotLoggedInRetries <
+              _groupMarkReadNotLoggedInRetryLimit) {
+        _groupMarkReadNotLoggedInRetries++;
+        _scheduleDeferredGroupMarkRead(
+          delay: const Duration(milliseconds: 1000),
         );
       }
     }
@@ -5244,9 +5414,11 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       return;
     }
     _notifyScheduled = true;
+    final generation = _chatOpenGeneration;
+    final scheduledConversationID = conversationID;
     SchedulerBinding.instance.addPostFrameCallback((_) {
       _notifyScheduled = false;
-      if (!_disposed) {
+      if (_isChatGenerationCurrent(generation, scheduledConversationID)) {
         _notifyNow();
       }
     });
@@ -5269,6 +5441,8 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
 
   Future<String?> _loadGroupMemberListFunction(
       {required String groupID, int count = 100, String? seq}) async {
+    final generation = _chatOpenGeneration;
+    final scheduledConversationID = conversationID;
     if (seq == null || seq == "" || seq == "0") {
       groupMemberList = <V2TimGroupMemberFullInfo?>[];
     } else {
@@ -5280,6 +5454,9 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
           filter: GroupMemberFilterTypeEnum.V2TIM_GROUP_MEMBER_FILTER_ALL,
           count: count,
           nextSeq: seq ?? groupMemberListSeq);
+      if (!_isChatGenerationCurrent(generation, scheduledConversationID)) {
+        return null;
+      }
       final groupMemberListRes = res.data;
       if (res.code == 0 && groupMemberListRes != null) {
         final groupMemberListTemp = groupMemberListRes.memberInfoList ?? [];
@@ -5299,8 +5476,13 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
 
   Future<(V2TimGroupInfo?, GroupReceiptAllowType?)> loadGroupInfo(
       String groupID) async {
+    final generation = _chatOpenGeneration;
+    final scheduledConversationID = conversationID;
     final groupInfoList =
         await _groupServices.getGroupsInfo(groupIDList: [groupID]);
+    if (!_isChatGenerationCurrent(generation, scheduledConversationID)) {
+      return (null, null);
+    }
     if (groupInfoList != null && groupInfoList.isNotEmpty) {
       final groupRes = groupInfoList.first;
       ChatHistoryTrace.log(
@@ -5754,7 +5936,14 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     required Set<ChatMediaPreviewType> types,
     void Function(List<V2TimMessage> oldestFirst)? onProgress,
   }) async {
-    final seed = getGalleryOriginMessageList();
+    // Keep revoked rows as identity tombstones while reconciling local history
+    // and the short gallery cache. Their payload is excluded below, while the
+    // msgID suppresses a stale unrevoked copy of the same media.
+    final display =
+        globalModel.getMessageList(conversationID) ?? const <V2TimMessage>[];
+    final seed = display
+        .where((message) => !isChatListNonMessageRow(message))
+        .toList(growable: false);
     bool isPreviewable(V2TimMessage message) =>
         isChatMediaPreviewable(message, types);
     final cacheKey = ChatMediaGalleryExpandCache.keyFor(
@@ -5790,11 +5979,20 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     );
     globalModel.prepareForOutgoingMessage(conversationID);
     globalModel.assignOutgoingLocalSeq(conversationID, messageInfoWithSender);
-    final currentHistoryMsgList = [
-      messageInfoWithSender,
-      ...getOriginMessageList(),
-    ];
-    globalModel.setMessageList(conversationID, currentHistoryMsgList);
+    globalModel.commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: conversationID,
+        eventID: 'optimistic:${messageInfoWithSender.id ?? ''}:'
+            '${messageInfoWithSender.msgID ?? ''}',
+        kind: MessageDeltaKind.optimisticInsert,
+        source: MessageDeltaSource.sendPipeline,
+        generation: globalModel.messageDeltaGenerationFor(conversationID),
+        clearEpoch: globalModel.messageDeltaClearEpochFor(conversationID),
+        upserts: [
+          globalModel.messageDeltaRecord(messageInfoWithSender),
+        ],
+      ),
+    );
     globalModel.requestPinToBottom(conversationID, force: true);
     _scheduleReloadNewestAfterOutgoingSend(conversationID);
   }
@@ -5823,13 +6021,19 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     }
     globalModel.prepareForOutgoingMessage(targetConvID);
     globalModel.assignOutgoingLocalSeq(targetConvID, messageInfoWithSender);
-    final currentHistoryMsgList = [
-      messageInfoWithSender,
-      ...(globalModel.rawMessageList(targetConvID) ?? const <V2TimMessage>[]),
-    ];
-    globalModel.setMessageList(
-      targetConvID,
-      currentHistoryMsgList,
+    globalModel.commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: targetConvID,
+        eventID: 'optimistic:${messageInfoWithSender.id ?? ''}:'
+            '${messageInfoWithSender.msgID ?? ''}',
+        kind: MessageDeltaKind.optimisticInsert,
+        source: MessageDeltaSource.sendPipeline,
+        generation: globalModel.messageDeltaGenerationFor(targetConvID),
+        clearEpoch: globalModel.messageDeltaClearEpochFor(targetConvID),
+        upserts: [
+          globalModel.messageDeltaRecord(messageInfoWithSender),
+        ],
+      ),
     );
     OutgoingVisibleProbe.rememberSent(
       conversationID: targetConvID,
@@ -5839,7 +6043,9 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       'send_prepend',
       conversationID: targetConvID,
       message: messageInfoWithSender,
-      extras: OutgoingVisibleProbe.trackedInList(currentHistoryMsgList),
+      extras: OutgoingVisibleProbe.trackedInList(
+        globalModel.rawMessageList(targetConvID),
+      ),
     );
     _seedOutgoingMediaRowHeight(messageInfoWithSender);
     globalModel.requestPinToBottom(targetConvID, force: true);
@@ -5867,8 +6073,13 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       ),
     );
     unawaited(() async {
+      var reloadedNewest = false;
       try {
-        await reloadNewestMessageWindow();
+        // reloadNewestMessageWindow deliberately returns false while the user
+        // is reading history.  Do not turn that deferred operation into a
+        // bottom-pin in finally: that would race the pagination anchor and
+        // pull ScrollPosition away from the row being read.
+        reloadedNewest = await reloadNewestMessageWindow();
         OutgoingVisibleProbe.log(
           'reload_newest_done',
           conversationID: convID,
@@ -5878,7 +6089,25 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
         );
       } finally {
         _reloadNewestAfterOutgoingInFlight = false;
-        globalModel.requestPinToBottom(convID, force: true);
+        final position = globalModel.getMessageListPosition(convID);
+        final readingHistory = globalModel.isReadingHistory(convID) ||
+            globalModel.isMemoryWindowSuppressed(convID) ||
+            position == HistoryMessagePosition.awayTwoScreen ||
+            position == HistoryMessagePosition.notShowLatest;
+        if (reloadedNewest && !readingHistory) {
+          globalModel.requestPinToBottom(convID, force: true);
+        } else {
+          OutgoingVisibleProbe.log(
+            'reload_newest_pin_skipped',
+            conversationID: convID,
+            extras: <String, Object?>{
+              'reloadedNewest': reloadedNewest,
+              'readingHistory': readingHistory,
+              'position': position.name,
+              'memorySuppressed': globalModel.isMemoryWindowSuppressed(convID),
+            },
+          );
+        }
       }
     }());
   }
@@ -5995,12 +6224,24 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     required String convID,
     required ConvType convType,
   }) async {
+    final effectiveConvID =
+        conversationID.isNotEmpty ? conversationID : convID.trim();
+    final optimisticId = _prependOptimisticSoundMessage(
+      convID: effectiveConvID,
+      soundPath: soundPath,
+      duration: duration,
+    );
     final soundMessageInfo = await _messageService.createSoundMessage(
       soundPath: soundPath,
       duration: duration,
     );
     final messageInfo = soundMessageInfo?.messageInfo;
     if (soundMessageInfo == null || messageInfo == null) {
+      _markOutgoingMediaSendFailed(
+        convID: effectiveConvID,
+        clientId: optimisticId,
+      );
+      _notifyCreateMessageFailed(TIM_t('语音消息创建失败，请重试'));
       return null;
     }
 
@@ -6014,20 +6255,34 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     }
     messageInfoWithSender.status = MessageStatus.V2TIM_MSG_STATUS_SENDING;
     applyOutgoingStableIdToMessage(messageInfoWithSender, clientId);
-    addSendingMessageID(messageInfo.id);
-    globalModel.setMessageProgress(clientId, 1);
-    globalModel.setFileMessageLocation(clientId, soundPath);
-    _prependOutgoingMessage(messageInfoWithSender);
+    _swapOutgoingMessage(
+      convID: effectiveConvID,
+      oldClientId: optimisticId,
+      newMessage: messageInfoWithSender,
+    );
+    chatUiStateStore.bindMessageAlias(
+      effectiveConvID,
+      optimisticId,
+      ChatUiStateStore.messageKeyOf(messageInfoWithSender),
+    );
+    addSendingMessageID(clientId);
+    globalModel.setUploadProgressRowLocal(clientId, 0);
+    globalModel.setFileMessageLocationRowLocal(clientId, soundPath);
+    globalModel.markMessageRowsChangedByMsgIDs([
+      optimisticId,
+      clientId,
+      messageInfoWithSender.msgID,
+    ]);
 
     return _sendMessage(
-      convID: convID,
+      convID: effectiveConvID,
       id: clientId,
-      convType: convType,
+      convType: conversationType ?? convType,
       messageInfo: messageInfoWithSender,
       offlinePushInfo: tools.buildMessagePushInfo(
         soundMessageInfo.messageInfo!,
-        convID,
-        convType,
+        effectiveConvID,
+        conversationType ?? convType,
       ),
     );
   }
@@ -6062,18 +6317,32 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       text: text,
       cloudCustomData: cloudCustomData,
     );
-    V2TimMsgCreateInfoResult? textMessageInfo =
-        await _messageService.createTextMessage(text: text);
-    if (atUserIDList != null && atUserIDList.isNotEmpty) {
-      textMessageInfo = await _messageService.createTextAtMessage(
-          text: text, atUserList: atUserIDList);
-    }
+    // The reply metadata is already captured by the optimistic bubble. Clear
+    // the composer immediately instead of waiting for the network result. It
+    // also prevents an older send completion from clearing a newly selected
+    // reply target.
+    repliedMessage = null;
+    final normalizedAtUserIDs = (atUserIDList ?? const <String>[])
+        .map((userID) => userID.trim())
+        .where((userID) => userID.isNotEmpty)
+        .toSet()
+        .toList(growable: false);
+    final V2TimMsgCreateInfoResult? textMessageInfo =
+        normalizedAtUserIDs.isEmpty
+            ? await _messageService.createTextMessage(text: text)
+            : await _messageService.createTextAtMessage(
+                text: text,
+                atUserList: normalizedAtUserIDs,
+              );
     final messageInfo = textMessageInfo?.messageInfo;
     if (textMessageInfo == null || messageInfo == null) {
       _markOutgoingMediaSendFailed(
         convID: conversationID,
         clientId: optimisticId,
       );
+      if (_composerUi.repliedMessage == null) {
+        repliedMessage = replyTarget;
+      }
       _notifyCreateMessageFailed(TIM_t('消息创建失败，请重试'));
       return null;
     }
@@ -6085,7 +6354,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       optimisticId: optimisticId,
       newMessage: messageInfoWithSender,
     );
-    final sendResult = await _sendMessage(
+    return _sendMessage(
       convID: convID,
       id: textMessageInfo.id as String,
       convType: convType,
@@ -6095,10 +6364,6 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       cloudCustomData: messageInfoWithSender.cloudCustomData,
       needReadReceipt: _canUseReadReceipt,
     );
-    if (sendResult.code == 0) {
-      repliedMessage = null;
-    }
-    return sendResult;
   }
 
   void _notifyCreateMessageFailed(String text) {
@@ -6108,15 +6373,6 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       infoRecommendText: text,
       infoCode: 6660421,
     ));
-  }
-
-  bool _hasValidSendTarget(String convID, ConvType convType, String messageID) {
-    return _resolveSendTarget(
-          convID: convID,
-          convType: convType,
-          messageID: messageID,
-        ) !=
-        null;
   }
 
   String _safeVideoType(String? videoPath) {
@@ -6158,6 +6414,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     required String convID,
     required List<OptimisticImagePlaceholderInput> inputs,
     bool probeSizeSynchronously = false,
+    bool requestInitialPin = true,
   }) {
     if (inputs.isEmpty) {
       return const <String>[];
@@ -6193,11 +6450,20 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
         V2TimMessage(
           elemType: MessageElemType.V2TIM_ELEM_TYPE_IMAGE,
           imageElem: V2TimImageElem(path: input.imagePath),
+          // The SDK assigns msgID only after createMessage.  Keep a distinct
+          // random identity during the pre-SDK window; otherwise dedupe sees
+          // multiple pending images with null sender/time/seq/random as one.
+          random: optimisticId.hashCode,
         ),
         optimisticId,
       );
       optimistic.status = MessageStatus.V2TIM_MSG_STATUS_SENDING;
       applyOutgoingStableIdToMessage(optimistic, optimisticId);
+      if (input.batchId != null && input.batchIndex != null) {
+        applyChatMediaBatchToMessage(optimistic,
+            batchId: input.batchId!, batchIndex: input.batchIndex!);
+      }
+      setImageSourcePending(optimistic, input.sourcePending);
       addSendingMessageID(optimisticId);
       globalModel.setMessageProgress(optimisticId, 0);
       if (imageSize != null && imageSize.width > 0 && imageSize.height > 0) {
@@ -6217,16 +6483,88 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       optimisticMessages.add(optimistic);
     }
 
-    globalModel.setMessageList(
-      effectiveConvID,
-      [
-        ...optimisticMessages.reversed,
-        ...(globalModel.rawMessageList(effectiveConvID) ??
-            const <V2TimMessage>[]),
-      ],
+    final commit = globalModel.commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: effectiveConvID,
+        eventID: 'optimistic_batch:${optimisticIds.join(',')}',
+        kind: MessageDeltaKind.optimisticInsert,
+        source: MessageDeltaSource.sendPipeline,
+        generation: globalModel.messageDeltaGenerationFor(effectiveConvID),
+        clearEpoch: globalModel.messageDeltaClearEpochFor(effectiveConvID),
+        upserts: <V2TimMessage>[...optimisticMessages.reversed]
+            .reversed
+            .map(globalModel.messageDeltaRecord)
+            .toList(growable: false),
+      ),
     );
-    globalModel.requestPinToBottom(effectiveConvID, force: true);
+    outputLogger.i(
+        'gallery_placeholder_batch count=${optimisticMessages.length} '
+        'ids=${optimisticMessages.map((m) => '${m.id}/${readOutgoingStableId(m)}/${m.random}').join(',')} '
+        'rawAfter=${commit?.rawCount ?? -1}');
+    if (requestInitialPin) {
+      globalModel.requestPinToBottom(effectiveConvID, force: true);
+    }
     return optimisticIds;
+  }
+
+  /// Resolves a pre-export gallery row without replacing its stable identity.
+  bool hydrateOptimisticImagePlaceholder({
+    required String convID,
+    required String clientId,
+    required String imagePath,
+    int? imageWidth,
+    int? imageHeight,
+  }) {
+    final targetConvID = convID.trim();
+    final targetClientId = clientId.trim();
+    final targetPath = imagePath.trim();
+    if (targetConvID.isEmpty || targetClientId.isEmpty || targetPath.isEmpty) {
+      return false;
+    }
+    final messages = globalModel.rawMessageList(targetConvID);
+    if (messages == null) {
+      outputLogger.i(
+          'gallery_hydrate_result client=$targetClientId found=false list=null');
+      return false;
+    }
+    outputLogger.i(
+        'gallery_hydrate_begin client=$targetClientId pathReady=${targetPath.isNotEmpty} list=${messages.length}');
+    V2TimMessage? target;
+    for (final message in messages) {
+      if (message.id == targetClientId ||
+          readOutgoingStableId(message) == targetClientId) {
+        target = message;
+        break;
+      }
+    }
+    if (target == null || !isImageSourcePending(target)) {
+      outputLogger.i(
+          'gallery_hydrate_result client=$targetClientId found=${target != null} '
+          'pending=${target != null && isImageSourcePending(target)}');
+      return false;
+    }
+    target.imageElem ??= V2TimImageElem();
+    target.imageElem!.path = targetPath;
+    setImageSourcePending(target, false);
+    setImageDecodeStagger(target, true);
+    Size? imageSize;
+    if (imageWidth != null &&
+        imageHeight != null &&
+        imageWidth > 0 &&
+        imageHeight > 0) {
+      imageSize = Size(imageWidth.toDouble(), imageHeight.toDouble());
+      applyImageLayoutToMessage(target, imageSize);
+    }
+    globalModel.setFileMessageLocation(
+      targetClientId,
+      targetPath,
+      imageSize: imageSize,
+    );
+    globalModel.markMessageRowsChangedByMsgIDs([
+      targetClientId,
+      target.msgID,
+    ]);
+    return true;
   }
 
   /// 立即插入视频发送中气泡。时长、封面、转码等准备工作在气泡出现后执行。
@@ -6235,6 +6573,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     required String videoPath,
     int? duration,
     String? snapshotPath,
+    bool requestInitialPin = true,
   }) {
     final effectiveConvID =
         conversationID.isNotEmpty ? conversationID : convID.trim();
@@ -6243,11 +6582,69 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       videoPath: videoPath,
       duration: duration,
       snapshotPath: snapshotPath,
+      requestInitialPin: requestInitialPin,
     );
+  }
+
+  /// Fills a video placeholder once the picker has produced a stable local
+  /// path. This is deliberately separate from SDK message creation so the
+  /// bubble can appear while file staging and thumbnail work are still running.
+  bool hydrateOptimisticVideoPlaceholder({
+    required String convID,
+    required String clientId,
+    required String videoPath,
+    int? duration,
+    String? snapshotPath,
+  }) {
+    final targetConvID = convID.trim();
+    final targetClientId = clientId.trim();
+    final targetPath = videoPath.trim();
+    if (targetConvID.isEmpty || targetClientId.isEmpty || targetPath.isEmpty) {
+      return false;
+    }
+    final messages = globalModel.rawMessageList(targetConvID);
+    if (messages == null) return false;
+    V2TimMessage? target;
+    for (final message in messages) {
+      if (message.id == targetClientId ||
+          readOutgoingStableId(message) == targetClientId) {
+        target = message;
+        break;
+      }
+    }
+    if (target == null ||
+        target.elemType != MessageElemType.V2TIM_ELEM_TYPE_VIDEO) {
+      return false;
+    }
+    target.videoElem ??= V2TimVideoElem();
+    target.videoElem!.videoPath = targetPath;
+    if (duration != null && duration > 0) {
+      target.videoElem!.duration = duration;
+    }
+    final snapshot = TencentUtils.checkString(snapshotPath);
+    if (snapshot != null) {
+      target.videoElem!.snapshotPath = snapshot;
+    }
+    globalModel.setFileMessageLocation(targetClientId, targetPath);
+    globalModel.markMessageRowsChangedByMsgIDs([targetClientId, target.msgID]);
+    return true;
   }
 
   /// Removes a local media placeholder when the user leaves the captured chat
   /// before the file is ready to be handed to the SDK.
+  void markOptimisticMediaPlaceholderFailed({
+    required String convID,
+    required String clientId,
+  }) {
+    final targetConvID = convID.trim();
+    final targetClientId = clientId.trim();
+    if (targetConvID.isEmpty || targetClientId.isEmpty) return;
+    _markOutgoingMediaSendFailed(
+      convID: targetConvID,
+      clientId: targetClientId,
+    );
+  }
+
   void cancelOptimisticMediaPlaceholder({
     required String convID,
     required String clientId,
@@ -6271,9 +6668,15 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       required ConvType convType,
       int? imageWidth,
       int? imageHeight,
-      String? existingOptimisticId}) async {
+      String? existingOptimisticId,
+      String? batchId,
+      int? batchIndex}) async {
     final effectiveConvID =
         conversationID.isNotEmpty ? conversationID : convID.trim();
+    final mediaToken = _mediaCommitGuard.begin(
+      'media-send',
+      key: '$effectiveConvID:${nextChatMediaUniqueToken()}',
+    );
     final effectiveConvType = conversationType ?? convType;
 
     final hasKnownSize = imageWidth != null &&
@@ -6384,6 +6787,10 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     final messageInfoWithSender =
         tools.setUserInfoForMessage(messageInfo, clientId);
     messageInfoWithSender.status = MessageStatus.V2TIM_MSG_STATUS_SENDING;
+    if (batchId != null && batchIndex != null) {
+      applyChatMediaBatchToMessage(messageInfoWithSender,
+          batchId: batchId, batchIndex: batchIndex);
+    }
     final resolvedSize = _resolveImageSizeForSend(
       imageWidth: imageWidth,
       imageHeight: imageHeight,
@@ -6399,6 +6806,10 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     }
 
     if (optimisticId != null) {
+      outputLogger.i(
+          'gallery_sdk_created conv=$effectiveConvID optimistic=$optimisticId '
+          'sdkId=${messageInfoWithSender.id} msgID=${messageInfoWithSender.msgID} '
+          'seq=${messageInfoWithSender.seq} rawBefore=${globalModel.rawMessageList(effectiveConvID)?.length ?? 0}');
       _adoptOptimisticOutgoingImageMessage(
         convID: effectiveConvID,
         optimisticId: optimisticId,
@@ -6406,6 +6817,9 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
         filePath: displayPath,
         imageSize: resolvedSize,
       );
+      outputLogger.i(
+          'gallery_sdk_adopted conv=$effectiveConvID optimistic=$optimisticId '
+          'rawAfter=${globalModel.rawMessageList(effectiveConvID)?.length ?? 0}');
     } else {
       addSendingMessageID(messageInfo.id);
       globalModel.setMessageProgress(clientId, 0);
@@ -6423,6 +6837,16 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       );
     }
 
+    if (!_mediaCommitGuard.canCommit(mediaToken)) {
+      // Optimistic UI was already prepended; roll back to SEND_FAIL so the
+      // user sees a failed bubble with retry instead of a ghost "sending".
+      globalModel.markOutgoingGuardDropped(
+        conversationID: effectiveConvID,
+        clientId: clientId,
+        localCustomData: '{"guard_dropped":true}',
+      );
+      return null;
+    }
     return _sendMessage(
       convID: effectiveConvID,
       messageInfo: messageInfoWithSender,
@@ -6463,6 +6887,10 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       String? existingOptimisticId}) async {
     final effectiveConvID =
         conversationID.isNotEmpty ? conversationID : convID.trim();
+    final mediaToken = _mediaCommitGuard.begin(
+      'media-send',
+      key: '$effectiveConvID:${nextChatMediaUniqueToken()}',
+    );
     final effectiveConvType = conversationType ?? convType;
     if ((videoPath == null || videoPath.isEmpty) && inputElement == null) {
       _notifyCreateMessageFailed(TIM_t('视频文件不可用'));
@@ -6547,6 +6975,16 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       );
     }
 
+    if (!_mediaCommitGuard.canCommit(mediaToken)) {
+      // Optimistic UI was already prepended; roll back to SEND_FAIL so the
+      // user sees a failed bubble with retry instead of a ghost "sending".
+      globalModel.markOutgoingGuardDropped(
+        conversationID: effectiveConvID,
+        clientId: clientId,
+        localCustomData: '{"guard_dropped":true}',
+      );
+      return null;
+    }
     return _sendMessage(
       convID: effectiveConvID,
       messageInfo: messageInfoWithSender,
@@ -7086,6 +7524,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     final messageList = List<V2TimMessage>.from(getOriginMessageList());
     final removed = <V2TimMessage>[];
     final removedIndexes = <int>[];
+    MessageCommitResult? deleteCommit;
     for (var i = 0; i < messageList.length; i++) {
       final element = messageList[i];
       if (element.msgID == msgID || (id != null && element.id == id)) {
@@ -7097,11 +7536,20 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       for (var i = removedIndexes.length - 1; i >= 0; i--) {
         messageList.removeAt(removedIndexes[i]);
       }
-      _syncConversationPreviewAfterDelete([msgID], messageList);
-      globalModel.setMessageList(
-        conversationID,
+      _syncConversationPreviewAfterDelete(
+        _previewDeleteIds(removed, fallbackIds: <String?>[msgID, id]),
         messageList,
-        isDeleteMsg: true,
+      );
+      deleteCommit = globalModel.commitMessageDelta(
+        MessageDelta<V2TimMessage>(
+          conversationKey: conversationID,
+          eventID: 'delete:${msgID}:${DateTime.now().microsecondsSinceEpoch}',
+          kind: MessageDeltaKind.delete,
+          source: MessageDeltaSource.userAction,
+          generation: globalModel.messageDeltaGenerationFor(conversationID),
+          clearEpoch: globalModel.messageDeltaClearEpochFor(conversationID),
+          explicitDeletes: <String>{msgID},
+        ),
       );
     }
     unawaited(_commitDeleteToSdk(
@@ -7109,6 +7557,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       webMessageInstanceList: [webMessageInstance],
       removed: removed,
       removedIndexes: removedIndexes,
+      deleteCommit: deleteCommit,
     ));
   }
 
@@ -7117,6 +7566,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     required List<dynamic> webMessageInstanceList,
     required List<V2TimMessage> removed,
     required List<int> removedIndexes,
+    required MessageCommitResult? deleteCommit,
   }) async {
     final res = await _messageService.deleteMessages(
       msgIDs: msgIDs,
@@ -7125,15 +7575,32 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     if (res.code == 0 || removed.isEmpty) {
       return;
     }
-    final current = List<V2TimMessage>.from(getOriginMessageList());
-    for (var i = 0; i < removed.length; i++) {
-      final insertAt = removedIndexes[i].clamp(0, current.length);
-      current.insert(insertAt, removed[i]);
+    if (deleteCommit != null &&
+        !globalModel.isMessageCommitCurrent(deleteCommit)) {
+      return;
     }
-    globalModel.setMessageList(conversationID, current);
+    globalModel.restoreMessageDeltaAfterDeleteFailure(
+      conversationID,
+      removed,
+    );
   }
 
   /// SDK 删除最后一条消息不会更新会话 lastMessage；本地补偿会话列表预览。
+  List<String> _previewDeleteIds(
+    Iterable<V2TimMessage> removed, {
+    Iterable<String?> fallbackIds = const <String?>[],
+  }) {
+    return <String>{
+      for (final message in removed) ...<String>{
+        if ((message.msgID?.trim() ?? '').isNotEmpty) message.msgID!.trim(),
+        if ((message.id?.toString().trim() ?? '').isNotEmpty)
+          message.id.toString().trim(),
+      },
+      for (final id in fallbackIds)
+        if ((id?.trim() ?? '').isNotEmpty) id!.trim(),
+    }.toList(growable: false);
+  }
+
   void _syncConversationPreviewAfterDelete(
     List<String> deletedMsgIDs,
     List<V2TimMessage> remaining,
@@ -7146,6 +7613,13 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       }
       fallback = message;
       break;
+    }
+    if (kDebugMode) {
+      debugPrint(
+        '[ConversationDeletePreview] ui-remove conv=$conversationID '
+        'deleted=${deletedMsgIDs.join(',')} remaining=${remaining.length} '
+        'fallback=${fallback?.msgID ?? fallback?.id ?? '<empty>'}',
+      );
     }
     unawaited(
       ConversationSyncService.instance.onConversationMessagesDeleted(
@@ -7193,12 +7667,26 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
 
     // 自己撤回必须走 IM revokeMessage。管理员撤回才 modifyMessage。
     // 旧逻辑在 isGroupAdminRecallEnabled 时对所有撤回都 modify，图片/视频/自定义会卡很久。
-    final refreshed = globalModel.markMessageRevokedNow(
-      msgID,
-      convID: conversationID,
-      isAdmin: isAdmin,
+    final refreshed = globalModel.commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: conversationID,
+        eventID: 'revoke:$msgID:${DateTime.now().microsecondsSinceEpoch}',
+        kind: MessageDeltaKind.revoke,
+        source: MessageDeltaSource.userAction,
+        generation: globalModel.messageDeltaGenerationFor(conversationID),
+        clearEpoch: globalModel.messageDeltaClearEpochFor(conversationID),
+        tombstones: <String>{msgID},
+        upserts: target == null
+            ? const <MessageReconciliationRecord<V2TimMessage>>[]
+            : [
+                globalModel.messageDeltaRecord(
+                  _revokedMessageCopy(target, isAdmin: isAdmin),
+                ),
+              ],
+      ),
     );
-    if (!refreshed) {
+    if (refreshed == null &&
+        !globalModel.hasActiveHistoryReconciliation(conversationID)) {
       globalModel.onMessageRevoked(msgID, conversationID);
     }
     _notify();
@@ -7215,8 +7703,32 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     return null;
   }
 
+  V2TimMessage _revokedMessageCopy(
+    V2TimMessage target, {
+    required bool isAdmin,
+  }) {
+    final copy = V2TimMessage.fromJson(
+      Map<String, dynamic>.from(target.toJson()),
+    );
+    copy.status = MessageStatus.V2TIM_MSG_STATUS_LOCAL_REVOKED;
+    final data = <String, dynamic>{};
+    final raw = copy.cloudCustomData?.trim() ?? '';
+    if (raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map) data.addAll(Map<String, dynamic>.from(decoded));
+      } catch (_) {}
+    }
+    data['isRevoke'] = true;
+    data['revokeByAdmin'] = isAdmin;
+    copy.cloudCustomData = jsonEncode(data);
+    copy.id ??= copy.msgID;
+    return copy;
+  }
+
   void _rollbackRevoke(
     V2TimMessage target, {
+    required String msgID,
     required int? previousStatus,
     required String? previousCloud,
     required String? previousWeb,
@@ -7226,7 +7738,14 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     }
     target.cloudCustomData = previousCloud;
     target.messageFromWeb = previousWeb;
-    globalModel.markMessageChangedByMessage(conversationID, target);
+    // Revoke is optimistic. Release its tombstone and re-adopt the original
+    // row through the same writer so an in-flight history request cannot
+    // replay the failed revoke after the rollback.
+    globalModel.releaseMessageDeltaTombstones(conversationID, <String>[msgID]);
+    globalModel.restoreMessageDeltaAfterDeleteFailure(
+      conversationID,
+      <V2TimMessage>[target],
+    );
     _notify();
   }
 
@@ -7259,6 +7778,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
         if (result?.code != 0) {
           _rollbackRevoke(
             target,
+            msgID: msgID,
             previousStatus: previousStatus,
             previousCloud: previousCloud,
             previousWeb: previousWeb,
@@ -7274,9 +7794,15 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
           if (target != null) {
             _rollbackRevoke(
               target,
+              msgID: msgID,
               previousStatus: previousStatus,
               previousCloud: previousCloud,
               previousWeb: previousWeb,
+            );
+          } else {
+            globalModel.releaseMessageDeltaTombstones(
+              conversationID,
+              <String>[msgID],
             );
           }
           return;
@@ -7291,9 +7817,15 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       if (target != null) {
         _rollbackRevoke(
           target,
+          msgID: msgID,
           previousStatus: previousStatus,
           previousCloud: previousCloud,
           previousWeb: previousWeb,
+        );
+      } else {
+        globalModel.releaseMessageDeltaTombstones(
+          conversationID,
+          <String>[msgID],
         );
       }
     }
@@ -7333,6 +7865,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
 
     final removed = <V2TimMessage>[];
     final removedIndexes = <int>[];
+    MessageCommitResult? deleteCommit;
     for (var i = 0; i < messageList.length; i++) {
       final element = messageList[i];
       if (msgIDs.contains(element.msgID)) {
@@ -7344,18 +7877,28 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       for (var i = removedIndexes.length - 1; i >= 0; i--) {
         messageList.removeAt(removedIndexes[i]);
       }
-      globalModel.setMessageList(
-        conversationID,
-        messageList,
-        isDeleteMsg: true,
+      deleteCommit = globalModel.commitMessageDelta(
+        MessageDelta<V2TimMessage>(
+          conversationKey: conversationID,
+          eventID: 'delete:selected:${DateTime.now().microsecondsSinceEpoch}',
+          kind: MessageDeltaKind.delete,
+          source: MessageDeltaSource.userAction,
+          generation: globalModel.messageDeltaGenerationFor(conversationID),
+          clearEpoch: globalModel.messageDeltaClearEpochFor(conversationID),
+          explicitDeletes: msgIDs.toSet(),
+        ),
       );
-      _syncConversationPreviewAfterDelete(msgIDs, messageList);
+      _syncConversationPreviewAfterDelete(
+        _previewDeleteIds(removed, fallbackIds: msgIDs),
+        messageList,
+      );
     }
     unawaited(_commitDeleteToSdk(
       msgIDs: msgIDs,
       webMessageInstanceList: webMessageInstanceList,
       removed: removed,
       removedIndexes: removedIndexes,
+      deleteCommit: deleteCommit,
     ));
   }
 
@@ -7592,9 +8135,9 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       );
       addSendingMessageID(clientId);
       if (progress > 0) {
-        globalModel.setMessageProgress(clientId, progress);
+        globalModel.setUploadProgressRowLocal(clientId, progress);
       }
-      globalModel.setFileMessageLocation(
+      globalModel.setFileMessageLocationRowLocal(
         clientId,
         filePath,
         imageSize: imageSize,
@@ -7612,6 +8155,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     required String videoPath,
     int? duration,
     String? snapshotPath,
+    bool requestInitialPin = true,
   }) {
     final optimisticId = _nextOptimisticClientId();
     final snapshot = TencentUtils.checkString(snapshotPath);
@@ -7631,6 +8175,36 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     addSendingMessageID(optimisticId);
     globalModel.setMessageProgress(optimisticId, 0);
     globalModel.setFileMessageLocation(optimisticId, videoPath);
+    _prependOutgoingMessageForConversation(convID, optimistic);
+    if (requestInitialPin) {
+      globalModel.requestPinToBottom(convID, force: true);
+    }
+    return optimisticId;
+  }
+
+  String _prependOptimisticSoundMessage({
+    required String convID,
+    required String soundPath,
+    required int duration,
+  }) {
+    final optimisticId = _nextOptimisticClientId();
+    final optimistic = tools.setUserInfoForMessage(
+      V2TimMessage(
+        elemType: MessageElemType.V2TIM_ELEM_TYPE_SOUND,
+        soundElem: V2TimSoundElem(
+          path: soundPath,
+          localUrl: soundPath,
+          duration: duration,
+        ),
+        random: optimisticId.hashCode,
+      ),
+      optimisticId,
+    );
+    optimistic.status = MessageStatus.V2TIM_MSG_STATUS_SENDING;
+    applyOutgoingStableIdToMessage(optimistic, optimisticId);
+    addSendingMessageID(optimisticId);
+    globalModel.setUploadProgressRowLocal(optimisticId, 0);
+    globalModel.setFileMessageLocationRowLocal(optimisticId, soundPath);
     _prependOutgoingMessageForConversation(convID, optimistic);
     return optimisticId;
   }
@@ -7676,6 +8250,47 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
 
     final newId = newMessage.id?.trim() ?? '';
     final newMsgID = newMessage.msgID?.trim() ?? '';
+    var matchedCount = 0;
+    for (final item in list) {
+      final itemStable = readOutgoingStableId(item);
+      final isSameSend = (oldId.isNotEmpty && item.id == oldId) ||
+          (stableId.isNotEmpty && itemStable == stableId) ||
+          (newId.isNotEmpty && item.id == newId) ||
+          (newMsgID.isNotEmpty && item.msgID?.trim() == newMsgID);
+      if (isSameSend) {
+        matchedCount++;
+      }
+    }
+
+    _seedOutgoingMediaRowHeight(newMessage);
+    globalModel.clearUploadProgressRowLocal(oldId);
+    removeSendingMessageID(oldId);
+    final localPath = newMessage.imageElem?.path?.trim() ?? '';
+    if (previous != null &&
+        matchedCount == 1 &&
+        stableId.isNotEmpty &&
+        globalModel.replaceMessageRowByStableIdentity(
+              conversationID: convID,
+              stableIdentity: stableId,
+              replacement: newMessage,
+              aliases: <String?>[
+                oldId,
+                stableId,
+                newId,
+                newMsgID,
+                localPath,
+              ],
+            ) ==
+            RowLocalMessageReplacementResult.replaced) {
+      outputLogger.i(
+          'gallery_swap_row_local conv=$convID optimistic=$oldId sdkId=$newId msgID=$newMsgID '
+          'matched=$matchedCount raw=${globalModel.rawMessageList(convID)?.length ?? 0}');
+      // Stable identity, membership, order and row height are unchanged. The
+      // row-local revision makes the bubble resolve the authoritative SDK
+      // message; a list revision or completion-time pin would only rebuild and
+      // move the whole viewport.
+      return;
+    }
     final next = <V2TimMessage>[];
     var inserted = false;
     for (final item in list) {
@@ -7696,13 +8311,12 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     if (!inserted) {
       next.insert(0, newMessage);
     }
-
-    _seedOutgoingMediaRowHeight(newMessage);
-    globalModel.clearUploadProgress(oldId);
-    removeSendingMessageID(oldId);
     // 已是完整替换后的列表。若走默认 merge，会把旧 optimistic 再拼回来，
     // 而 dedupe 认不出 optimisticId ≠ SDK clientId → 一图两气泡（一条发送中一条已送达）。
-    globalModel.setMessageList(convID, next, replace: true);
+    final commit = globalModel.setMessageList(convID, next, replace: true);
+    outputLogger.i(
+        'gallery_swap_set_list conv=$convID optimistic=$oldId sdkId=$newId msgID=$newMsgID '
+        'matched=$matchedCount before=${list.length} after=${commit.rawCount}');
     globalModel.prepareForOutgoingMessage(convID);
     globalModel.requestPinToBottom(convID, force: false);
   }
@@ -7864,6 +8478,9 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
 
   @override
   void dispose() {
+    _chatOpenGeneration++;
+    _preGroupMemberListForOpen = null;
+    _openProfileEnrichmentInFlight = null;
     globalModel.removeRoamingSyncListener(_onRoamingSyncFinished);
     _readReceiptFlushTimer?.cancel();
     _readReceiptFlushTimer = null;

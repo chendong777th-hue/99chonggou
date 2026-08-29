@@ -65,12 +65,19 @@ Future<void> restoreSystemUiAfterMediaPreview({
   }
 }
 
-/// 全屏媒体预览背景淡入/淡出时长（与 Hero 飞行动画同步）。
-const Duration mediaPreviewBackdropDuration = Duration(milliseconds: 240);
+/// 全屏媒体预览「打开」时长（路由 transitionDuration，Hero 飞行与背景共用）。
+/// 微信手感：打开约 300ms，缩略图先快后慢放大贴合全屏。
+const Duration mediaPreviewBackdropDuration = Duration(milliseconds: 300);
+
+/// 全屏媒体预览「关闭」时长（路由 reverseTransitionDuration）。
+/// 微信手感：关闭约 240ms，比打开略快，回缩利落。
+const Duration mediaPreviewCloseDuration = Duration(milliseconds: 240);
 
 const Curve mediaPreviewBackdropCurve = Curves.easeOutCubic;
 
-const Curve mediaPreviewBackdropReverseCurve = Curves.easeOutCubic;
+/// 退场曲线：前段更快衰减，让黑底在 Hero 回飞时快速消失（约前 180ms 已明显变淡）。
+/// 对齐微信关闭手感——黑底先让位，图片回缩清晰可见。
+const Curve mediaPreviewBackdropReverseCurve = Curves.easeOutQuart;
 
 const double mediaPreviewVideoBottomOverlayReserve = 56;
 
@@ -97,11 +104,14 @@ Future<void> warmUpMediaPreviewAudioSession() async {
 
 /// 下滑位移由 SlidePage 处理；缩放由 [MediaPreviewSlideMetrics] 下发到图片本体
 ///（[MediaPreviewSlideVisualScope]），避免全屏中心缩放导致小图回吸跳动。
+/// 视频全屏也复用微信式下滑缩放，提供跟手反馈。
 double mediaPreviewSlideScaleHandler(
   Offset offset, {
   ExtendedImageSlidePageState? state,
-}) =>
-    1.0;
+}) {
+  // 视频全屏下滑时也跟手缩小，与图片预览行为一致。
+  return mediaPreviewWeChatSlideScale(offset);
+}
 
 /// 微信式下滑缩放：随位移缩小，约半屏时到 ~0.55。
 double mediaPreviewWeChatSlideScale(

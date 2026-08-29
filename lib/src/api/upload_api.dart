@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http_parser/http_parser.dart';
 import 'package:tencent_cloud_chat_demo/src/services/avatar_upload_util.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
@@ -154,24 +155,32 @@ class UploadApi {
     required File file,
   }) async {
     final res = await _postAvatarMultipart('/me/avatar', file);
+    return parseUserAvatarUploadResponse(res);
+  }
+
+  @visibleForTesting
+  UserAvatarUploadResult parseUserAvatarUploadResponse(
+    Response<dynamic> res,
+  ) {
     final m = _responseMap(res);
-    final avatarUrl = _firstUrl(
+    final thumbUrl = _firstUrl(
       m,
-      const [
-        'thumbUrl',
-        'previewUrl',
-        'avatarUrl',
-        'faceUrl',
-        'originUrl',
-        'url',
-      ],
+      const ['thumbUrl', 'avatarUrl'],
     );
+    if (thumbUrl.isEmpty) {
+      throw DioError(
+        requestOptions: res.requestOptions,
+        response: res,
+        type: DioErrorType.response,
+        error: 'MISSING_THUMB_URL',
+      );
+    }
     return UserAvatarUploadResult(
-      avatarUrl: avatarUrl,
-      originUrl: _firstUrl(m, const ['originUrl', 'avatarUrl', 'url']),
-      previewUrl: _firstUrl(m, const ['previewUrl', 'avatarUrl', 'url']),
-      thumbUrl:
-          _firstUrl(m, const ['thumbUrl', 'avatarUrl', 'previewUrl', 'url']),
+      avatarUrl: thumbUrl,
+      originUrl: _firstUrl(m, const ['originUrl']),
+      previewUrl: _firstUrl(m, const ['previewUrl']),
+      thumbUrl: thumbUrl,
+      avatarVersion: _readInt(m['avatarVersion'] ?? m['avatar_version']),
     );
   }
 
@@ -203,8 +212,9 @@ class UploadApi {
     }
     return GroupAvatarUploadResult(
       originUrl: originUrl,
-      previewUrl: previewUrl.isNotEmpty ? previewUrl : thumbUrl,
+      previewUrl: previewUrl,
       thumbUrl: thumbUrl,
+      avatarVersion: _readInt(m['avatarVersion'] ?? m['avatar_version']),
     );
   }
 }
@@ -214,12 +224,14 @@ class UserAvatarUploadResult {
   final String originUrl;
   final String previewUrl;
   final String thumbUrl;
+  final int avatarVersion;
 
   UserAvatarUploadResult({
     required this.avatarUrl,
     required this.originUrl,
     required this.previewUrl,
     required this.thumbUrl,
+    this.avatarVersion = 0,
   });
 }
 
@@ -227,10 +239,18 @@ class GroupAvatarUploadResult {
   final String originUrl;
   final String previewUrl;
   final String thumbUrl;
+  final int avatarVersion;
 
   GroupAvatarUploadResult({
     required this.originUrl,
     required this.previewUrl,
     required this.thumbUrl,
+    this.avatarVersion = 0,
   });
+}
+
+int _readInt(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString().trim() ?? '') ?? 0;
 }

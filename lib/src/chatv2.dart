@@ -98,7 +98,7 @@ class _ChatV2State extends State<ChatV2> {
                               children: [Text("this is top Raw builder")],
                             );
                           },
-                          showMessageReadReceipt: false,
+                          showMessageReadReceipt: true,
                           onScrollToIndex:
                               _historyMessageListController.scrollToIndex,
                           onScrollToIndexBegin:

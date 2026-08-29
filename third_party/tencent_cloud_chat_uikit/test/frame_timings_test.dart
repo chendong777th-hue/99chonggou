@@ -51,4 +51,19 @@ void main() {
     // Smoke: reporting must not throw.
     Frame.onReportTimings(const <FrameTiming>[]);
   });
+
+  test('passive timing listeners do not replace the platform callback', () {
+    var calls = 0;
+    void listener(List<FrameTiming> timings) {
+      calls++;
+    }
+
+    Frame.addTimingsListener(listener);
+    Frame.onReportTimings(const <FrameTiming>[]);
+    expect(calls, 1);
+
+    Frame.removeTimingsListener(listener);
+    Frame.onReportTimings(const <FrameTiming>[]);
+    expect(calls, 1);
+  });
 }

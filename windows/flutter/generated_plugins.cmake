@@ -15,6 +15,8 @@ list(APPEND FLUTTER_PLUGIN_LIST
   geolocator_windows
   livekit_client
   local_auth_windows
+  media_kit_libs_windows_video
+  media_kit_video
   pasteboard
   permission_handler_windows
   tencent_cloud_chat_sdk

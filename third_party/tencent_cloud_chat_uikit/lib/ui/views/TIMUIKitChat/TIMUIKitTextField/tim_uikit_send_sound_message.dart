@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -26,6 +27,8 @@ import 'package:tencent_cloud_chat_uikit/ui/controllers/record_input_state.dart'
 typedef _RecordInputState = RecordInputState;
 typedef _RecordReleaseZone = RecordReleaseZone;
 typedef _RecordOverlayMode = RecordOverlayMode;
+
+void _recordLog(String event, {Map<String, Object?>? extras}) {}
 
 class SendSoundMessage extends StatefulWidget {
   /// conversation ID
@@ -59,7 +62,11 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
   static const Color _recordGlowColor = Color(0xFF7EEBD3);
   static const Color _recordDarkPanel = Color(0xFF3A3D42);
   static const Color _recordMainInnerColor = Color(0xFF4A5C6B);
-  static const Color _recordSideButtonColor = Color(0xFF4A4A4A);
+  // 侧按钮背景：在深色面板 0xFF3A3D42 上必须有足够对比度。
+  // 旧值 0xFF4A4A4A 与背景亮度差仅 ~5，几乎不可见。
+  // 改为更亮的灰蓝 + 不透明度 1.0，确保取消/转文字按钮可见。
+  static const Color _recordSideButtonColor = Color(0xFF5A5F66);
+  static const Color _recordSideButtonBorderColor = Color(0xFF6E747C);
   static const Color _recordCancelRed = Color(0xFFE07A7A);
   static const Color _recordCancelGlow = Color(0xFFE57373);
   static const Color _recordConvertTextGreen = Color(0xFF2E6B38);
@@ -96,6 +103,7 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
   Future<void>? _recorderInitFuture;
   Timer? _pressTimer;
   Timer? _recordStopFallbackTimer;
+  Timer? _preparingFallbackTimer;
   _RecordInputState _recordState = _RecordInputState.idle;
   _RecordReleaseZone _releaseZone = _RecordReleaseZone.send;
   _RecordReleaseZone _gesturePeakZone = _RecordReleaseZone.send;
@@ -110,6 +118,14 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
   String? _recordConversationID;
   ConvType? _recordConversationType;
   OverlayEntry? overlayEntry;
+  // OverlayEntry.mounted only becomes true after the entry has built once.
+  // Keep insertion state separately so a fast native onStart callback cannot
+  // insert the same entry a second time during that first-build window.
+  bool _overlayInserted = false;
+  bool _overlayInserting = false;
+
+  bool get _overlayPresent =>
+      _overlayInserted || (overlayEntry?.mounted ?? false);
 
   String get _centerHintText {
     switch (_releaseZone) {
@@ -233,7 +249,16 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
       height: _recordSideButtonSize,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: _recordSideButtonColor.withValues(alpha: active ? 0.95 : 0.82),
+        color: active
+            ? (activeGlowColor ?? _recordSideButtonColor)
+            : _recordSideButtonColor,
+        // 边框确保在深色面板上可见——旧实现无边框导致按钮与背景融为一体。
+        border: Border.all(
+          color: active
+              ? (activeGlowColor ?? _recordSideButtonBorderColor)
+              : _recordSideButtonBorderColor,
+          width: active ? 2.5 : 1.5,
+        ),
         boxShadow: active && activeGlowColor != null
             ? [
                 BoxShadow(
@@ -356,7 +381,7 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
                 activeGlowColor: _recordCancelGlow,
                 child: Icon(
                   Icons.close_rounded,
-                  color: Colors.white.withValues(alpha: cancelActive ? 1 : 0.72),
+                  color: Colors.white.withValues(alpha: cancelActive ? 1 : 0.88),
                   size: 28,
                 ),
               ),
@@ -392,7 +417,7 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
                         fontSize: 24,
                         fontWeight: FontWeight.w600,
                         color:
-                            Colors.white.withValues(alpha: convertActive ? 1 : 0.72),
+                            Colors.white.withValues(alpha: convertActive ? 1 : 0.88),
                       ),
                     ),
                   ),
@@ -797,6 +822,29 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     });
   }
 
+  /// 根因 F：preparing 超时兜底——如果 onStart 回调迟迟未到达，
+  /// 自动复位状态机关闭 Overlay，避免页面卡在"准备中"死锁。
+  void _schedulePreparingFallback(TUIChatSeparateViewModel model) {
+    _preparingFallbackTimer?.cancel();
+    _preparingFallbackTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted || _recordState != _RecordInputState.preparing) {
+        return;
+      }
+      _recordLog('preparing_timeout', extras: {
+        'state': _recordState.name,
+        'isInit': isInit,
+        'pointerDown': _pointerDown,
+        'overlayMounted': _overlayPresent,
+      });
+      _resetRecordUi(cancel: true);
+      onTIMCallback(TIMCallback(
+        type: TIMCallbackType.INFO,
+        infoRecommendText: "录音启动超时，请重试",
+        infoCode: 6660406,
+      ));
+    });
+  }
+
   Future<void> _onRecorderStop({
     required TUIChatSeparateViewModel model,
     String? soundPath,
@@ -940,8 +988,10 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     required Offset globalPosition,
     required Offset localPosition,
   }) {
-    final overlayVisible = overlayEntry?.mounted ?? false;
-    if (!isRecording && !overlayVisible) {
+    // 根因 A：preparing 期间（_isPressing=true 但 isRecording=false）也响应手势，
+    // 让用户在录音器初始化期间就能滑动到取消/转文字区域。
+    final overlayVisible = _overlayPresent;
+    if (!isRecording && !overlayVisible && !_isPressing) {
       return;
     }
 
@@ -1050,7 +1100,7 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
       if (!mounted || _recordState != _RecordInputState.recording) {
         return;
       }
-      final overlayVisible = overlayEntry?.mounted ?? false;
+      final overlayVisible = _overlayPresent;
       if (!overlayVisible) {
         return;
       }
@@ -1087,13 +1137,16 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
 
   void _safeHideOverlay() {
     final entry = overlayEntry;
-    if (entry == null || !entry.mounted) {
+    if (entry == null || (!_overlayInserted && !entry.mounted)) {
       return;
     }
     try {
       entry.remove();
     } catch (_) {
       // Overlay 可能已被父级销毁，忽略避免打断录音状态机。
+    } finally {
+      _overlayInserted = false;
+      _overlayInserting = false;
     }
   }
 
@@ -1101,16 +1154,29 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     _ensureOverlayEntry();
     final entry = overlayEntry;
     if (entry == null) {
+      _recordLog('show_overlay_skip', extras: {'reason': 'entry_null'});
       return;
     }
-    if (!entry.mounted) {
-      try {
-        Overlay.of(context).insert(entry);
-      } catch (_) {
-        return;
-      }
-    } else {
+    if (_overlayInserted || _overlayInserting) {
       entry.markNeedsBuild();
+      _recordLog('show_overlay_skip', extras: {
+        'reason': _overlayInserting ? 'inserting' : 'already_inserted',
+      });
+      return;
+    }
+    _overlayInserting = true;
+    // Set this before insert(): native callbacks can arrive before the
+    // OverlayEntry has had its first build, when entry.mounted is false.
+    _overlayInserted = true;
+    try {
+      Overlay.of(context).insert(entry);
+      _recordLog('show_overlay_inserted');
+    } catch (e) {
+      _overlayInserted = false;
+      _recordLog('show_overlay_insert_failed', extras: {'error': '$e'});
+      return;
+    } finally {
+      _overlayInserting = false;
     }
   }
 
@@ -1119,12 +1185,27 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
   }
 
   /// 上次 onStop/异常未复位时，避免 _beginRecording 因 state!=idle 直接无响应。
+  /// 根因 F：preparing 残留 + overlay 仍 mounted 的死锁也在此清理。
   void _recoverStaleRecordStateIfNeeded() {
     if (_recordState == _RecordInputState.idle) {
       return;
     }
-    if (isRecording || (overlayEntry?.mounted ?? false)) {
+    if (isRecording) {
       return;
+    }
+    // preparing 残留且 overlay 仍 mounted：上次 onStart 从未到达。
+    // _preparingFallbackTimer 会兜底 3s 自动复位；若用户在此窗口内再次
+    // 按下，强制清理让新 session 能启动。
+    if (_recordState == _RecordInputState.preparing &&
+        _overlayPresent) {
+      _preparingFallbackTimer?.cancel();
+      _preparingFallbackTimer = null;
+      _safeHideOverlay();
+    }
+    if (_recordState != _RecordInputState.preparing &&
+        _overlayPresent) {
+      // stopping/cancelled/error 且 overlay 仍 mounted：强制清理。
+      _safeHideOverlay();
     }
     _pressTimer?.cancel();
     _pressTimer = null;
@@ -1167,7 +1248,17 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     }
     _recorderInitFuture ??= _initRecorder(model, theme, requestPermission);
     try {
-      await _recorderInitFuture;
+      // 单飞无超时会导致原生初始化卡住时永久阻塞所有后续长按。
+      // 加 3 秒超时：超时后清除 Future，下次长按可重新初始化。
+      await _recorderInitFuture!.timeout(
+        const Duration(seconds: 3),
+        onTimeout: () {
+          if (kDebugMode) {
+            debugPrint('SendSoundMessage: recorder init timed out, '
+                'will retry on next press');
+          }
+        },
+      );
     } finally {
       if (!isInit) {
         _recorderInitFuture = null;
@@ -1198,6 +1289,7 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
 
   void _onPointerDown(PointerDownEvent event) {
     if (_pointerDown) {
+      _recordLog('pointer_down_skip', extras: {'reason': 'already_down'});
       return;
     }
     _recoverStaleRecordStateIfNeeded();
@@ -1208,21 +1300,36 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     final model =
         Provider.of<TUIChatSeparateViewModel>(context, listen: false);
     final theme = Provider.of<TUIThemeViewModel>(context, listen: false).theme;
+    _recordLog('pointer_down', extras: {
+      'state': _recordState.name,
+      'isInit': isInit,
+      'overlayMounted': _overlayPresent,
+    });
     // 切语音模式时已申请过麦克风；此处不阻塞弹权限框，只做预热。
     unawaited(_ensureRecorderReady(model, theme, requestPermission: false));
     setState(() {
       _isPressing = true;
     });
     unawaited(_beginRecording());
+    // Native start may be delayed by permission/session activation, but the
+    // user should see an immediate preparing state instead of a dead press.
+    _showOverlay();
   }
 
   Future<void> _beginRecording() async {
     if (!_pointerDown || !mounted) {
+      _recordLog('begin_skip', extras: {'reason': 'not_pointer_down_or_unmounted'});
       return;
     }
     _recoverStaleRecordStateIfNeeded();
     if (_recordState != _RecordInputState.idle) {
-      if (isRecording || (overlayEntry?.mounted ?? false)) {
+      if (isRecording || _overlayPresent) {
+        _recordLog('begin_skip', extras: {
+          'reason': 'state_not_idle',
+          'state': _recordState.name,
+          'isRecording': isRecording,
+          'overlayMounted': _overlayPresent,
+        });
         return;
       }
       _recordState = _RecordInputState.idle;
@@ -1233,23 +1340,45 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     _recordConversationID = widget.conversationID;
     _recordConversationType = widget.conversationType;
     _recordState = _RecordInputState.preparing;
+    _schedulePreparingFallback(model);
+    _recordLog('begin_preparing', extras: {
+      'convId': widget.conversationID,
+      'isInit': isInit,
+    });
 
-    final hasMicrophonePermission = await Permissions.checkPermission(
-      context,
-      Permission.microphone.value,
-      theme,
-    );
-    if (!hasMicrophonePermission || !_pointerDown || !mounted) {
+    // 根因 C：先快速检查权限状态（不弹对话框），避免系统对话框阻塞 gesture。
+    // 只有权限确实缺失时才弹对话框——此时用户手指已离开，不会卡手势链。
+    final permStatus = await Permission.microphone.status;
+    _recordLog('perm_check', extras: {'status': permStatus.name});
+    if (permStatus.isGranted || permStatus.isLimited) {
+      // 权限已有，继续启动录音。
+    } else if (!_pointerDown || !mounted) {
+      _recordLog('perm_cancel_released', extras: {'reason': 'finger_released'});
       _resetRecordUi(cancel: true);
+      return;
+    } else {
+      // 权限缺失：不阻塞手势，先取消本次录音，再异步弹对话框。
+      _recordLog('perm_missing', extras: {'status': permStatus.name});
+      _resetRecordUi(cancel: true);
+      if (mounted) {
+        unawaited(_requestMicrophonePermissionWithDialog(theme));
+      }
       return;
     }
 
+    _recordLog('ensure_recorder_start');
     await _ensureRecorderReady(model, theme, requestPermission: false);
+    _recordLog('ensure_recorder_done', extras: {'isInit': isInit});
     if (!_pointerDown || !mounted) {
+      _recordLog('ensure_cancel_released');
       _resetRecordUi(cancel: true);
       return;
     }
     if (!isInit || !mounted || isRecording) {
+      _recordLog('init_failed', extras: {
+        'isInit': isInit,
+        'isRecording': isRecording,
+      });
       _resetRecordUi(cancel: true);
       if (!_pointerDown || !mounted) {
         return;
@@ -1264,7 +1393,11 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
       return;
     }
     startTime = DateTime.now();
-    final started = await SoundPlayer.startRecord();
+    _recordLog('start_record_call');
+    final started = await SoundPlayer.startRecord(
+      permissionAlreadyChecked: true,
+    );
+    _recordLog('start_record_result', extras: {'started': started});
     if (!started) {
       _recordState = _RecordInputState.error;
       _resetRecordUi(cancel: true);
@@ -1276,8 +1409,26 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     }
   }
 
+  /// 根因 C：用户手指已离开后才弹权限对话框，不阻塞手势链。
+  Future<void> _requestMicrophonePermissionWithDialog(TUITheme theme) async {
+    final hasMicrophonePermission = await Permissions.checkPermission(
+      context,
+      Permission.microphone.value,
+      theme,
+    );
+    if (!hasMicrophonePermission) {
+      onTIMCallback(TIMCallback(
+        type: TIMCallbackType.INFO,
+        infoRecommendText: "语音输入需要麦克风权限",
+        infoCode: 6660405,
+      ));
+    }
+  }
+
   void _resetRecordUi({bool cancel = false}) {
     _recordStopFallbackTimer?.cancel();
+    _preparingFallbackTimer?.cancel();
+    _preparingFallbackTimer = null;
     _convertIntentAtRelease = false;
     _pointerDown = false;
     _pressTimer?.cancel();
@@ -1331,7 +1482,7 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     required Offset globalPosition,
     required Offset localPosition,
   }) {
-    final wasRecording = isRecording || (overlayEntry?.mounted ?? false);
+    final wasRecording = isRecording || _overlayPresent;
     final cancelRequested = isCancelSend;
     _updateReleaseZone(
       globalPosition: globalPosition,
@@ -1343,8 +1494,17 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     _pointerDown = false;
     _pressTimer?.cancel();
     _pressTimer = null;
+    _recordLog('pointer_up', extras: {
+      'wasRecording': wasRecording,
+      'intentZone': intentZone.name,
+      'shouldCancel': shouldCancel,
+      'convertToText': convertToText,
+      'cancelRequested': cancelRequested,
+      'state': _recordState.name,
+    });
 
     if (!wasRecording) {
+      _recordLog('pointer_up_no_recording', extras: {'reason': 'was_not_recording'});
       _resetRecordUi(cancel: true);
       return;
     }
@@ -1421,6 +1581,8 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     _recordState =
         isCancelSend ? _RecordInputState.cancelled : _RecordInputState.stopping;
     _stopLevelFallbackTimer();
+    _preparingFallbackTimer?.cancel();
+    _preparingFallbackTimer = null;
     if (!_convertToTextPending && _overlayMode != _RecordOverlayMode.convertReview) {
       _safeHideOverlay();
     }
@@ -1508,7 +1670,7 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     if (state == AppLifecycleState.resumed) {
       return;
     }
-    if (_pointerDown || isRecording || (overlayEntry?.mounted ?? false)) {
+    if (_pointerDown || isRecording || _overlayPresent) {
       isCancelSend = true;
       _convertToTextPending = false;
       _dismissConvertReview();
@@ -1523,6 +1685,7 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     _pressTimer?.cancel();
     _stopLevelFallbackTimer();
     _recordStopFallbackTimer?.cancel();
+    _preparingFallbackTimer?.cancel();
     unawaited(SoundPlayer.stopRecord());
     _hideOverlay();
     _convertedTextController.dispose();
@@ -1540,6 +1703,13 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     }
     final responseSubscription = SoundPlayer.responseListener((recordResponse) {
       final status = recordResponse.msg;
+      _recordLog('native_callback', extras: {
+        'status': status,
+        'path': recordResponse.path,
+        'duration': recordResponse.audioTimeLength,
+        'state': _recordState.name,
+        'pointerDown': _pointerDown,
+      });
       if (status == "onStop") {
         unawaited(_onRecorderStop(
           model: model,
@@ -1556,9 +1726,20 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
         if (!_pointerDown ||
             _recordState == _RecordInputState.stopping ||
             _recordState == _RecordInputState.cancelled) {
+          _recordLog('on_start_abort', extras: {
+            'reason': 'pointer_released_or_stopping',
+            'pointerDown': _pointerDown,
+            'state': _recordState.name,
+          });
           unawaited(SoundPlayer.stopRecord());
           return;
         }
+        _preparingFallbackTimer?.cancel();
+        _preparingFallbackTimer = null;
+        _recordLog('on_start_ok', extras: {
+          'isRecording': isRecording,
+          'overlayMounted': _overlayPresent,
+        });
         outputLogger.i("start record");
         HapticFeedback.mediumImpact();
         _recordState = _RecordInputState.recording;
@@ -1569,7 +1750,6 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
             soundTipsText = _centerHintText;
             _resetAmplitudeState();
           });
-          _showOverlay();
           _startLevelFallbackTimer();
           overlayEntry?.markNeedsBuild();
         }
@@ -1582,8 +1762,7 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
       if (!mounted) {
         return;
       }
-      if (_recordState != _RecordInputState.recording ||
-          !(overlayEntry?.mounted ?? false)) {
+      if (_recordState != _RecordInputState.recording || !_overlayPresent) {
         return;
       }
       final now = DateTime.now();
@@ -1595,11 +1774,14 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
       overlayEntry?.markNeedsBuild();
     });
     subscriptions = [responseSubscription, amplitudesResponseSubscription];
+    _recordLog('init_sound_player_start');
     await SoundPlayer.initSoundPlayer();
     if (!mounted) {
+      _recordLog('init_sound_player_unmounted');
       return;
     }
     isInit = SoundPlayer.isInit;
+    _recordLog('init_sound_player_done', extras: {'isInit': isInit});
     if (!isInit) {
       onTIMCallback(TIMCallback(
         type: TIMCallbackType.INFO,
@@ -1617,12 +1799,24 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
     final isActive = isRecording || _isPressing;
     final hintText = isActive ? '松开 结束' : '点击 或 长按 开始录音';
 
-    return Listener(
-      onPointerDown: _onPointerDown,
-      onPointerMove: _onPointerMove,
-      onPointerUp: _onPointerUp,
-      onPointerCancel: _onPointerCancel,
+    // 中优先级：用 RawGestureDetector + EagerGestureRecognizer 在 pointer down 时
+    // 立即声明手势独占，防止 iOS 系统边缘返回手势（System gesture gate）与
+    // 录音 Listener 竞争导致 "System gesture gate timed out" 和卡死。
+    return RawGestureDetector(
+      gestures: <Type, GestureRecognizerFactory>{
+        EagerGestureRecognizer:
+            GestureRecognizerFactoryWithHandlers<EagerGestureRecognizer>(
+          () => EagerGestureRecognizer(),
+          (EagerGestureRecognizer instance) {},
+        ),
+      },
       behavior: HitTestBehavior.opaque,
+      child: Listener(
+        onPointerDown: _onPointerDown,
+        onPointerMove: _onPointerMove,
+        onPointerUp: _onPointerUp,
+        onPointerCancel: _onPointerCancel,
+        behavior: HitTestBehavior.opaque,
       child: ColoredBox(
         color: panelColor,
         child: SizedBox(
@@ -1677,6 +1871,7 @@ class _SendSoundMessageState extends TIMUIKitState<SendSoundMessage>
             ],
           ),
         ),
+      ),
       ),
     );
   }
@@ -1748,4 +1943,3 @@ class _DiamondDotsPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
-

@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart';
+import 'package:tencent_cloud_chat_demo/utils/avatar_image_warm.dart';
 
 enum AndroidPerformanceTier { low, medium, normal }
 
@@ -111,9 +112,12 @@ class AndroidPerformanceProfile {
     AndroidPerformanceTier tier,
   ) =>
       switch (tier) {
-        AndroidPerformanceTier.low => 120,
-        AndroidPerformanceTier.medium => 140,
-        AndroidPerformanceTier.normal => 160,
+        // Keep roughly 2-3 mobile rows (and one desktop viewport) mounted
+        // ahead of the finger. Thumb avatars are small enough that this is a
+        // better first-frame tradeoff than waiting for a row to be built.
+        AndroidPerformanceTier.low => 240,
+        AndroidPerformanceTier.medium => 360,
+        AndroidPerformanceTier.normal => 480,
       };
 
   double get conversationFeedCacheExtent =>
@@ -146,6 +150,7 @@ class AndroidPerformanceProfile {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
       return;
     }
+    AvatarImageWarm.clearRetainedDecoded();
     PaintingBinding.instance.imageCache.clearLiveImages();
   }
 

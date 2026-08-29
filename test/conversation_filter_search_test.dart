@@ -19,7 +19,7 @@ void main() {
     expect(range.searchTimePeriod, lessThan(86400));
   });
 
-  test('conversation filter prefers searchLocalMessages then history scan', () {
+  test('conversation filter prefers cloud, then local and history scan', () {
     final source = File(
       'third_party/tencent_cloud_chat_uikit/lib/business_logic/'
       'view_models/tui_search_view_model.dart',
@@ -27,18 +27,24 @@ void main() {
 
     expect(source, contains('searchConversationWithFilter'));
     expect(source, contains('_searchConversationFilterViaLocalMessages'));
+    expect(source, contains('_searchConversationFilterViaCloudMessages'));
     expect(source, contains('_searchConversationFilterViaHistoryScan'));
     expect(source, contains('_conversationFilterPreferHistoryScan'));
     expect(source, contains('_conversationFilterSearchPageIndex'));
 
-    final filterFn = source.indexOf('Future<void> searchConversationWithFilter(');
+    final filterFn =
+        source.indexOf('Future<void> searchConversationWithFilter(');
     final localFn = source.indexOf(
       'Future<bool> _searchConversationFilterViaLocalMessages(',
+    );
+    final cloudFn = source.indexOf(
+      'Future<bool> _searchConversationFilterViaCloudMessages(',
     );
     final scanFn = source.indexOf(
       'Future<void> _searchConversationFilterViaHistoryScan(',
     );
     expect(filterFn, greaterThanOrEqualTo(0));
+    expect(cloudFn, greaterThan(filterFn));
     expect(localFn, greaterThan(filterFn));
     expect(scanFn, greaterThan(localFn));
 
@@ -51,9 +57,47 @@ void main() {
     expect(localBody, contains('_conversationFilterSearchMessageTypes'));
 
     final entryBody = source.substring(filterFn, localFn);
+    expect(entryBody, contains('_searchConversationFilterViaCloudMessages'));
     expect(entryBody, contains('_searchConversationFilterViaLocalMessages'));
     expect(entryBody, contains('_searchConversationFilterViaHistoryScan'));
     expect(entryBody, contains('_conversationFilterPreferHistoryScan = true'));
+
+    final cloudBody = source.substring(cloudFn, localFn);
+    expect(cloudBody, contains('searchCloudMessages'));
+    expect(cloudBody, contains('searchCursor: _conversationFilterCloudCursor'));
+    expect(cloudBody, contains('userIDList: senderList'));
+    expect(cloudBody, contains('searchTimePosition:'));
+    expect(cloudBody, contains('searchTimePeriod:'));
+  });
+
+  test('media and file filters use cloud cursor with local fallback', () {
+    final source = File(
+      'third_party/tencent_cloud_chat_uikit/lib/business_logic/'
+      'view_models/tui_search_view_model.dart',
+    ).readAsStringSync();
+
+    final keywordStart = source.indexOf(
+      'Future<void> loadMediaAndFileForConversation(',
+    );
+    final assetStart = source.indexOf(
+      'Future<void> loadConversationAssets(',
+    );
+    final searchStart = source.indexOf('void searchFriendByKey(');
+    expect(keywordStart, greaterThanOrEqualTo(0));
+    expect(assetStart, greaterThan(keywordStart));
+    expect(searchStart, greaterThan(assetStart));
+
+    final keywordBody = source.substring(keywordStart, assetStart);
+    expect(keywordBody, contains('searchCloudMessages'));
+    expect(keywordBody, contains('searchCursor: _mediaFileCloudCursor'));
+    expect(keywordBody, contains('V2TIM_ELEM_TYPE_FILE'));
+    expect(keywordBody, contains('_loadConversationHistoryBatch'));
+
+    final assetBody = source.substring(assetStart, searchStart);
+    expect(assetBody, contains('searchCloudMessages'));
+    expect(assetBody, contains('searchCursor: _conversationAssetCloudCursor'));
+    expect(assetBody, contains('_conversationAssetSearchMessageTypes'));
+    expect(assetBody, contains('_loadConversationHistoryBatch'));
   });
 
   test('chat history date search uses Cupertino sheet like live schedule', () {

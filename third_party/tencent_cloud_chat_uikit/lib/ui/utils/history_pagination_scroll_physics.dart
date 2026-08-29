@@ -10,11 +10,17 @@ class HistoryPaginationScrollPhysics extends ScrollPhysics {
   const HistoryPaginationScrollPhysics({
     super.parent,
     this.shouldCompensate,
+    this.shouldPreserveNewestInsertExtent,
     this.pinnedNearTopTolerancePx = 160.0,
   });
 
   /// 返回 true 时启用补偿（上拉分页加载窗口内）。
   final bool Function()? shouldCompensate;
+
+  /// A reverse chat list inserts newest messages at its minimum scroll edge.
+  /// Compensating max-extent growth here keeps existing rows fixed before the
+  /// frame is painted (used when a context menu flushes buffered messages).
+  final bool Function()? shouldPreserveNewestInsertExtent;
 
   /// 与上拉触发阈值一致：贴顶时不做 extent+=growth（会落到新批次最旧一条），改由消息锚点恢复。
   final double pinnedNearTopTolerancePx;
@@ -24,6 +30,7 @@ class HistoryPaginationScrollPhysics extends ScrollPhysics {
     return HistoryPaginationScrollPhysics(
       parent: buildParent(ancestor),
       shouldCompensate: shouldCompensate,
+      shouldPreserveNewestInsertExtent: shouldPreserveNewestInsertExtent,
       pinnedNearTopTolerancePx: pinnedNearTopTolerancePx,
     );
   }
@@ -51,8 +58,28 @@ class HistoryPaginationScrollPhysics extends ScrollPhysics {
     required double anchorMaxExtent,
     double tolerancePx = 2.0,
   }) {
-    return anchorMaxExtent > 0 &&
-        anchorPixels > anchorMaxExtent + tolerancePx;
+    return anchorMaxExtent > 0 && anchorPixels > anchorMaxExtent + tolerancePx;
+  }
+
+  /// Converts a visible row's viewport drift into scroll pixels while
+  /// respecting reverse scroll axes.
+  static double restorePixelsForViewportAnchor({
+    required AxisDirection axisDirection,
+    required double currentPixels,
+    required double currentAnchorTop,
+    required double desiredAnchorTop,
+    required double minScrollExtent,
+    required double maxScrollExtent,
+  }) {
+    final viewportDrift = currentAnchorTop - desiredAnchorTop;
+    final scrollDelta = switch (axisDirection) {
+      AxisDirection.down || AxisDirection.right => viewportDrift,
+      AxisDirection.up || AxisDirection.left => -viewportDrift,
+    };
+    return (currentPixels + scrollDelta).clamp(
+      minScrollExtent,
+      maxScrollExtent,
+    );
   }
 
   @override
@@ -68,7 +95,10 @@ class HistoryPaginationScrollPhysics extends ScrollPhysics {
       isScrolling: isScrolling,
       velocity: velocity,
     );
-    if (!(shouldCompensate?.call() ?? false)) {
+    final compensatePagination = shouldCompensate?.call() ?? false;
+    final preserveNewestInsert =
+        shouldPreserveNewestInsertExtent?.call() ?? false;
+    if (!compensatePagination && !preserveNewestInsert) {
       return pixels;
     }
 
@@ -78,13 +108,31 @@ class HistoryPaginationScrollPhysics extends ScrollPhysics {
     final pinnedToOldMax = oldPosition.maxScrollExtent > 0 &&
         oldPosition.pixels >=
             oldPosition.maxScrollExtent - pinnedNearTopTolerancePx;
-    if (maxGrowth > 0.5 && !pinnedToOldMax) {
+    // Chat history uses `reverse: true` (AxisDirection.up). Older rows are
+    // appended at the visual top, so maxExtent grows without moving the
+    // existing rows relative to the viewport. Adding the growth to pixels in
+    // this direction would move the reader toward the newly inserted page.
+    final growsTowardViewportEnd =
+        newPosition.axisDirection == AxisDirection.down ||
+            newPosition.axisDirection == AxisDirection.right;
+    final newestGrowsFromMinEdge =
+        newPosition.axisDirection == AxisDirection.up ||
+            newPosition.axisDirection == AxisDirection.left;
+    if (preserveNewestInsert && maxGrowth > 0.5 && newestGrowsFromMinEdge) {
+      // `reverse: true`: new rows grow from the visual bottom/min edge. Move
+      // pixels by the same extent before paint so every existing row remains
+      // at its previous viewport coordinate.
+      pixels += maxGrowth;
+    } else if (compensatePagination &&
+        maxGrowth > 0.5 &&
+        !pinnedToOldMax &&
+        growsTowardViewportEnd) {
       // 中部上翻：同步补偿 prepend 高度，视口内消息不动、新历史从顶部插入。
       pixels += maxGrowth;
     }
 
     final maxShrink = oldPosition.maxScrollExtent - newPosition.maxScrollExtent;
-    if (maxShrink > 0.5) {
+    if (compensatePagination && maxShrink > 0.5) {
       pixels -= maxShrink;
     }
 

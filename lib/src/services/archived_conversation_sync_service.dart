@@ -8,6 +8,7 @@ import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.
 import 'package:tencent_cloud_chat_demo/src/services/conversation_folder_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_realtime/friend_realtime_event.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/archived_conversation_ref.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/message_conversation_id.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
@@ -29,26 +30,50 @@ class ArchivedConversationSyncService {
   static const int _batchSize = 100;
 
   DateTime? _lastLoginSyncAt;
+  SessionIdentity? _lastLoginSyncIdentity;
+  SessionIdentity? _loginSyncIdentity;
   Future<void>? _loginSyncInFlight;
+  SessionIdentity? _refreshIdentity;
   Future<void>? _refreshInFlight;
 
   Future<void> syncOnLogin({bool force = false}) {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return Future<void>.value();
     if (!force &&
+        _lastLoginSyncIdentity == identity &&
         _lastLoginSyncAt != null &&
         DateTime.now().difference(_lastLoginSyncAt!) < _loginSyncCooldown) {
       return Future<void>.value();
     }
-    return _loginSyncInFlight ??= _syncOnLogin(force: force).whenComplete(() {
-      _loginSyncInFlight = null;
+    final running = _loginSyncInFlight;
+    if (running != null && _loginSyncIdentity == identity) return running;
+    late final Future<void> task;
+    task = _syncOnLogin(force: force, identity: identity).whenComplete(() {
+      if (identical(_loginSyncInFlight, task)) {
+        _loginSyncInFlight = null;
+        _loginSyncIdentity = null;
+      }
     });
+    _loginSyncIdentity = identity;
+    _loginSyncInFlight = task;
+    return task;
   }
 
-  Future<void> _syncOnLogin({required bool force}) async {
+  Future<void> _syncOnLogin({
+    required bool force,
+    required SessionIdentity identity,
+  }) async {
     try {
-      await ensureArchivedConversationIDsLoaded();
-      await _migrateLocalToServerIfNeeded();
-      await refreshFromServer();
+      await ensureArchivedConversationIDsLoaded(
+        accountScope: _prefsScope(identity),
+      );
+      if (!_isCurrent(identity)) return;
+      await _migrateLocalToServerIfNeeded(identity);
+      if (!_isCurrent(identity)) return;
+      await refreshFromServer(expectedIdentity: identity);
+      if (!_isCurrent(identity)) return;
       _lastLoginSyncAt = DateTime.now();
+      _lastLoginSyncIdentity = identity;
     } catch (e, st) {
       debugPrint('ArchivedConversationSync: login sync failed: $e\n$st');
       if (force) {
@@ -61,7 +86,11 @@ class ArchivedConversationSyncService {
   Future<void> setArchivedForConversations(
     List<V2TimConversation> conversations, {
     required bool archived,
+    SessionIdentity? expectedIdentity,
   }) async {
+    final identity =
+        expectedIdentity ?? SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty || !_isCurrent(identity)) return;
     if (conversations.isEmpty) {
       return;
     }
@@ -92,12 +121,21 @@ class ArchivedConversationSyncService {
     // 归档 ↔ 分组互斥：归档时先踢出全部分组。
     if (archived) {
       await ConversationFolderSyncService.instance
-          .removeConversationsFromAllFolders(conversations);
+          .removeConversationsFromAllFolders(
+        conversations,
+        expectedIdentity: identity,
+      );
+      if (!_isCurrent(identity)) return;
     }
     for (final scope in ConversationArchiveScope.values) {
-      await saveArchivedConversationIDs(scope, idsByScope[scope]!);
+      await saveArchivedConversationIDs(
+        scope,
+        idsByScope[scope]!,
+        accountScope: _prefsScope(identity),
+      );
+      if (!_isCurrent(identity)) return;
     }
-    unawaited(_reportToServer(refs, archived: archived));
+    unawaited(_reportToServer(refs, archived: archived, identity: identity));
   }
 
   /// 清空聊天记录后重申归档状态。
@@ -110,6 +148,8 @@ class ArchivedConversationSyncService {
     required bool isGroup,
     required String peerId,
   }) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty || !_isCurrent(identity)) return;
     final normalized = isGroup
         ? ChatIdFormat.canonicalGroupStorageId(peerId)
         : ChatIdFormat.rawUserUid(peerId);
@@ -120,7 +160,10 @@ class ArchivedConversationSyncService {
       chatType: isGroup ? 'group' : 'c2c',
       peerId: normalized,
     );
-    await ensureArchivedConversationIDsLoaded();
+    await ensureArchivedConversationIDsLoaded(
+      accountScope: _prefsScope(identity),
+    );
+    if (!_isCurrent(identity)) return;
     final notifier = archivedConversationIDsNotifierFor(ref.scope);
     final wasArchived = notifier.value.any(
       (id) => MessageConversationId.sameConversation(id, ref.conversationId),
@@ -133,7 +176,9 @@ class ArchivedConversationSyncService {
       await saveArchivedConversationIDs(
         ref.scope,
         {...notifier.value, ref.conversationId},
+        accountScope: _prefsScope(identity),
       );
+      if (!_isCurrent(identity)) return;
     }
     try {
       await ArchivedConversationApi.instance.update(
@@ -147,11 +192,14 @@ class ArchivedConversationSyncService {
   }
 
   Future<void> handleRealtimeEvent(FriendRealtimeEvent event) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty || !_isCurrent(identity)) return;
     if (event.event.trim() != 'conversation_archive_changed') {
       return;
     }
     if (event.archiveBatch == true) {
-      await refreshFromServer();
+      await refreshFromServer(expectedIdentity: identity);
+      if (!_isCurrent(identity)) return;
       ConversationRefreshBus.instance.requestRefresh(
         reason: 'conversation_archive_remote_batch',
       );
@@ -159,7 +207,8 @@ class ArchivedConversationSyncService {
     }
     final ref = _refFromRealtimeEvent(event);
     if (ref == null) {
-      await refreshFromServer();
+      await refreshFromServer(expectedIdentity: identity);
+      if (!_isCurrent(identity)) return;
       ConversationRefreshBus.instance.requestRefresh(
         reason: 'conversation_archive_remote_fallback',
       );
@@ -178,20 +227,37 @@ class ArchivedConversationSyncService {
         (id) => MessageConversationId.sameConversation(id, ref.conversationId),
       );
     }
-    await saveArchivedConversationIDs(ref.scope, ids);
+    await saveArchivedConversationIDs(
+      ref.scope,
+      ids,
+      accountScope: _prefsScope(identity),
+    );
+    if (!_isCurrent(identity)) return;
     ConversationRefreshBus.instance.requestRefresh(
       reason: 'conversation_archive_remote',
       conversationId: ref.conversationId,
     );
   }
 
-  Future<void> refreshFromServer() async {
-    return _refreshInFlight ??= _refreshFromServerCore().whenComplete(() {
-      _refreshInFlight = null;
+  Future<void> refreshFromServer({SessionIdentity? expectedIdentity}) async {
+    final identity =
+        expectedIdentity ?? SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty || !_isCurrent(identity)) return;
+    final running = _refreshInFlight;
+    if (running != null && _refreshIdentity == identity) return running;
+    late final Future<void> task;
+    task = _refreshFromServerCore(identity).whenComplete(() {
+      if (identical(_refreshInFlight, task)) {
+        _refreshInFlight = null;
+        _refreshIdentity = null;
+      }
     });
+    _refreshIdentity = identity;
+    _refreshInFlight = task;
+    return task;
   }
 
-  Future<void> _refreshFromServerCore() async {
+  Future<void> _refreshFromServerCore(SessionIdentity identity) async {
     final c2cIds = <String>{};
     final groupIds = <String>{};
     int? pageSince;
@@ -205,6 +271,7 @@ class ArchivedConversationSyncService {
       final page = await ArchivedConversationApi.instance.fetch(
         since: pageSince != null && pageSince > 0 ? pageSince : null,
       );
+      if (!_isCurrent(identity)) return;
       for (final item in page.items) {
         final ref = ArchivedConversationRef(
           chatType: item.chatType,
@@ -237,6 +304,7 @@ class ArchivedConversationSyncService {
         break;
       }
     }
+    if (!_isCurrent(identity)) return;
     // 清空聊天记录宽限期内的会话：服务端快照可能因清档级联暂时缺失
     // 其归档标记，保留本地状态，等重申（reassert）落地后自然一致。
     for (final id in archivedConversationC2cIDsNotifier.value) {
@@ -249,8 +317,18 @@ class ArchivedConversationSyncService {
         groupIds.add(id);
       }
     }
-    await saveArchivedConversationIDs(ConversationArchiveScope.c2c, c2cIds);
-    await saveArchivedConversationIDs(ConversationArchiveScope.group, groupIds);
+    await saveArchivedConversationIDs(
+      ConversationArchiveScope.c2c,
+      c2cIds,
+      accountScope: _prefsScope(identity),
+    );
+    if (!_isCurrent(identity)) return;
+    await saveArchivedConversationIDs(
+      ConversationArchiveScope.group,
+      groupIds,
+      accountScope: _prefsScope(identity),
+    );
+    if (!_isCurrent(identity)) return;
     // 服务端快照落地后，立刻按可解析会话调和入口，避免脏 ID 空入口。
     unawaited(
       ArchivedConversationEntryVisibility.instance
@@ -261,12 +339,12 @@ class ArchivedConversationSyncService {
           .reconcile(ConversationArchiveScope.group),
     );
     if (lastCursor != null && lastCursor > 0) {
-      await _writeSinceCursor(lastCursor);
+      await _writeSinceCursor(lastCursor, identity);
     }
   }
 
-  Future<void> _migrateLocalToServerIfNeeded() async {
-    if (await _isMigrated()) {
+  Future<void> _migrateLocalToServerIfNeeded(SessionIdentity identity) async {
+    if (await _isMigrated(identity)) {
       return;
     }
     final localItems = <ArchivedConversationItem>[];
@@ -303,15 +381,18 @@ class ArchivedConversationSyncService {
           localItems.sublist(offset, end),
           archived: true,
         );
+        if (!_isCurrent(identity)) return;
       }
     }
-    await _markMigrated();
+    await _markMigrated(identity);
   }
 
   Future<void> _reportToServer(
     List<ArchivedConversationRef> refs, {
     required bool archived,
+    required SessionIdentity identity,
   }) async {
+    if (!_isCurrent(identity)) return;
     try {
       if (refs.length == 1) {
         final ref = refs.first;
@@ -331,6 +412,7 @@ class ArchivedConversationSyncService {
           )
           .toList(growable: false);
       for (var offset = 0; offset < items.length; offset += _batchSize) {
+        if (!_isCurrent(identity)) return;
         final end = offset + _batchSize > items.length
             ? items.length
             : offset + _batchSize;
@@ -363,14 +445,16 @@ class ArchivedConversationSyncService {
 
   Future<void> clearSession() async {
     _lastLoginSyncAt = null;
+    _lastLoginSyncIdentity = null;
+    _loginSyncIdentity = null;
     _loginSyncInFlight = null;
     _refreshInFlight = null;
+    _refreshIdentity = null;
     clearArchivedConversationSessionState();
   }
 
   /// 注销：删除该账号归档同步 prefs，并卸内存。
   Future<void> clearForOwner(String? ownerUserId) async {
-    await clearSession();
     final scope = ContactSocialCacheStore.accountScopeForUserId(ownerUserId);
     if (scope.isEmpty || scope == '_guest') {
       return;
@@ -378,25 +462,36 @@ class ArchivedConversationSyncService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('$_migratedPrefix$scope');
     await prefs.remove('$_sincePrefix$scope');
+    await clearArchivedConversationDataForAccountScope(scope);
+    if (_prefsScope(SessionIdentityService.instance.capture()) == scope) {
+      await clearSession();
+    }
   }
 
-  String _prefsScope() => ContactSocialCacheStore.accountScope();
+  bool _isCurrent(SessionIdentity identity) =>
+      SessionIdentityService.instance.isCurrent(identity);
 
-  Future<bool> _isMigrated() async {
+  String _prefsScope(SessionIdentity identity) =>
+      ContactSocialCacheStore.accountScopeForUserId(identity.ownerUserId);
+
+  Future<bool> _isMigrated(SessionIdentity identity) async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool('$_migratedPrefix${_prefsScope()}') == true;
+    if (!_isCurrent(identity)) return true;
+    return prefs.getBool('$_migratedPrefix${_prefsScope(identity)}') == true;
   }
 
-  Future<void> _markMigrated() async {
+  Future<void> _markMigrated(SessionIdentity identity) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('$_migratedPrefix${_prefsScope()}', true);
+    if (!_isCurrent(identity)) return;
+    await prefs.setBool('$_migratedPrefix${_prefsScope(identity)}', true);
   }
 
-  Future<void> _writeSinceCursor(int since) async {
+  Future<void> _writeSinceCursor(int since, SessionIdentity identity) async {
     if (since <= 0) {
       return;
     }
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt('$_sincePrefix${_prefsScope()}', since);
+    if (!_isCurrent(identity)) return;
+    await prefs.setInt('$_sincePrefix${_prefsScope(identity)}', since);
   }
 }

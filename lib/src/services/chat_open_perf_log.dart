@@ -4,18 +4,22 @@ import 'package:flutter/foundation.dart';
 ///
 /// 用法：Xcode / `flutter logs` / Android logcat 搜 `ChatOpenPerf`。
 /// 每条含 `elapsedMs`（距点击）与 `deltaMs`（距上一里程碑），以及 `region` 中文阶段名。
-/// 追完沉重感后把 [enabled] 改回 false。
+/// Debug 和 Profile 默认输出，Release 永不输出。
 class ChatOpenPerfLog {
   ChatOpenPerfLog._();
 
-  /// 发布版进页追沉重感时保持 true；收工后改 false。
-  static const bool enabled = false;
+  /// Debug 构建直接输出，便于本地复现打开聊天慢的问题。
+  static const bool enabled = kDebugMode;
 
-  /// Profile 构建下默认可开，便于真机采进页里程碑。
-  static const bool enabledInProfile = false;
+  /// Profile 构建也输出，便于在真机上采集真实首帧耗时。
+  static const bool enabledInProfile = true;
 
   static bool get isEnabled =>
-      enabled || (kProfileMode && enabledInProfile);
+      !kReleaseMode && (enabled || (kProfileMode && enabledInProfile));
+
+  /// Tests can capture the exact line without scraping stdout.
+  @visibleForTesting
+  static void Function(String line)? debugSink;
 
   static String _sessionId = '';
   static int _t0Ms = 0;
@@ -43,8 +47,7 @@ class ChatOpenPerfLog {
     _lastEvent = 'session_begin';
     _firstMessagesVisibleLogged = false;
     _historyListBuiltLogged = false;
-    _sessionId =
-        'open_${_t0Ms.toRadixString(36)}_${id.hashCode.toRadixString(16)}';
+    _sessionId = 'open_${_t0Ms.toRadixString(36)}_${_hashId(id)}';
     _print(
       'session_begin',
       extras: <String, Object?>{
@@ -138,13 +141,15 @@ class ChatOpenPerfLog {
       return;
     }
     final now = DateTime.now().millisecondsSinceEpoch;
-    // ignore: avoid_print
-    print(
-      '[ChatOpenPerf] event=open_summary '
-      'conv=$_convId session=$_sessionId '
-      'region=${regionOf('open_summary')} '
-      'totalMs=${now - _t0Ms} '
-      'note=从点击会话到消息首次可见',
+    _print(
+      'open_summary',
+      extras: <String, Object?>{
+        'session': _sessionId.isEmpty ? '-' : _sessionId,
+        'region': regionOf('open_summary'),
+        'totalMs': now - _t0Ms,
+        'lastEvent': _lastEvent.isEmpty ? '-' : _lastEvent,
+        'note': '从点击会话到消息首次可见',
+      },
     );
   }
 
@@ -199,6 +204,10 @@ class ChatOpenPerfLog {
         return '⑤prepareGate完成';
       case 'history_list_first_build':
         return '⑥消息列表首次build';
+      case 'opening_placeholder_first_paint':
+        return '⑥冷开气泡占位首帧';
+      case 'opening_placeholder_removed':
+        return '⑦冷开气泡占位移除';
       case 'messages_first_visible':
         return '⑦消息首次可见';
       case 'open_summary':
@@ -212,6 +221,9 @@ class ChatOpenPerfLog {
       case 'mute_network_fetch_start':
         return '禁言网络拉取开始';
       default:
+        if (event.startsWith('c2c_')) {
+          return '⑤单聊历史/$event';
+        }
         if (event.startsWith('bootstrap_')) {
           return '②bootstrap/$event';
         }
@@ -233,16 +245,75 @@ class ChatOpenPerfLog {
     final buffer = StringBuffer('[ChatOpenPerf] event=$event');
     final id = (conversationID ?? _convId).trim();
     if (id.isNotEmpty) {
-      buffer.write(' conv=$id');
+      buffer.write(' convHash=${_hashId(id)}');
     }
     for (final entry in extras.entries) {
-      final value = entry.value;
+      final value = _formatExtra(entry.key, entry.value);
       if (value == null) {
         continue;
       }
       buffer.write(' ${entry.key}=$value');
     }
-    // ignore: avoid_print
-    print(buffer.toString());
+    final line = buffer.toString();
+    final sink = debugSink;
+    if (sink != null) {
+      sink(line);
+    }
+  }
+
+  static String _hashId(String value) {
+    final normalized = value.trim();
+    if (normalized.isEmpty) {
+      return '';
+    }
+    // Stable, short process-independent fingerprint; raw IDs never enter logs.
+    var hash = 0x811c9dc5;
+    for (final codeUnit in normalized.codeUnits) {
+      hash ^= codeUnit;
+      hash = (hash * 0x01000193) & 0xffffffff;
+    }
+    return hash.toRadixString(16).padLeft(8, '0');
+  }
+
+  static String? _formatExtra(String key, Object? value) {
+    if (value == null) {
+      return null;
+    }
+    final normalizedKey = key.toLowerCase().replaceAll('_', '');
+    if (normalizedKey == 'session') {
+      return _singleLine(value.toString());
+    }
+    if (_isSensitiveIdentifierKey(normalizedKey)) {
+      return _hashId(value.toString());
+    }
+    if (_isSensitiveContentKey(normalizedKey)) {
+      return '<redacted>';
+    }
+    return _singleLine(value.toString());
+  }
+
+  static bool _isSensitiveIdentifierKey(String key) {
+    return key == 'key' ||
+        key.endsWith('id') ||
+        key.contains('convid') ||
+        key.contains('conversationid') ||
+        key.contains('msgid') ||
+        key.contains('messageid') ||
+        key.contains('anchor');
+  }
+
+  static bool _isSensitiveContentKey(String key) {
+    return key == 'lastmessage' ||
+        key == 'messagebody' ||
+        key == 'content' ||
+        key == 'text';
+  }
+
+  static String _singleLine(String value) {
+    final normalized = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (normalized.length <= 160) {
+      return normalized;
+    }
+    return '${normalized.substring(0, 157)}...';
   }
 }

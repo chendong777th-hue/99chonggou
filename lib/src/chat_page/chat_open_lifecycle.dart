@@ -1,5 +1,15 @@
+enum ChatOpenPhase {
+  created,
+  historyReady,
+  interactive,
+  enriched,
+  disposed,
+}
+
 /// One-shot / gate flags for opening a chat conversation page.
 class ChatOpenLifecycle {
+  ChatOpenPhase phase = ChatOpenPhase.created;
+  int conversationGeneration = 0;
   bool postOpenTasksScheduled = false;
   bool muteStatusFetchStarted = false;
   bool scheduledVisibleSdkUnreadClean = false;
@@ -12,6 +22,40 @@ class ChatOpenLifecycle {
 
   /// 递增后丢弃已 schedule 的禁言网络补证（退页 / 重进）。
   int muteFetchGeneration = 0;
+
+  int beginConversation() {
+    cancelPendingMuteFetch();
+    cancelPendingPostOpenTasks();
+    phase = ChatOpenPhase.created;
+    openHistoryGate = null;
+    openHistoryPreparationGate = null;
+    openHistoryGateConvKey = '';
+    return ++conversationGeneration;
+  }
+
+  bool markHistoryReady(int generation) =>
+      _advance(generation, ChatOpenPhase.created, ChatOpenPhase.historyReady);
+
+  bool markInteractive(int generation) => _advance(
+        generation,
+        ChatOpenPhase.historyReady,
+        ChatOpenPhase.interactive,
+      );
+
+  bool markEnriched(int generation) =>
+      _advance(generation, ChatOpenPhase.interactive, ChatOpenPhase.enriched);
+
+  bool _advance(
+    int generation,
+    ChatOpenPhase expected,
+    ChatOpenPhase next,
+  ) {
+    if (generation != conversationGeneration || phase != expected) {
+      return false;
+    }
+    phase = next;
+    return true;
+  }
 
   void cancelPendingMuteFetch() {
     muteFetchGeneration++;
@@ -64,5 +108,7 @@ class ChatOpenLifecycle {
     openHistoryGate = null;
     openHistoryPreparationGate = null;
     openHistoryGateConvKey = '';
+    conversationGeneration++;
+    phase = ChatOpenPhase.disposed;
   }
 }

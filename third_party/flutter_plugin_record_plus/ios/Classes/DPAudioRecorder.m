@@ -114,13 +114,10 @@ static DPAudioRecorder *gRecorderManager = nil;
     if (isRecording) return;
     
     [[DPAudioPlayer sharedInstance]stopPlaying];
-    //开始录音
-    [[AVAudioSession sharedInstance] setCategory: AVAudioSessionCategoryPlayAndRecord error:nil];
-    //    //默认情况下扬声器播放
-     AVAudioSessionPortOverride portOverride = AVAudioSessionPortOverrideNone;
-    [[AVAudioSession sharedInstance] overrideOutputAudioPort:portOverride error:nil];
-    
-    [[AVAudioSession sharedInstance] setActive:YES error:nil];
+    // AVAudioSession is configured and activated by the Dart audio-session
+    // owner before this method is called. Do not change category, active state
+    // or output port here: CallKit/LiveKit and voice playback share the same
+    // native session and these calls are not safe to race.
 
     [self.audioRecorder prepareToRecord];
     
@@ -145,14 +142,13 @@ static DPAudioRecorder *gRecorderManager = nil;
 - (void)stopRecording;
 {
     if (!isRecording) return;
-//  try!AVAudioSession.sharedInstance().overrideOutputAudioPort(AVAudioSession.PortOverride.speaker)
     [self shutDownTimer];
     [self.audioRecorder stop];
     self.audioRecorder = nil;
-    
-    //设置播放语音为k公开模式
-    AVAudioSession *avAudioSession = [AVAudioSession sharedInstance];
-    [avAudioSession overrideOutputAudioPort:AVAudioSessionPortOverrideSpeaker error:nil];
+
+    // Route/session handoff is performed after recording by SoundPlayer via
+    // audio_session. Calling overrideOutputAudioPort while AVAudioRecorder is
+    // stopping can return OSStatus -50 and races with the next configure.
 
 }
 

@@ -79,7 +79,6 @@ class UserApi {
   UserApi._();
   static final UserApi instance = UserApi._();
 
-
   Dio get _dio => ApiClient.instance.dio;
 
   Future<AddFriendPrivacySettings> fetchPrivacy() async {
@@ -238,6 +237,18 @@ class UserApi {
     }
   }
 
+  /// 全屏头像预览专用。调用方只能在用户明确进入全屏预览后触发。
+  Future<UserAvatarPreviewResult> fetchUserAvatarPreview(String userId) async {
+    final id = ChatIdFormat.rawUserUid(userId);
+    if (id.isEmpty) {
+      throw const FormatException('userId is empty');
+    }
+    final res = await _dio.get(
+      '/users/${Uri.encodeComponent(id)}/avatar-preview',
+    );
+    return UserAvatarPreviewResult.fromJson(_payloadMap(res.data));
+  }
+
   /// 批量匹配通讯录手机号（注册状态 + 是否好友）。
   Future<List<ContactMatchItem>> matchContacts({
     required List<String> phones,
@@ -380,7 +391,6 @@ Map<String, dynamic> _payloadMap(dynamic raw) {
   return const <String, dynamic>{};
 }
 
-
 bool? _readBool(Map<String, dynamic> json, List<String> keys) {
   for (final key in keys) {
     final value = json[key];
@@ -440,7 +450,6 @@ String? _readKnownNicknameReason(dynamic value) {
   }
   return null;
 }
-
 
 NicknameCheckResult _nicknameCheckResultFromRaw(
   dynamic raw, {
@@ -552,14 +561,13 @@ class NicknameUpdateResult {
 
   factory NicknameUpdateResult.fromJson(Map<String, dynamic> json) =>
       NicknameUpdateResult(
-        nickname: _readString(json, const ['nickname', 'nickName', 'name']) ?? '',
+        nickname:
+            _readString(json, const ['nickname', 'nickName', 'name']) ?? '',
         nextChangeableAt: MeResult.parseIsoDateTime(
           json['nextChangeableAt'] ?? json['next_changeable_at'],
         ),
       );
 }
-
-
 
 /// 加好友渠道，与 POST /users/add-friend/check 的 channel 一致。
 class AddFriendCheckChannel {
@@ -728,7 +736,6 @@ class AddFriendPrivacySettings {
   }
 }
 
-
 int? _parseNullableTimestamp(Object? value) {
   if (value == null) return null;
   if (value is int) return value < 1000000000000 ? value * 1000 : value;
@@ -751,6 +758,7 @@ class UserSearchResult {
     required this.userId,
     required this.nickname,
     this.avatarUrl,
+    this.avatarVersion = 0,
     this.phoneMasked,
     this.lastActiveAt,
     this.lastActiveVisibility,
@@ -759,6 +767,7 @@ class UserSearchResult {
   final String userId;
   final String nickname;
   final String? avatarUrl;
+  final int avatarVersion;
   final String? phoneMasked;
   final int? lastActiveAt;
   final String? lastActiveVisibility;
@@ -767,13 +776,42 @@ class UserSearchResult {
     final avatar = json['avatarUrl'] ?? json['faceUrl'] ?? json['avatar'];
     final lastActiveRaw = json['lastActiveAt'] ?? json['last_active_at'];
     return UserSearchResult(
-      userId: (json['userId'] ?? json['userID'] ?? json['uid'] ?? '').toString(),
+      userId:
+          (json['userId'] ?? json['userID'] ?? json['uid'] ?? '').toString(),
       nickname: (json['nickname'] ?? json['nickName'] ?? '').toString(),
-      avatarUrl: avatar is String && avatar.trim().isNotEmpty ? avatar.trim() : null,
+      avatarUrl:
+          avatar is String && avatar.trim().isNotEmpty ? avatar.trim() : null,
+      avatarVersion: _readInt(
+        json,
+        const ['avatarVersion', 'avatar_version'],
+        fallback: 0,
+      ),
       phoneMasked: (json['phoneMasked'] ?? json['phone_masked'])?.toString(),
       lastActiveAt: _parseNullableTimestamp(lastActiveRaw),
       lastActiveVisibility: json['lastActiveVisibility']?.toString() ??
           json['last_active_visibility']?.toString(),
+    );
+  }
+}
+
+class UserAvatarPreviewResult {
+  const UserAvatarPreviewResult({
+    required this.previewUrl,
+    required this.avatarVersion,
+  });
+
+  final String previewUrl;
+  final int avatarVersion;
+
+  factory UserAvatarPreviewResult.fromJson(Map<String, dynamic> json) {
+    return UserAvatarPreviewResult(
+      previewUrl:
+          (json['previewUrl'] ?? json['preview_url'])?.toString().trim() ?? '',
+      avatarVersion: _readInt(
+        json,
+        const ['avatarVersion', 'avatar_version'],
+        fallback: 0,
+      ),
     );
   }
 }
@@ -806,7 +844,8 @@ class ContactMatchItem {
       registered: _readBool(json, const ['registered']) ?? false,
       userId: (json['userId'] ?? json['userID'] ?? json['uid'])?.toString(),
       nickname: (json['nickname'] ?? json['nickName'])?.toString(),
-      avatarUrl: avatar is String && avatar.trim().isNotEmpty ? avatar.trim() : null,
+      avatarUrl:
+          avatar is String && avatar.trim().isNotEmpty ? avatar.trim() : null,
       isFriend: _readBool(json, const ['isFriend', 'is_friend']),
       lastActiveAt: _parseNullableTimestamp(
         json['lastActiveAt'] ?? json['last_active_at'],

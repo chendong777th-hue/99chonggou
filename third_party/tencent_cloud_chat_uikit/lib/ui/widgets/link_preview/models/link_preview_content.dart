@@ -12,6 +12,7 @@ class LocalCustomDataModel {
   String? translatedText;
   String? voiceToText;
   String? voiceToTextStatus;
+  String? voiceToTextDisplayState;
 
   LocalCustomDataModel({
     this.description,
@@ -21,6 +22,7 @@ class LocalCustomDataModel {
     this.translatedText,
     this.voiceToText,
     this.voiceToTextStatus,
+    this.voiceToTextDisplayState,
   });
 
   Map<String, String?> toMap() {
@@ -32,6 +34,7 @@ class LocalCustomDataModel {
     data['translatedText'] = translatedText;
     data['voiceToText'] = voiceToText;
     data['voiceToTextStatus'] = voiceToTextStatus;
+    data['voiceToTextDisplayState'] = voiceToTextDisplayState;
     return data;
   }
 
@@ -42,7 +45,14 @@ class LocalCustomDataModel {
         translatedText = map['translatedText'],
         voiceToText = map['voiceToText'],
         voiceToTextStatus = map['voiceToTextStatus'],
+        voiceToTextDisplayState = map['voiceToTextDisplayState'],
         title = map['title'];
+
+  bool get isVoiceToTextExpanded => voiceToTextDisplayState != 'collapsed';
+
+  void setVoiceToTextExpanded(bool expanded) {
+    voiceToTextDisplayState = expanded ? 'expanded' : 'collapsed';
+  }
 
   @override
   String toString() {

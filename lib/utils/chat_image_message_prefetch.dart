@@ -11,6 +11,7 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_peek_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/chat_thermal_perf.dart';
 import 'package:tencent_cloud_chat_demo/src/services/message_media_metadata_store.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/conversation_preview_history_sync.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
@@ -20,6 +21,7 @@ import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 import 'package:tencent_cloud_chat_uikit/ui/constants/history_message_constant.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_media_gallery_utils.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_media_send_utils.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/history_pagination_anchor.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/message.dart';
 
 /// 聊天气泡缩略图 disk/memory cache key（与预览原图区分）。
@@ -38,16 +40,40 @@ class ChatOpenPrefetchResult {
   final bool hasMoreOlder;
 }
 
+class _ThumbnailDownloadJob {
+  _ThumbnailDownloadJob(this.key, V2TimMessage message)
+      : messages = <V2TimMessage>[message];
+
+  final String key;
+  final List<V2TimMessage> messages;
+
+  void attach(V2TimMessage message) {
+    if (!messages.any((candidate) => identical(candidate, message))) {
+      messages.add(message);
+    }
+  }
+}
+
 /// 历史消息加载后，预热首屏图片缩略图缓存。
 class ChatImageMessagePrefetch {
   ChatImageMessagePrefetch._();
 
   static const _maxPrefetch = 10;
   static const _maxHistoricalPrefetch = 6;
+  static const _maxInitialMediaMessages = 6;
   static const _maxUrlResolve = 16;
   static const _maxConcurrent = 3;
   static const _maxUrlResolveConcurrent = 8;
   static const _leaveEvictBatchSize = 8;
+  static const _maxThumbnailDownloadConcurrent = 2;
+  static const _maxThumbnailDownloadQueue = 24;
+  static const _maxThumbnailDownloadsPerMinute = 12;
+
+  /// Media is allowed to use a small, bounded part of the chat-open budget.
+  /// URL lookup is intentionally shorter than image warming so a slow IM
+  /// endpoint can never hold the history gate for the whole route transition.
+  static const Duration initialMediaBudget = Duration(milliseconds: 220);
+  static const Duration initialMediaUrlBudget = Duration(milliseconds: 140);
 
   /// 气泡预热位图软顶：超出则 evict 最旧 thumb（保留列表可见命中空间）。
   static const int maxWarmedBubbleProviders = 40;
@@ -56,13 +82,174 @@ class ChatImageMessagePrefetch {
       serviceLocator<MessageService>();
 
   static int _inFlight = 0;
-  static final List<({String url, String cacheKey})> _pending =
-      <({String url, String cacheKey})>[];
+  static final List<({String url, String cacheKey, bool decodeByWidth})>
+      _pending = <({String url, String cacheKey, bool decodeByWidth})>[];
   static final List<({String url, String cacheKey})> _warmedBubbleProviders =
       <({String url, String cacheKey})>[];
 
   static final Map<String, Future<ConversationPeekLoadResult>> _peekInFlight =
       <String, Future<ConversationPeekLoadResult>>{};
+  static final Map<String, Future<V2TimMessage?>> _urlResolveInFlight =
+      <String, Future<V2TimMessage?>>{};
+  static final List<_ThumbnailDownloadJob> _thumbnailDownloadPending =
+      <_ThumbnailDownloadJob>[];
+  static final Map<String, _ThumbnailDownloadJob> _thumbnailDownloadJobs =
+      <String, _ThumbnailDownloadJob>{};
+  static int _thumbnailDownloadInFlight = 0;
+  static final List<int> _thumbnailDownloadStartsMs = <int>[];
+
+  /// C2C inbound thumbnails are persisted while the app is foregrounded.
+  /// This queue downloads compressed THUMB files only; it never decodes them.
+  static void prefetchThumbnailForMessage(V2TimMessage message) {
+    if (kIsWeb || !_isForeground) {
+      return;
+    }
+    if (message.elemType != MessageElemType.V2TIM_ELEM_TYPE_IMAGE &&
+        message.imageElem == null) {
+      return;
+    }
+    if (HistoryPaginationAnchor.isArchiveHistoryMessage(message)) {
+      return;
+    }
+    final msgID = message.msgID?.trim() ?? '';
+    if (msgID.isEmpty) {
+      return;
+    }
+    if (_resolveLocalBubblePath(message) != null) {
+      ChatThermalPerf.increment('thumb_download_skipped_local');
+      return;
+    }
+    final existing = _thumbnailDownloadJobs[msgID];
+    if (existing != null) {
+      existing.attach(message);
+      return;
+    }
+    if (_thumbnailDownloadPending.length >= _maxThumbnailDownloadQueue) {
+      ChatThermalPerf.increment('thumb_download_skipped_queue_full');
+      return;
+    }
+    final job = _ThumbnailDownloadJob(msgID, message);
+    _thumbnailDownloadJobs[msgID] = job;
+    _thumbnailDownloadPending.add(job);
+    _pumpThumbnailDownloads();
+  }
+
+  static void handleAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _pumpThumbnailDownloads();
+      return;
+    }
+    for (final job in _thumbnailDownloadPending) {
+      _thumbnailDownloadJobs.remove(job.key);
+    }
+    _thumbnailDownloadPending.clear();
+  }
+
+  static bool get _isForeground {
+    final state = WidgetsBinding.instance.lifecycleState;
+    return state == null || state == AppLifecycleState.resumed;
+  }
+
+  static void _pumpThumbnailDownloads() {
+    if (!_isForeground) {
+      return;
+    }
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    _thumbnailDownloadStartsMs.removeWhere(
+      (startedMs) => nowMs < startedMs || nowMs - startedMs >= 60000,
+    );
+    if (_thumbnailDownloadStartsMs.length >= _maxThumbnailDownloadsPerMinute) {
+      for (final job in _thumbnailDownloadPending) {
+        _thumbnailDownloadJobs.remove(job.key);
+      }
+      _thumbnailDownloadPending.clear();
+      return;
+    }
+    while (_thumbnailDownloadInFlight < _maxThumbnailDownloadConcurrent &&
+        _thumbnailDownloadPending.isNotEmpty &&
+        _thumbnailDownloadStartsMs.length < _maxThumbnailDownloadsPerMinute) {
+      final job = _thumbnailDownloadPending.removeAt(0);
+      _thumbnailDownloadInFlight++;
+      _thumbnailDownloadStartsMs.add(nowMs);
+      ChatThermalPerf.increment('thumb_download_started');
+      ChatThermalPerf.record(
+        'thumb_download_inflight',
+        _thumbnailDownloadInFlight,
+      );
+      unawaited(
+        _runThumbnailDownload(job).whenComplete(() {
+          _thumbnailDownloadInFlight--;
+          _thumbnailDownloadJobs.remove(job.key);
+          _pumpThumbnailDownloads();
+        }),
+      );
+    }
+  }
+
+  static Future<void> _runThumbnailDownload(
+    _ThumbnailDownloadJob job,
+  ) async {
+    final source = job.messages.first;
+    try {
+      await MessageMediaMetadataStore.instance.hydrateMessages(
+        <V2TimMessage>[source],
+      );
+      if (!_hasLocalThumbFile(source) &&
+          resolveBubbleThumbUrl(source) == null) {
+        await _resolveOnlineUrlForMessage(source);
+      }
+      if (!_isForeground) {
+        return;
+      }
+      if (!_hasLocalThumbFile(source) &&
+          resolveBubbleThumbUrl(source) != null) {
+        final result = await _messageService.downloadMessage(
+          msgID: job.key,
+          message: source,
+          messageType: MessageElemType.V2TIM_ELEM_TYPE_IMAGE,
+          imageType: 1,
+          isSnapshot: false,
+          reportError: false,
+        );
+        if (result.code != 0) {
+          ChatThermalPerf.increment('thumb_download_failed');
+          return;
+        }
+      }
+      if (!_hasLocalThumbFile(source)) {
+        ChatThermalPerf.increment('thumb_download_failed');
+        return;
+      }
+      for (final target in job.messages) {
+        _copyResolvedMedia(source, target);
+      }
+      await MessageMediaMetadataStore.instance.upsertFromMessage(source);
+      if (_isForeground) {
+        _notifyMediaMessageResolved(source);
+      }
+      ChatThermalPerf.increment('thumb_download_completed');
+    } catch (_) {
+      ChatThermalPerf.increment('thumb_download_failed');
+    }
+  }
+
+  @visibleForTesting
+  static int get debugThumbnailDownloadInFlight => _thumbnailDownloadInFlight;
+
+  @visibleForTesting
+  static int get debugThumbnailDownloadPending =>
+      _thumbnailDownloadPending.length;
+
+  @visibleForTesting
+  static int get debugMaxThumbnailDownloadConcurrent =>
+      _maxThumbnailDownloadConcurrent;
+
+  @visibleForTesting
+  static int get debugMaxThumbnailDownloadQueue => _maxThumbnailDownloadQueue;
+
+  @visibleForTesting
+  static int get debugMaxThumbnailDownloadsPerMinute =>
+      _maxThumbnailDownloadsPerMinute;
 
   /// 点击会话时尽早预热（与清未读、路由 push 并行）。
   static void prefetchForConversation(V2TimConversation conversation) {
@@ -73,7 +260,16 @@ class ChatImageMessagePrefetch {
           globalModel.rawMessageCount(key) > 0) {
         final cached = globalModel.getMessageList(key);
         if (cached != null && cached.isNotEmpty) {
-          fromMessages(cached);
+          if ((conversation.userID?.trim() ?? '').isNotEmpty) {
+            prefetchThumbnailsForFirstWindow(cached);
+          }
+          unawaited(
+            prepareFirstWindowMedia(
+              cached,
+              budget: initialMediaBudget,
+              onMessageResolved: _notifyMediaMessageResolved,
+            ),
+          );
           return;
         }
       }
@@ -98,6 +294,18 @@ class ChatImageMessagePrefetch {
     }
     final messages = List<V2TimMessage>.from(result.messages);
     await MessageMediaMetadataStore.instance.hydrateMessages(messages);
+    if ((conversation.userID?.trim() ?? '').isNotEmpty) {
+      prefetchThumbnailsForFirstWindow(messages);
+    }
+    final effectivePrepareBudget = prepareBudget;
+    if (effectivePrepareBudget != null &&
+        effectivePrepareBudget > Duration.zero) {
+      await prepareFirstWindowMedia(
+        messages,
+        budget: effectivePrepareBudget,
+        onMessageResolved: _notifyMediaMessageResolved,
+      );
+    }
     final openResult = ChatOpenPrefetchResult(
       messages: messages,
       hasMoreOlder: result.hasMoreOlder,
@@ -119,7 +327,11 @@ class ChatImageMessagePrefetch {
     required bool hasMoreOlder,
     void Function(ChatOpenPrefetchResult result)? onLatePrepared,
   }) async {
-    await resolveOnlineUrlsForMessages(messages);
+    await resolveOnlineUrlsForMessages(
+      messages,
+      includeSelf: true,
+      onMessageResolved: _notifyMediaMessageResolved,
+    );
     unawaited(MessageMediaMetadataStore.instance.persistFromMessages(messages));
     fromMessages(messages);
     if (warmBudget > Duration.zero) {
@@ -138,7 +350,8 @@ class ChatImageMessagePrefetch {
   ) async {
     final result = await prepareBeforeChatOpen(
       conversation,
-      warmBudget: Duration.zero,
+      warmBudget: initialMediaBudget,
+      prepareBudget: initialMediaBudget,
     );
     if (result.messages.isEmpty) {
       return;
@@ -155,6 +368,7 @@ class ChatImageMessagePrefetch {
         const ConversationPeekLoadResult(
           messages: <V2TimMessage>[],
           hasMoreOlder: false,
+          isFinished: true,
         ),
       );
     }
@@ -169,6 +383,7 @@ class ChatImageMessagePrefetch {
         ConversationPeekLoadResult(
           messages: List<V2TimMessage>.from(cached),
           hasMoreOlder: globalModel.mayHaveOlderHistory(key),
+          isFinished: !globalModel.mayHaveOlderHistory(key),
         ),
       );
     }
@@ -211,10 +426,12 @@ class ChatImageMessagePrefetch {
     Iterable<V2TimMessage?> messages, {
     Duration? budget,
     bool includeSelf = false,
+    void Function(V2TimMessage message)? onMessageResolved,
   }) async {
     final task = _resolveOnlineUrlsForMessages(
       messages,
       includeSelf: includeSelf,
+      onMessageResolved: onMessageResolved,
     );
     if (budget == null) {
       await task;
@@ -230,6 +447,7 @@ class ChatImageMessagePrefetch {
   static Future<void> _resolveOnlineUrlsForMessages(
     Iterable<V2TimMessage?> messages, {
     bool includeSelf = false,
+    void Function(V2TimMessage message)? onMessageResolved,
   }) async {
     final list = messages.whereType<V2TimMessage>().toList(growable: false);
     await MessageMediaMetadataStore.instance.hydrateMessages(list);
@@ -257,7 +475,15 @@ class ChatImageMessagePrefetch {
         }
         final index = cursor;
         cursor++;
-        await _resolveOnlineUrlForMessage(pending[index]);
+        final message = pending[index];
+        await _resolveOnlineUrlForMessage(message);
+        if (onMessageResolved != null &&
+            !needsOnlineUrlResolution(message, includeSelf: includeSelf)) {
+          onMessageResolved(message);
+          // A URL that arrives after the bounded open budget still gets the
+          // same bubble cache warm-up before the row rebuilds.
+          fromMessages(<V2TimMessage>[message]);
+        }
       }
     }
 
@@ -317,6 +543,31 @@ class ChatImageMessagePrefetch {
       }
     }
     return false;
+  }
+
+  static String? _resolveLocalBubblePath(V2TimMessage message) {
+    if (kIsWeb) {
+      return null;
+    }
+    final imageList = message.imageElem?.imageList;
+    if (imageList != null) {
+      for (final type in const <int>[1, 2]) {
+        for (final image in imageList) {
+          if (image?.type != type) {
+            continue;
+          }
+          final local = image?.localUrl?.trim() ?? '';
+          if (local.isNotEmpty && File(local).existsSync()) {
+            return local;
+          }
+        }
+      }
+    }
+    final path = message.imageElem?.path?.trim() ?? '';
+    if (path.isNotEmpty && File(path).existsSync()) {
+      return path;
+    }
+    return null;
   }
 
   static bool _hasLocalVideoSnapshotFile(V2TimMessage message) {
@@ -392,6 +643,45 @@ class ChatImageMessagePrefetch {
     if (msgID.isEmpty) {
       return;
     }
+    final existing = _urlResolveInFlight[msgID];
+    if (existing != null) {
+      final source = await existing;
+      _copyResolvedMedia(source, message);
+      return;
+    }
+    final task = _resolveOnlineUrlForMessageImpl(message).then((_) => message);
+    _urlResolveInFlight[msgID] = task;
+    try {
+      await task;
+    } finally {
+      if (identical(_urlResolveInFlight[msgID], task)) {
+        _urlResolveInFlight.remove(msgID);
+      }
+    }
+  }
+
+  static void _copyResolvedMedia(
+    V2TimMessage? source,
+    V2TimMessage target,
+  ) {
+    if (source == null || identical(source, target)) {
+      return;
+    }
+    if (source.imageElem != null) {
+      target.imageElem = source.imageElem;
+    }
+    if (source.videoElem != null) {
+      target.videoElem = source.videoElem;
+    }
+  }
+
+  static Future<void> _resolveOnlineUrlForMessageImpl(
+    V2TimMessage message,
+  ) async {
+    final msgID = message.msgID?.trim() ?? '';
+    if (msgID.isEmpty) {
+      return;
+    }
     try {
       final response = await _messageService.getMessageOnlineUrl(
         msgID: msgID,
@@ -409,6 +699,96 @@ class ChatImageMessagePrefetch {
         await MessageMediaMetadataStore.instance.upsertFromMessage(message);
       }
     } catch (_) {}
+  }
+
+  /// Resolves only the newest image rows that can be visible at the bottom of
+  /// the initial window, then warms their bubble thumbnail cache. The caller
+  /// returns immediately by default; callers that opt into [awaitNetwork] get a
+  /// bounded wait. URL/image work continues in the background and the same
+  /// message objects are updated in place.
+  static Future<void> prepareFirstWindowMedia(
+    Iterable<V2TimMessage?> messages, {
+    Duration budget = initialMediaBudget,
+    bool awaitNetwork = false,
+    void Function(V2TimMessage message)? onMessageResolved,
+  }) async {
+    if (budget <= Duration.zero) {
+      return;
+    }
+    final selected = _selectInitialMediaMessages(messages);
+    if (selected.isEmpty) {
+      return;
+    }
+    final stopwatch = Stopwatch()..start();
+    final resolveBudget = _shorterDuration(budget, initialMediaUrlBudget);
+    final resolveTask = resolveOnlineUrlsForMessages(
+      selected,
+      budget: resolveBudget,
+      includeSelf: true,
+      onMessageResolved: onMessageResolved,
+    );
+    if (!awaitNetwork) {
+      // Metadata hydration remains in the task, but URL lookup and image
+      // decode must never hold the history commit or route transition.
+      unawaited(
+        resolveTask.then((_) async {
+          final remaining = budget - stopwatch.elapsed;
+          if (remaining > Duration.zero) {
+            await warmWithBudget(selected, remaining);
+          }
+        }).catchError((_) {}),
+      );
+      return;
+    }
+    await resolveTask;
+    final remaining = budget - stopwatch.elapsed;
+    if (remaining > Duration.zero) {
+      await warmWithBudget(selected, remaining);
+    }
+  }
+
+  /// Schedules only the newest visible-window thumbnails for disk persistence.
+  /// This is safe for direct chat entries because it does not await or decode.
+  static void prefetchThumbnailsForFirstWindow(
+    Iterable<V2TimMessage?> messages,
+  ) {
+    for (final message in _selectInitialMediaMessages(messages)) {
+      prefetchThumbnailForMessage(message);
+    }
+  }
+
+  static List<V2TimMessage> _selectInitialMediaMessages(
+    Iterable<V2TimMessage?> messages,
+  ) {
+    final list = messages.whereType<V2TimMessage>().toList(growable: false);
+    final selected = <V2TimMessage>[];
+    // History windows are chronological here; walk from newest to oldest so
+    // the bottom viewport gets first access to both URL and image cache.
+    for (var index = list.length - 1;
+        index >= 0 && selected.length < _maxInitialMediaMessages;
+        index--) {
+      final message = list[index];
+      if (message.elemType != MessageElemType.V2TIM_ELEM_TYPE_IMAGE &&
+          message.imageElem == null) {
+        continue;
+      }
+      selected.add(message);
+    }
+    // Keep the public list chronological so the existing reverse walkers in
+    // URL resolution and image warming still prioritize the newest row.
+    return selected.reversed.toList(growable: false);
+  }
+
+  static Duration _shorterDuration(Duration left, Duration right) {
+    return left <= right ? left : right;
+  }
+
+  static void _notifyMediaMessageResolved(V2TimMessage message) {
+    try {
+      serviceLocator<TUIChatGlobalModel>().mergeMessageMediaMetadata(message);
+    } catch (_) {
+      // The prefetcher is also used before the global model is registered.
+    }
   }
 
   static void fromMessages(Iterable<V2TimMessage?> messages) {
@@ -458,8 +838,15 @@ class ChatImageMessagePrefetch {
     ];
     _warmedBubbleProviders.clear();
     for (final message in messages.whereType<V2TimMessage>()) {
-      if (message.elemType != MessageElemType.V2TIM_ELEM_TYPE_IMAGE) {
+      if (message.elemType != MessageElemType.V2TIM_ELEM_TYPE_IMAGE &&
+          message.imageElem == null) {
         continue;
+      }
+      final localPath = _resolveLocalBubblePath(message);
+      if (localPath != null) {
+        forgetChatBubbleImageWarmDecodeHint(
+          chatBubbleImageCacheKey(message.msgID, url: localPath),
+        );
       }
       final url = resolveBubbleThumbUrl(message);
       if (url == null || url.isEmpty) {
@@ -520,7 +907,8 @@ class ChatImageMessagePrefetch {
         break;
       }
       final message = list[index];
-      if (message.elemType != MessageElemType.V2TIM_ELEM_TYPE_IMAGE) {
+      if (message.elemType != MessageElemType.V2TIM_ELEM_TYPE_IMAGE &&
+          message.imageElem == null) {
         continue;
       }
       if (_hasLocalThumbFile(message)) {
@@ -536,6 +924,7 @@ class ChatImageMessagePrefetch {
       _scheduleWarmNetworkImage(
         url,
         chatBubbleImageCacheKey(message.msgID, url: url),
+        decodeByWidth: _decodeBubbleImageByWidth(message),
       );
     }
   }
@@ -551,21 +940,27 @@ class ChatImageMessagePrefetch {
         break;
       }
       final message = list[index];
-      if (message.elemType != MessageElemType.V2TIM_ELEM_TYPE_IMAGE) {
-        continue;
-      }
-      if (_hasLocalThumbFile(message)) {
+      if (message.elemType != MessageElemType.V2TIM_ELEM_TYPE_IMAGE &&
+          message.imageElem == null) {
         continue;
       }
       final url = resolveBubbleThumbUrl(message);
-      if (url == null) {
+      final localPath = _resolveLocalBubblePath(message);
+      if (url == null && localPath == null) {
         continue;
       }
       jobs.add(
-        _warmNetworkImage(
-          url,
-          chatBubbleImageCacheKey(message.msgID, url: url),
-        ),
+        localPath != null
+            ? _warmLocalImage(
+                localPath,
+                chatBubbleImageCacheKey(message.msgID, url: localPath),
+                decodeByWidth: _decodeBubbleImageByWidth(message),
+              )
+            : _warmNetworkImage(
+                url!,
+                chatBubbleImageCacheKey(message.msgID, url: url),
+                decodeByWidth: _decodeBubbleImageByWidth(message),
+              ),
       );
     }
     if (jobs.isEmpty) {
@@ -576,14 +971,24 @@ class ChatImageMessagePrefetch {
     } catch (_) {}
   }
 
-  static void _scheduleWarmNetworkImage(String url, String cacheKey) {
+  static void _scheduleWarmNetworkImage(
+    String url,
+    String cacheKey, {
+    bool decodeByWidth = true,
+  }) {
     if (_inFlight >= _maxConcurrent) {
-      _pending.add((url: url, cacheKey: cacheKey));
+      _pending.add(
+        (url: url, cacheKey: cacheKey, decodeByWidth: decodeByWidth),
+      );
       return;
     }
     _inFlight++;
     unawaited(
-      _warmNetworkImage(url, cacheKey).whenComplete(_onWarmComplete),
+      _warmNetworkImage(
+        url,
+        cacheKey,
+        decodeByWidth: decodeByWidth,
+      ).whenComplete(_onWarmComplete),
     );
   }
 
@@ -593,8 +998,36 @@ class ChatImageMessagePrefetch {
     }
     while (_inFlight < _maxConcurrent && _pending.isNotEmpty) {
       final job = _pending.removeAt(0);
-      _scheduleWarmNetworkImage(job.url, job.cacheKey);
+      _scheduleWarmNetworkImage(
+        job.url,
+        job.cacheKey,
+        decodeByWidth: job.decodeByWidth,
+      );
     }
+  }
+
+  /// Keep the prefetch ResizeImage axis aligned with the chat bubble.
+  ///
+  /// Normal portrait images are decoded by height, landscape images by width,
+  /// and very tall images by width because the bubble uses a top-aligned crop.
+  /// When dimensions are unavailable, width is the conservative fallback used
+  /// by the legacy prefetch path.
+  static bool _decodeBubbleImageByWidth(V2TimMessage message) {
+    final meta = preferChatBubbleImageLayoutMeta(
+      message.imageElem?.imageList ?? const [],
+    );
+    final width = meta?.width ?? 0;
+    final height = meta?.height ?? 0;
+    if (width <= 0 || height <= 0) {
+      return true;
+    }
+    if (isChatBubbleLongImage(
+      sourceWidth: width.toDouble(),
+      sourceHeight: height.toDouble(),
+    )) {
+      return true;
+    }
+    return width >= height;
   }
 
   static void _trackWarmedBubbleProvider({
@@ -627,6 +1060,7 @@ class ChatImageMessagePrefetch {
   }
 
   static void _evictBubbleProviders(String url, String cacheKey) {
+    forgetChatBubbleImageWarmDecodeHint(cacheKey);
     final cache = PaintingBinding.instance.imageCache;
     for (final provider in _bubbleProviders(url, cacheKey)) {
       try {
@@ -635,14 +1069,64 @@ class ChatImageMessagePrefetch {
     }
   }
 
-  static Future<void> _warmNetworkImage(String url, String cacheKey) async {
+  static Future<void> _warmNetworkImage(
+    String url,
+    String cacheKey, {
+    bool decodeByWidth = true,
+  }) async {
     if (kIsWeb) {
       return;
     }
     try {
       _trackWarmedBubbleProvider(url: url, cacheKey: cacheKey);
+      registerChatBubbleImageWarmDecodeHint(
+        cacheKey,
+        decodeByWidth: decodeByWidth,
+        targetPx: kChatBubbleImageDecodeScrollDeferMaxPx,
+      );
+      final base = CachedNetworkImageProvider(url, cacheKey: cacheKey);
+      // Match the route-transition decode cap used by chat bubbles. The axis
+      // follows the same orientation rule as the widget, so portrait rows do
+      // not miss the decoded-image cache just because they use height.
       await _warmProvider(
-        CachedNetworkImageProvider(url, cacheKey: cacheKey),
+        decodeByWidth
+            ? ResizeImage(
+                base,
+                width: kChatBubbleImageDecodeScrollDeferMaxPx,
+              )
+            : ResizeImage(
+                base,
+                height: kChatBubbleImageDecodeScrollDeferMaxPx,
+              ),
+      );
+    } catch (_) {}
+  }
+
+  static Future<void> _warmLocalImage(
+    String path,
+    String cacheKey, {
+    bool decodeByWidth = true,
+  }) async {
+    if (kIsWeb || path.trim().isEmpty) {
+      return;
+    }
+    try {
+      registerChatBubbleImageWarmDecodeHint(
+        cacheKey,
+        decodeByWidth: decodeByWidth,
+        targetPx: kChatBubbleImageDecodeScrollDeferMaxPx,
+      );
+      final base = FileImage(File(path));
+      await _warmProvider(
+        decodeByWidth
+            ? ResizeImage(
+                base,
+                width: kChatBubbleImageDecodeScrollDeferMaxPx,
+              )
+            : ResizeImage(
+                base,
+                height: kChatBubbleImageDecodeScrollDeferMaxPx,
+              ),
       );
     } catch (_) {}
   }

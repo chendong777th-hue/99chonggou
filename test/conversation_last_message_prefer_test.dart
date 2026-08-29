@@ -16,13 +16,14 @@ V2TimMessage _base({
   required String msgID,
   required int ts,
   required int elemType,
+  int status = MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC,
   String? seq,
 }) {
   final message = V2TimMessage.fromJson(<String, dynamic>{
     'message_server_time': ts,
     'message_msg_id': msgID,
     'message_is_from_self': true,
-    'message_status': MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC,
+    'message_status': status,
     'message_custom_str': '',
     'message_risk_type_identified': 0,
     'message_sender_group_member_info': <String, dynamic>{},
@@ -50,11 +51,13 @@ V2TimMessage _text({
   required String id,
   required String text,
   required int ts,
+  int status = MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC,
 }) {
   final message = _base(
     msgID: id,
     ts: ts,
     elemType: MessageElemType.V2TIM_ELEM_TYPE_TEXT,
+    status: status,
   );
   message.textElem = V2TimTextElem(text: text);
   return message;
@@ -231,5 +234,50 @@ void main() {
       incoming: succ,
     );
     expect(isRevokedMessage(preferred), isTrue);
+  });
+
+  test('same msgID content enrichment wins even with an older timestamp', () {
+    final existing = _text(id: 'same', text: '旧预览', ts: 100);
+    final incoming = _text(id: 'same', text: '补全后的预览', ts: 0);
+
+    final preferred = ConversationLastMessagePrefer.preferLastMessage(
+      existing: existing,
+      incoming: incoming,
+    );
+
+    expect(preferred?.textElem?.text, '补全后的预览');
+  });
+
+  test('same msgID peer-read enrichment wins without regressing status', () {
+    final existing = _text(id: 'same-read', text: '已发送', ts: 100)
+      ..isPeerRead = false;
+    final incoming = _text(id: 'same-read', text: '已发送', ts: 100)
+      ..isPeerRead = true;
+
+    final preferred = ConversationLastMessagePrefer.preferLastMessage(
+      existing: existing,
+      incoming: incoming,
+    );
+
+    expect(preferred?.isPeerRead, isTrue);
+  });
+
+  test('late same msgID content cannot regress a terminal send status', () {
+    final existing = _text(id: 'same-status', text: '正文', ts: 100)
+      ..status = MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC;
+    final incoming = _text(
+      id: 'same-status',
+      text: '补充字段',
+      ts: 100,
+      status: MessageStatus.V2TIM_MSG_STATUS_SENDING,
+    );
+
+    final preferred = ConversationLastMessagePrefer.preferLastMessage(
+      existing: existing,
+      incoming: incoming,
+    );
+
+    expect(preferred?.status, MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC);
+    expect(preferred?.textElem?.text, '正文');
   });
 }

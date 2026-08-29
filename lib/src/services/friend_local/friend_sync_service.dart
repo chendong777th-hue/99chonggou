@@ -5,7 +5,6 @@ import 'package:tencent_cloud_chat_demo/src/api/me_friend_api.dart';
 import 'package:tencent_cloud_chat_demo/src/services/user_profile_local/user_profile_local_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
-import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/peer_profile_refresh_bus.dart';
@@ -196,10 +195,10 @@ class FriendSyncService {
     late final Future<void> task;
     task = _runSyncFull(owner: owner, generation: generation, reason: reason)
         .whenComplete(() {
-          if (identical(_syncInFlight, task)) {
-            _syncInFlight = null;
-          }
-        });
+      if (identical(_syncInFlight, task)) {
+        _syncInFlight = null;
+      }
+    });
     _syncInFlight = task;
     return task;
   }
@@ -384,8 +383,8 @@ class FriendSyncService {
       if (merged[i].canMessage) {
         continue;
       }
-      final retained = _optimisticRetainRecords[id] ??
-          _previousRecordById(previous, id);
+      final retained =
+          _optimisticRetainRecords[id] ?? _previousRecordById(previous, id);
       if (retained == null) {
         continue;
       }
@@ -458,9 +457,12 @@ class FriendSyncService {
     if (id.isEmpty || nextAvatar.isEmpty) {
       return;
     }
-    ConversationListNotifier.instance.applyFaceUrlLocally(
-      conversationID: 'c2c_$id',
-      faceUrl: nextAvatar,
+    unawaited(
+      ConversationSyncService.instance.applyConversationMetadataPatch(
+        conversationID: 'c2c_$id',
+        faceUrl: nextAvatar,
+        remoteAuthority: true,
+      ),
     );
     GroupMemberStore.instance.putFaceUrlForUser(id, nextAvatar, notify: true);
   }
@@ -894,14 +896,19 @@ class FriendSyncService {
       friendUserId: id,
       transform: (current) => current.copyWith(remark: nextRemark),
     );
-    final cached = await FriendLocalStore.instance.readAll(ownerUserId: owner);
-    for (final item in cached) {
-      if (item.friendUserId == id) {
-        await UserProfileLocalService.instance.saveFriendRecord(item);
-        break;
-      }
+    final cached = await FriendLocalStore.instance.readByIds(
+      friendUserIds: <String>[id],
+      ownerUserId: owner,
+    );
+    if (cached.isNotEmpty) {
+      await UserProfileLocalService.instance.saveFriendRecord(cached.first);
     }
-    await publishFriendRemarkDisplayName(friendUserId: id, remark: nextRemark);
+    // The remote update and local friend record are the save boundary. The
+    // conversation database patch can wait; holding the editor open for it
+    // makes the save control spin when a conversation coordinator is busy.
+    unawaited(
+      publishFriendRemarkDisplayName(friendUserId: id, remark: nextRemark),
+    );
   }
 
   /// 备注/展示名变更后同步会话列表（含 hydrate 行指纹依赖的 showName）。
@@ -951,20 +958,12 @@ class FriendSyncService {
     } catch (_) {}
 
     final conversationId = 'c2c_$id';
-    ConversationListNotifier.instance.applyShowNameLocally(
-      conversationID: conversationId,
-      showName: showName,
-    );
     await _persistC2cShowName(
       conversationId: conversationId,
       userId: id,
       showName: showName,
     );
     PeerProfileRefreshBus.instance.notify(id);
-    ConversationRefreshBus.instance.requestRefresh(
-      reason: 'friend_remark_updated',
-      conversationId: conversationId,
-    );
   }
 
   Future<void> _persistC2cShowName({
@@ -988,10 +987,12 @@ class FriendSyncService {
     if (match == null) {
       return;
     }
-    match.showName = name;
     try {
-      await ConversationLocalStore.instance.upsertBatch(
-        conversations: <V2TimConversation>[match],
+      await ConversationSyncService.instance.applyConversationMetadataPatch(
+        conversationID: match.conversationID,
+        showName: name,
+        snapshot: match,
+        explicitAuthority: true,
       );
     } catch (_) {}
   }

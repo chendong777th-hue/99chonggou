@@ -84,6 +84,8 @@ class PushPayloadNormalizer {
 
   static String? resolveAvatarUrl(Map<String, dynamic> data) {
     return _read(data, const [
+      'avatarThumbUrl',
+      'avatar_thumb_url',
       'avatarUrl',
       'avatar_url',
       'senderFaceUrl',
@@ -114,7 +116,8 @@ class PushPayloadNormalizer {
     }
 
     final type = _read(data, const ['type'])?.toLowerCase() ?? '';
-    final chatType = _read(data, const ['chatType', 'chat_type'])?.toLowerCase();
+    final chatType =
+        _read(data, const ['chatType', 'chat_type'])?.toLowerCase();
     if (type == 'register_welcome') {
       return 'c2c_99Messenger';
     }

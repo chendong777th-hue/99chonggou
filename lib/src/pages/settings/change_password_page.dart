@@ -14,6 +14,7 @@ import 'package:tencent_cloud_chat_demo/utils/dio_error_message.dart';
 import 'package:tencent_cloud_chat_demo/utils/toast.dart';
 import 'package:tencent_cloud_chat_demo/src/security/slider_captcha.dart';
 import 'package:tencent_cloud_chat_demo/src/services/login_credential_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/phone_binding_guard.dart';
 
 class ChangePasswordPage extends StatefulWidget {
@@ -234,6 +235,11 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
     }
 
     setState(() => _busy = true);
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) {
+      if (mounted) setState(() => _busy = false);
+      return;
+    }
     try {
       if (_isPhoneBound) {
         if (_boundPhone.isEmpty) {
@@ -255,7 +261,11 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
           smsCode: smsCodeController.text.trim(),
           password: newPasswordController.text,
         );
-        await ApiClient.instance.saveToken(tokenResult.token);
+        if (!SessionIdentityService.instance.isCurrent(identity)) return;
+        await ApiClient.instance.saveToken(
+          tokenResult.token,
+          userId: identity.ownerUserId,
+        );
       } else {
         if (oldPasswordController.text.isEmpty) {
           ToastUtils.toast(AppI18n.current.t(
@@ -271,7 +281,11 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
           oldPassword: oldPasswordController.text,
           newPassword: newPasswordController.text,
         );
-        await ApiClient.instance.saveToken(tokenResult.token);
+        if (!SessionIdentityService.instance.isCurrent(identity)) return;
+        await ApiClient.instance.saveToken(
+          tokenResult.token,
+          userId: identity.ownerUserId,
+        );
       }
       await LoginCredentialStore.instance.updateSavedPasswordIfRemembered(
         newPasswordController.text,
@@ -368,8 +382,7 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
                   label: strings.smsCodeLabel,
                   hint: strings.smsCodeHint,
                   controller: smsCodeController,
-                  buttonText:
-                      _cooldown > 0 ? '${_cooldown}s' : strings.getCode,
+                  buttonText: _cooldown > 0 ? '${_cooldown}s' : strings.getCode,
                   onPressed: (_busy ||
                           _cooldown > 0 ||
                           _loadingPhone ||

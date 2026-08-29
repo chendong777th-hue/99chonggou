@@ -6,7 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.SystemClock
-import android.util.Log
+import vip.ninechat.pro.logging.SilentLog as Log
 
 object KeepAliveScheduler {
     private const val TAG = "AndroidKeepAlive"

@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_mutation_event.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
 
@@ -81,6 +82,123 @@ void main() {
       );
 
       expect(active, 1719000000000);
+    });
+
+    test('coordinator recognizes only a single draft field as draft patch', () {
+      expect(
+        ConversationLocalStore.isDraftOnlyCoordinatorPatchForTest(
+          const <ConversationMutationField, Object?>{
+            ConversationMutationField.draft: 'draft',
+          },
+        ),
+        isTrue,
+      );
+      expect(
+        ConversationLocalStore.isDraftOnlyCoordinatorPatchForTest(
+          const <ConversationMutationField, Object?>{
+            ConversationMutationField.draft: 'draft',
+            ConversationMutationField.unread: 0,
+          },
+        ),
+        isFalse,
+      );
+    });
+
+    test('coordinator mark-read patch only accepts unread zero', () {
+      expect(
+        ConversationLocalStore.isMarkReadCoordinatorPatchForTest(
+          const <ConversationMutationField, Object?>{
+            ConversationMutationField.unread: 0,
+          },
+        ),
+        isTrue,
+      );
+      expect(
+        ConversationLocalStore.isMarkReadCoordinatorPatchForTest(
+          const <ConversationMutationField, Object?>{
+            ConversationMutationField.unread: 1,
+          },
+        ),
+        isFalse,
+      );
+    });
+
+    test('coordinator unread-count patch accepts only positive integers', () {
+      expect(
+        ConversationLocalStore.isUnreadCountCoordinatorPatchForTest(
+          const <ConversationMutationField, Object?>{
+            ConversationMutationField.unread: 3,
+          },
+        ),
+        isTrue,
+      );
+      expect(
+        ConversationLocalStore.isUnreadCountCoordinatorPatchForTest(
+          const <ConversationMutationField, Object?>{
+            ConversationMutationField.unread: 0,
+          },
+        ),
+        isFalse,
+      );
+    });
+
+    test('coordinator pin patch only accepts one boolean pin field', () {
+      expect(
+        ConversationLocalStore.isPinOnlyCoordinatorPatchForTest(
+          const <ConversationMutationField, Object?>{
+            ConversationMutationField.pin: true,
+          },
+        ),
+        isTrue,
+      );
+      expect(
+        ConversationLocalStore.isPinOnlyCoordinatorPatchForTest(
+          const <ConversationMutationField, Object?>{
+            ConversationMutationField.pin: 1,
+          },
+        ),
+        isFalse,
+      );
+    });
+
+    test('coordinator mute patch only accepts one integer recvOpt field', () {
+      expect(
+        ConversationLocalStore.isMuteOnlyCoordinatorPatchForTest(
+          const <ConversationMutationField, Object?>{
+            ConversationMutationField.mute: 2,
+          },
+        ),
+        isTrue,
+      );
+      expect(
+        ConversationLocalStore.isMuteOnlyCoordinatorPatchForTest(
+          const <ConversationMutationField, Object?>{
+            ConversationMutationField.mute: true,
+          },
+        ),
+        isFalse,
+      );
+    });
+
+    test('coordinator metadata patch accepts only name/avatar strings', () {
+      expect(
+        ConversationLocalStore.isMetadataCoordinatorPatchForTest(
+          const <ConversationMutationField, Object?>{
+            ConversationMutationField.name: 'name',
+            ConversationMutationField.avatar: 'avatar',
+          },
+        ),
+        isTrue,
+      );
+      expect(
+        ConversationLocalStore.isMetadataCoordinatorPatchForTest(
+          const <ConversationMutationField, Object?>{
+            ConversationMutationField.name: 'name',
+            ConversationMutationField.unread: 0,
+          },
+        ),
+        isFalse,
+      );
     });
   });
 }

@@ -14,6 +14,7 @@ import 'package:tencent_cloud_chat_demo/src/services/call_recent_sync_service.da
 import 'package:tencent_cloud_chat_demo/src/services/moments/moments_realtime_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/red_packet_realtime_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
+import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
 import 'package:tencent_cloud_chat_demo/src/platform/route_handler.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_local/friend_contact_incremental_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_local/friend_sync_service.dart';
@@ -22,6 +23,7 @@ import 'package:tencent_cloud_chat_demo/src/services/group_local/group_sync_serv
 import 'package:tencent_cloud_chat_demo/src/services/group_join_application_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_live/group_live_index_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_bootstrap.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/provider/presence_provider.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_realtime/friend_realtime_event.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_realtime_service.dart';
@@ -44,11 +46,14 @@ class FriendRequestNoticeService {
       FriendRequestNoticeService._();
 
   static const Duration _pollInterval = Duration(seconds: 60);
+
   /// 非通讯录 Tab、TCP 正常时的低频补洞（不全应用 500ms 轮询）。
   static const Duration _contactSyncSlowInterval = Duration(seconds: 15);
+
   /// 进页已 local+pull 一次，Tab 内仅低频兜底。
   static const Duration _contactSyncTabInterval = Duration(seconds: 30);
   static const Duration _contactSyncFastInterval = Duration(seconds: 5);
+
   /// 成友等关键事件：0 / 500ms / 1000ms / 1500ms，≤1.5s 内多端对齐。
   static const Duration _contactSyncBurstStep = Duration(milliseconds: 500);
   static const int _contactSyncBurstShots = 4;
@@ -77,6 +82,7 @@ class FriendRequestNoticeService {
   final Set<String> _readIncomingKeys = <String>{};
 
   final ValueNotifier<int> pendingApplicationCount = ValueNotifier<int>(0);
+  int _sessionClearGeneration = 0;
 
   // ignore: avoid_print
   static void _log(String message) {
@@ -277,7 +283,8 @@ class FriendRequestNoticeService {
   void _refreshJoinApplicationsOnResume() {
     final now = DateTime.now();
     final last = _lastJoinApplicationsResumeAt;
-    if (last != null && now.difference(last) < _joinApplicationsResumeDebounce) {
+    if (last != null &&
+        now.difference(last) < _joinApplicationsResumeDebounce) {
       return;
     }
     _lastJoinApplicationsResumeAt = now;
@@ -290,6 +297,7 @@ class FriendRequestNoticeService {
   }
 
   Future<void> stop() async {
+    _sessionClearGeneration++;
     _pollTimer?.cancel();
     _pollTimer = null;
     _stopContactSyncPolling();
@@ -323,9 +331,22 @@ class FriendRequestNoticeService {
     if (!_started) {
       return;
     }
+    final identity = SessionIdentityService.instance.capture();
+    final clearGeneration = _sessionClearGeneration;
+    if (identity.ownerUserId.isEmpty) {
+      return;
+    }
     try {
       final incoming = await FriendRequestApi.instance.fetchIncomingPending();
-      await _syncIncomingNotifications(incoming, source: 'poll');
+      if (!_isCurrentRefresh(identity, clearGeneration)) {
+        return;
+      }
+      await _syncIncomingNotifications(
+        incoming,
+        source: 'poll',
+        identity: identity,
+        clearGeneration: clearGeneration,
+      );
     } catch (e) {
       _log('poll failed $e');
     }
@@ -335,7 +356,14 @@ class FriendRequestNoticeService {
     List<FriendRequestRecord> incoming, {
     required String source,
     bool notifyUnseen = true,
+    SessionIdentity? identity,
+    int? clearGeneration,
   }) async {
+    if (identity != null &&
+        !_isCurrentRefresh(
+            identity, clearGeneration ?? _sessionClearGeneration)) {
+      return;
+    }
     final unreadCount = incoming.where(_isUnreadForBadge).length;
     if (pendingApplicationCount.value != unreadCount) {
       pendingApplicationCount.value = unreadCount;
@@ -360,7 +388,15 @@ class FriendRequestNoticeService {
       userID: latest.userID,
       displayName: latest.nickname,
       faceUrl: latest.faceUrl,
+      expectedIdentity: identity,
+      expectedClearGeneration: clearGeneration,
     );
+  }
+
+  bool _isCurrentRefresh(SessionIdentity identity, int clearGeneration) {
+    return _started &&
+        clearGeneration == _sessionClearGeneration &&
+        SessionIdentityService.instance.isCurrent(identity);
   }
 
   bool _isUnseenIncoming(FriendRequestRecord record) {
@@ -401,6 +437,9 @@ class FriendRequestNoticeService {
   }
 
   Future<void> _handleRealtimeEvent(FriendRealtimeEvent event) async {
+    final identity = SessionIdentityService.instance.capture();
+    final clearGeneration = _sessionClearGeneration;
+    if (!_isCurrentRefresh(identity, clearGeneration)) return;
     _log(
       'realtime event=${event.event} from=${event.fromUserId} '
       'to=${event.toUserId} requestId=${event.requestId}',
@@ -420,7 +459,7 @@ class FriendRequestNoticeService {
           }
           return;
         }
-        await _onFriendRequestReceived(event);
+        await _onFriendRequestReceived(event, identity, clearGeneration);
         return;
       case 'friend_request_accepted':
       case 'friend_request_rejected':
@@ -428,9 +467,9 @@ class FriendRequestNoticeService {
           return;
         }
         if (event.event == 'friend_request_accepted') {
-          await _onFriendRequestAccepted(event);
+          await _onFriendRequestAccepted(event, identity, clearGeneration);
         } else {
-          await _onFriendRequestRejected(event);
+          await _onFriendRequestRejected(event, identity, clearGeneration);
         }
         return;
       case 'friend_request_auto_accepted':
@@ -438,7 +477,7 @@ class FriendRequestNoticeService {
         if (selfId.isNotEmpty && !_eventInvolvesSelf(event, selfId)) {
           return;
         }
-        await _onFriendRelationshipChanged(event);
+        await _onFriendRelationshipChanged(event, identity, clearGeneration);
         return;
       case 'friend_list_changed':
         await _onFriendListChanged(event);
@@ -491,7 +530,8 @@ class FriendRequestNoticeService {
   Future<void> _onFriendListChanged(FriendRealtimeEvent event) async {
     final changed = await FriendSyncService.instance.applyListChanged(event);
     if (!changed) {
-      await FriendSyncService.instance.syncFull(reason: 'list_changed_fallback');
+      await FriendSyncService.instance
+          .syncFull(reason: 'list_changed_fallback');
     }
     await FriendSyncService.instance.refreshUIKitLists(force: true);
     unawaited(
@@ -546,7 +586,11 @@ class FriendRequestNoticeService {
     );
   }
 
-  Future<void> _onFriendRequestReceived(FriendRealtimeEvent event) async {
+  Future<void> _onFriendRequestReceived(
+    FriendRealtimeEvent event,
+    SessionIdentity identity,
+    int clearGeneration,
+  ) async {
     _markIncomingNotifiedByEvent(event);
     await refreshPendingCount();
     ConversationRefreshBus.instance.requestRefresh(
@@ -564,7 +608,13 @@ class FriendRequestNoticeService {
       return;
     }
     final name = await _resolveDisplayName(userID);
-    await _notifyFriendRequestReceived(userID: userID, displayName: name);
+    if (!_isCurrentRefresh(identity, clearGeneration)) return;
+    await _notifyFriendRequestReceived(
+      userID: userID,
+      displayName: name,
+      expectedIdentity: identity,
+      expectedClearGeneration: clearGeneration,
+    );
   }
 
   String _friendNoticeKey({int? requestId, required String userId}) {
@@ -579,7 +629,16 @@ class FriendRequestNoticeService {
     required String userID,
     String? displayName,
     String? faceUrl,
+    SessionIdentity? expectedIdentity,
+    int? expectedClearGeneration,
   }) async {
+    bool isCurrent() =>
+        expectedIdentity == null ||
+        _isCurrentRefresh(
+          expectedIdentity,
+          expectedClearGeneration ?? _sessionClearGeneration,
+        );
+    if (!isCurrent()) return;
     final now = DateTime.now();
     final last = _lastRequestToastAt;
     if (last != null && now.difference(last) < const Duration(seconds: 2)) {
@@ -590,6 +649,7 @@ class FriendRequestNoticeService {
     final name = (displayName ?? '').trim().isNotEmpty
         ? displayName!.trim()
         : (id.isNotEmpty ? await _resolveDisplayName(id) : '');
+    if (!isCurrent()) return;
     final text = name.isEmpty
         ? AppI18n.current.t(
             zhHans: '收到新的好友申请',
@@ -618,6 +678,7 @@ class FriendRequestNoticeService {
             UserAvatarHelper.resolveDisplayUrl(apiFace) != null
         ? apiFace
         : (id.isNotEmpty ? await _resolveFaceUrl(id) : '');
+    if (!isCurrent()) return;
     final shown = await _showFriendNotice(
       key: 'friend_application_$id',
       title: title,
@@ -627,13 +688,19 @@ class FriendRequestNoticeService {
       userID: id,
       type: 'friend_request',
       onTap: RouteHandler.openNewContact,
+      expectedIdentity: expectedIdentity,
+      expectedClearGeneration: expectedClearGeneration,
     );
     if (shown) {
       _lastRequestToastAt = DateTime.now();
     }
   }
 
-  Future<void> _onFriendRequestAccepted(FriendRealtimeEvent event) async {
+  Future<void> _onFriendRequestAccepted(
+    FriendRealtimeEvent event,
+    SessionIdentity identity,
+    int clearGeneration,
+  ) async {
     final peerUserId = _peerUserIdFromEvent(event);
     await FriendSyncService.instance.onBecameFriends(
       peerUserId: peerUserId,
@@ -642,6 +709,7 @@ class FriendRequestNoticeService {
       remark: event.remark ?? '',
       reason: 'friend_request_accepted',
     );
+    if (!_isCurrentRefresh(identity, clearGeneration)) return;
     kickContactSyncBurst(reason: 'friend_request_accepted');
     await refreshPendingCount();
     await _showFriendOutcomeNotice(
@@ -671,11 +739,18 @@ class FriendRequestNoticeService {
             ),
       noticeType: 'friend_request_accepted',
       openConversation: true,
+      expectedIdentity: identity,
+      expectedClearGeneration: clearGeneration,
     );
   }
 
-  Future<void> _onFriendRequestRejected(FriendRealtimeEvent event) async {
+  Future<void> _onFriendRequestRejected(
+    FriendRealtimeEvent event,
+    SessionIdentity identity,
+    int clearGeneration,
+  ) async {
     await refreshPendingCount();
+    if (!_isCurrentRefresh(identity, clearGeneration)) return;
     ConversationRefreshBus.instance.requestRefresh(
       reason: 'friend_application_refresh',
     );
@@ -708,17 +783,22 @@ class FriendRequestNoticeService {
       noticeType: 'friend_request_rejected',
       openConversation: false,
       onTap: RouteHandler.openNewContact,
+      expectedIdentity: identity,
+      expectedClearGeneration: clearGeneration,
     );
   }
 
-  Future<void> _onFriendRelationshipChanged(FriendRealtimeEvent event) async {
+  Future<void> _onFriendRelationshipChanged(
+    FriendRealtimeEvent event,
+    SessionIdentity identity,
+    int clearGeneration,
+  ) async {
     final selfId = _selfUserId();
     final peerUserId = _isSameUser(event.fromUserId, selfId)
         ? event.toUserId.trim()
         : event.fromUserId.trim();
-    final resolvedPeer = peerUserId.isNotEmpty
-        ? peerUserId
-        : _peerUserIdFromEvent(event);
+    final resolvedPeer =
+        peerUserId.isNotEmpty ? peerUserId : _peerUserIdFromEvent(event);
     await FriendSyncService.instance.onBecameFriends(
       peerUserId: resolvedPeer,
       nickname: event.peerNickname,
@@ -726,6 +806,7 @@ class FriendRequestNoticeService {
       remark: event.remark ?? '',
       reason: event.event,
     );
+    if (!_isCurrentRefresh(identity, clearGeneration)) return;
     kickContactSyncBurst(reason: event.event);
     if (resolvedPeer.isNotEmpty && event.event != 'friend_restored') {
       // friend_restored 不进「新的朋友」历史；自动通过写入已处理。
@@ -778,6 +859,8 @@ class FriendRequestNoticeService {
             ),
       noticeType: event.event,
       openConversation: true,
+      expectedIdentity: identity,
+      expectedClearGeneration: clearGeneration,
     );
   }
 
@@ -788,7 +871,16 @@ class FriendRequestNoticeService {
     required String noticeType,
     required bool openConversation,
     FutureOr<void> Function()? onTap,
+    SessionIdentity? expectedIdentity,
+    int? expectedClearGeneration,
   }) async {
+    bool isCurrent() =>
+        expectedIdentity == null ||
+        _isCurrentRefresh(
+          expectedIdentity,
+          expectedClearGeneration ?? _sessionClearGeneration,
+        );
+    if (!isCurrent()) return;
     if (peerUserId.isEmpty) {
       return;
     }
@@ -810,7 +902,9 @@ class FriendRequestNoticeService {
     }
 
     final name = await _resolveDisplayName(peerUserId);
+    if (!isCurrent()) return;
     final faceUrl = await _resolveFaceUrl(peerUserId);
+    if (!isCurrent()) return;
     final shown = await _showFriendNotice(
       key: '${noticeType}_$peerUserId',
       title: title,
@@ -824,6 +918,8 @@ class FriendRequestNoticeService {
           (openConversation
               ? () => RouteHandler.openConversation('c2c_$peerUserId')
               : RouteHandler.openNewContact),
+      expectedIdentity: expectedIdentity,
+      expectedClearGeneration: expectedClearGeneration,
     );
     if (shown) {
       _lastFriendAddedNoticeAt = DateTime.now();
@@ -841,7 +937,16 @@ class FriendRequestNoticeService {
     String? conversationID,
     String faceUrl = '',
     String showName = '',
+    SessionIdentity? expectedIdentity,
+    int? expectedClearGeneration,
   }) async {
+    if (expectedIdentity != null &&
+        !_isCurrentRefresh(
+          expectedIdentity,
+          expectedClearGeneration ?? _sessionClearGeneration,
+        )) {
+      return false;
+    }
     unawaited(InAppNotificationSound.playMessageReceived());
 
     final systemShown =
@@ -856,6 +961,13 @@ class FriendRequestNoticeService {
       }),
       avatarUrl: faceUrl.isNotEmpty ? faceUrl : null,
     );
+    if (expectedIdentity != null &&
+        !_isCurrentRefresh(
+          expectedIdentity,
+          expectedClearGeneration ?? _sessionClearGeneration,
+        )) {
+      return false;
+    }
     if (systemShown) {
       if (kDebugMode) {
         debugPrint(
@@ -913,10 +1025,18 @@ class FriendRequestNoticeService {
     bool markRead = false,
     bool notifyUnseen = false,
   }) async {
+    final identity = SessionIdentityService.instance.capture();
+    final clearGeneration = _sessionClearGeneration;
+    if (identity.ownerUserId.isEmpty ||
+        !_isCurrentRefresh(identity, clearGeneration)) {
+      return;
+    }
     try {
       if (markRead) {
-        final incoming =
-            await FriendRequestApi.instance.fetchIncomingPending();
+        final incoming = await FriendRequestApi.instance.fetchIncomingPending();
+        if (!_isCurrentRefresh(identity, clearGeneration)) {
+          return;
+        }
         for (final record in incoming) {
           _markIncomingRead(record);
         }
@@ -924,10 +1044,15 @@ class FriendRequestNoticeService {
         return;
       }
       final incoming = await FriendRequestApi.instance.fetchIncomingPending();
+      if (!_isCurrentRefresh(identity, clearGeneration)) {
+        return;
+      }
       await _syncIncomingNotifications(
         incoming,
         source: 'refresh',
         notifyUnseen: notifyUnseen,
+        identity: identity,
+        clearGeneration: clearGeneration,
       );
     } catch (e) {
       _log('refreshPendingCount failed $e');
@@ -935,6 +1060,10 @@ class FriendRequestNoticeService {
   }
 
   String _selfUserId() {
+    final authoritative = ChatIdFormat.rawUserUid(
+      ContactSocialCacheStore.safeLoginUserId(),
+    );
+    if (authoritative.isNotEmpty) return authoritative;
     try {
       final fromCore = ChatIdFormat.rawUserUid(
         TIMUIKitCore.getInstance().loginInfo.userID,

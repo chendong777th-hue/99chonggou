@@ -14,14 +14,16 @@ import 'package:tencent_cloud_chat_demo/src/services/call_lifecycle_service.dart
 import 'package:tencent_cloud_chat_demo/src/services/device_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im_session_cache.dart';
 import 'package:tencent_cloud_chat_demo/src/services/login_coordinator.dart';
+import 'package:tencent_cloud_chat_demo/utils/dio_error_message.dart';
 import 'package:tencent_cloud_chat_demo/src/services/login_error.dart';
 import 'package:tencent_cloud_chat_demo/src/services/notification_permission_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/push_registration_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_diagnostics.dart';
 import 'package:tencent_cloud_chat_demo/src/services/notification_settings_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/platform_official_account_service.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/push_identity_cache.dart';
 import 'package:tencent_cloud_chat_demo/src/platform/listener_store.dart';
-import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
@@ -47,7 +49,6 @@ import 'package:tencent_cloud_chat_demo/src/services/native_post_home_bootstrap_
 import 'package:tencent_cloud_chat_demo/src/provider/local_setting.dart';
 import 'package:tencent_cloud_chat_demo/src/provider/starred_friend_provider.dart';
 import 'package:tencent_cloud_chat_demo/src/provider/user_sticker_provider.dart';
-import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_demo/utils/init_step.dart';
 import 'package:provider/provider.dart';
 import 'package:tencent_cloud_chat_demo/utils/user_avatar.dart';
@@ -65,15 +66,18 @@ class AuthBootstrapService {
 
   void _trace(String message) {
     if (!_traceEnabled) return;
-    debugPrint(message);
+    SessionDiagnostics.log(message);
   }
 
   /// 始终打到控制台（Xcode/rizhi 可看见），用于会话同步失败取证。
   void _diag(String message) {
-    debugPrint(message);
+    SessionDiagnostics.log(message);
   }
 
   static final AuthBootstrapService instance = AuthBootstrapService._();
+
+  /// UserSig 刷新失败不等于业务账号失效。
+  bool lastUserSigRefreshWasAuthFailure = false;
   final ValueNotifier<bool> backgroundSyncing = ValueNotifier<bool>(false);
 
   /// Set when [TencentChatApp.initIMSDKAndAddIMListeners] completes.
@@ -98,8 +102,18 @@ class AuthBootstrapService {
   String? _imLoginTaskKey;
   String? _lastImLoginKey;
   DateTime? _lastImLoginAt;
+  final Set<Future<void>> _pendingImOperations = <Future<void>>{};
+  int _imListenerEpoch = 0;
 
   int get bootstrapGeneration => _bootstrapGeneration;
+
+  /// SDK listeners are process-wide. A callback from an uninitialized SDK
+  /// instance must never be interpreted as an event for the next account.
+  int registerImListenerEpoch() => ++_imListenerEpoch;
+
+  int invalidateImListenerEpoch() => ++_imListenerEpoch;
+
+  bool isImListenerEpochCurrent(int epoch) => epoch == _imListenerEpoch;
 
   void bumpBootstrapGeneration({String reason = 'manual'}) {
     _bootstrapGeneration++;
@@ -116,6 +130,70 @@ class AuthBootstrapService {
     Future<void> Function({int? sdkAppId}) initializer,
   ) {
     _imSdkInitializer = initializer;
+  }
+
+  /// Wait for a previous login wrapper before crossing an account boundary.
+  /// A UIKit login Future may outlive its timeout, so it must remain tracked.
+  Future<void> waitForImLoginIdle({
+    Duration timeout = const Duration(seconds: 12),
+  }) async {
+    final waits = <Future<void>>[];
+    final running = _imLoginTask;
+    if (running != null) {
+      waits.add(running.then<void>((_) {}, onError: (_, __) {}));
+    }
+    waits.addAll(_pendingImOperations);
+    if (waits.isEmpty) return;
+    try {
+      await Future.wait(waits).timeout(timeout);
+    } catch (_) {
+      _diag('AuthBootstrap: waitForImLoginIdle timed out');
+    }
+  }
+
+  /// Fully closes the old native SDK instance at an account boundary. Merely
+  /// calling logout leaves the process-wide SDK callback registration alive.
+  Future<void> uninitializeImSdkForAccountBoundary({
+    String reason = 'account_boundary',
+  }) async {
+    // Invalidate the old login generation before touching native state. Any
+    // callback that returns after this point must fail its generation fence.
+    resetImLoginState();
+    invalidateImListenerEpoch();
+    NativePostHomeBootstrapQueue.instance.reset(reason: reason);
+    _setBackgroundSyncing(false);
+    final sdk = TencentImSDKPlugin.v2TIMManager;
+    try {
+      // unInitSDK interrupts a native login in progress and removes the
+      // process-wide SDK listener registry. Calling logout first can wait
+      // behind that same login Future.
+      await sdk.unInitSDK().timeout(const Duration(seconds: 6));
+    } catch (_) {}
+    try {
+      // Keep UIKit's in-memory models consistent even when native unInit was
+      // invoked before CoreServicesImpl.logout could run.
+      TIMUIKitCore.getInstance().didLoginOut();
+    } catch (e) {
+      _diag('AuthBootstrap: account-boundary UIKit reset failed error=$e');
+    }
+    // Native unInit normally resolves all login calls. Wait for the original
+    // wrapper and any timed-out UIKit Future before permitting account B to
+    // initialize/login.
+    await waitForImLoginIdle(timeout: const Duration(seconds: 6));
+    resetImSdkInitializationState(reason: reason);
+  }
+
+  Future<T> _trackImOperation<T>(Future<T> operation) {
+    late final Future<void> completion;
+    completion = operation.then<void>(
+      (_) {},
+      onError: (_, __) {},
+    );
+    _pendingImOperations.add(completion);
+    completion.whenComplete(() {
+      _pendingImOperations.remove(completion);
+    });
+    return operation;
   }
 
   void resetImSdkInitializationState({String reason = 'unknown'}) {
@@ -197,9 +275,7 @@ class AuthBootstrapService {
       return false;
     }
     final ready = imSdkInitialized &&
-        (sdkAppId == null ||
-            sdkAppId <= 0 ||
-            initializedSdkAppId == sdkAppId);
+        (sdkAppId == null || sdkAppId <= 0 || initializedSdkAppId == sdkAppId);
     _trace(
       'AuthBootstrap: ensureImSdkInitialized DONE ready=$ready '
       'initializedSdkAppId=${initializedSdkAppId ?? '-'}',
@@ -208,25 +284,50 @@ class AuthBootstrapService {
   }
 
   Future<void> bootstrapLoggedInSession(BuildContext context) async {
+    final sessionGeneration = SessionIdentityService.instance.generation;
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
     final me = await AuthApi.instance.fetchMe();
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     await UserAvatarHelper.syncSelfAvatarFromBackend(me.avatarUrl);
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     await PushIdentityCache.instance.refreshSelf();
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     final sig = await AuthApi.instance.fetchUserSig();
-    await ImSessionCache.instance.save(sig);
+    if (!SessionIdentityService.instance.isCurrent(identity) ||
+        sig.userId.trim() != identity.ownerUserId) {
+      return;
+    }
+    final cacheSaved = await ImSessionCache.instance.saveIfCurrent(
+      sig,
+      () => SessionIdentityService.instance.isGenerationCurrent(
+        sessionGeneration,
+      ),
+    );
+    if (!cacheSaved) return;
 
-    final imCode = await _loginImStack(sig);
+    final imCode = await loginImStack(
+      sig,
+      expectedSessionGeneration: sessionGeneration,
+    );
     if (imCode != 0) {
       resetImLoginState();
       await ListenerStore.beforeLogout();
-      await ApiClient.instance.clearToken();
-      await ImSessionCache.instance.clear();
-      if (context.mounted) {
-        InitStep.directToLogin(context);
-      }
+      // IM being temporarily unavailable does not prove that the business
+      // token is invalid. Keep the durable account session and let the normal
+      // foreground recovery retry it instead of forcing a false logout.
+      LoginCoordinator.instance.markFailed(
+        LoginErrorType.imLoginFailed,
+        message: 'IM login temporarily unavailable',
+        isBusinessAuthenticated: true,
+        isHomeEntered: true,
+        isRecovering: true,
+      );
       return;
     }
 
-    await ListenerStore.afterLogin();
+    await ListenerStore.afterLogin(expectedIdentity: identity);
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     if (context.mounted) {
       InitStep.directToHomePage(context);
       await ImConnectStatusService.syncToLocalSetting(context);
@@ -277,10 +378,14 @@ class AuthBootstrapService {
   Future<bool> ensureImReadyForHome({
     String? registerNickname,
     Duration timeout = const Duration(seconds: 25),
+    int? expectedGeneration,
   }) async {
+    final generation =
+        expectedGeneration ?? SessionIdentityService.instance.generation;
     try {
       return await _ensureImReadyForHomeCore(
         registerNickname: registerNickname,
+        expectedGeneration: generation,
       ).timeout(timeout, onTimeout: () {
         _diag('AuthBootstrap: ensureImReadyForHome timed out');
         return false;
@@ -295,32 +400,45 @@ class AuthBootstrapService {
     String? registerNickname,
     Duration timeout = const Duration(seconds: 20),
   }) async {
+    final generation = SessionIdentityService.instance.generation;
     _setBackgroundSyncing(true);
     _setConnectStatus(ConnectStatus.connecting);
     var deferredOwnsSyncing = false;
     try {
       final sdkReady = await ensureImSdkInitialized();
-      if (!sdkReady) {
+      if (!sdkReady ||
+          !SessionIdentityService.instance.isGenerationCurrent(generation)) {
         _trace(
           'AuthBootstrap: prepareReadySessionForHome abort '
           '(IM SDK not initialized)',
         );
-        _setConnectStatus(ConnectStatus.failed);
+        if (SessionIdentityService.instance.isGenerationCurrent(generation)) {
+          _setConnectStatus(ConnectStatus.failed);
+        }
         return false;
       }
       final ready = await _ensureImReadyWithRetry(
         registerNickname: registerNickname,
         timeout: timeout,
+        expectedGeneration: generation,
       );
       if (!ready) {
         _diag('AuthBootstrap: prepareReadySessionForHome IM not ready');
-        _setConnectStatus(ConnectStatus.failed);
+        if (SessionIdentityService.instance.isGenerationCurrent(generation)) {
+          _setConnectStatus(ConnectStatus.failed);
+        }
         return false;
       }
       if (kIsWeb) {
         await runPostLoginSideEffectsWithoutImListRefresh();
+        if (!SessionIdentityService.instance.isGenerationCurrent(generation)) {
+          return false;
+        }
         _setConnectStatus(ConnectStatus.success);
         return true;
+      }
+      if (!SessionIdentityService.instance.isGenerationCurrent(generation)) {
+        return false;
       }
       // 原生：IM 就绪即返回；列表/好友/群/副作用由进门后串行队列补全。
       _diag('AuthBootstrap: prepareReady OK → schedule post-home bootstrap');
@@ -331,10 +449,13 @@ class AuthBootstrapService {
       return true;
     } catch (e, st) {
       _diag('AuthBootstrap: prepareReadySessionForHome failed: $e\n$st');
-      _setConnectStatus(ConnectStatus.failed);
+      if (SessionIdentityService.instance.isGenerationCurrent(generation)) {
+        _setConnectStatus(ConnectStatus.failed);
+      }
       return false;
     } finally {
-      if (!deferredOwnsSyncing) {
+      if (!deferredOwnsSyncing &&
+          SessionIdentityService.instance.isGenerationCurrent(generation)) {
         _setBackgroundSyncing(false);
       }
     }
@@ -350,10 +471,12 @@ class AuthBootstrapService {
   Future<bool> _ensureImReadyWithRetry({
     String? registerNickname,
     Duration timeout = const Duration(seconds: 20),
+    required int expectedGeneration,
   }) async {
     final ready = await ensureImReadyForHome(
       registerNickname: registerNickname,
       timeout: timeout,
+      expectedGeneration: expectedGeneration,
     );
     if (ready) {
       return true;
@@ -363,6 +486,10 @@ class AuthBootstrapService {
       'soft-retry login (no generation bump / no session wipe)',
     );
     await Future<void>.delayed(const Duration(seconds: 2));
+    if (!SessionIdentityService.instance
+        .isGenerationCurrent(expectedGeneration)) {
+      return false;
+    }
     // 软重试：只 logout，不 bump _loginGeneration，避免掐死仍在飞的登录。
     try {
       await TencentImSDKPlugin.v2TIMManager.logout().timeout(
@@ -380,10 +507,19 @@ class AuthBootstrapService {
     return ensureImReadyForHome(
       registerNickname: registerNickname,
       timeout: timeout,
+      expectedGeneration: expectedGeneration,
     );
   }
 
-  Future<bool> _ensureImReadyForHomeCore({String? registerNickname}) async {
+  Future<bool> _ensureImReadyForHomeCore({
+    String? registerNickname,
+    required int expectedGeneration,
+  }) async {
+    bool isCurrent() =>
+        SessionIdentityService.instance.isGenerationCurrent(expectedGeneration);
+    if (!isCurrent()) {
+      return false;
+    }
     _diag('AuthBootstrap: ensure IM ready for home');
     LoginCoordinator.instance.markImConnecting();
     final results = await Future.wait<Object>([
@@ -392,6 +528,9 @@ class AuthBootstrapService {
     ]);
     final me = results[0] as MeResult;
     var sig = results[1] as UserSigResult;
+    if (!isCurrent()) {
+      return false;
+    }
     _diag(
       'AuthBootstrap: got me=${me.userId} sig=${sig.userId} '
       'sdkAppId=${sig.sdkAppId} sigLen=${sig.userSig.length}',
@@ -410,13 +549,25 @@ class AuthBootstrapService {
     }
     sig = _normalizeUserSig(sig);
     LoginCoordinator.instance.markImConnecting(userId: sig.userId);
-    await ImSessionCache.instance.save(sig);
+    if (!isCurrent()) {
+      return false;
+    }
+    final cacheSaved = await ImSessionCache.instance.saveIfCurrent(
+      sig,
+      isCurrent,
+    );
+    if (!cacheSaved || !isCurrent()) {
+      return false;
+    }
 
     _trace(
       'AuthBootstrap: _ensureImReadyForHomeCore calling completeImSessionAfterAuth '
       'userId=${sig.userId}',
     );
     var imCode = await completeImSessionAfterAuth(sig);
+    if (!isCurrent()) {
+      return false;
+    }
     _diag(
       'AuthBootstrap: completeImSessionAfterAuth code=$imCode '
       'userId=${sig.userId}',
@@ -569,6 +720,11 @@ class AuthBootstrapService {
   /// login is not trapped on the login page. Pass [scheduleWebRetry]=false from
   /// background retry to avoid recursive retries.
   Future<bool> refreshImUIKitLists({bool scheduleWebRetry = true}) async {
+    final identity = SessionIdentityService.instance.capture();
+    bool isCurrent() => SessionIdentityService.instance.isCurrent(identity);
+    if (!isCurrent()) {
+      return false;
+    }
     final friendship = serviceLocator<TUIFriendShipViewModel>();
     final conversation = serviceLocator<TUIConversationViewModel>();
     var friendshipOk = true;
@@ -579,35 +735,50 @@ class AuthBootstrapService {
       final imReady = await ImWebReadyGuard.instance.wait(
         timeout: const Duration(seconds: 12),
       );
+      if (!isCurrent()) {
+        return false;
+      }
       _trace('AuthBootstrap: refreshImUIKitLists web imReady=$imReady');
     }
     await Future.wait<void>([
       Future<void>(() async {
         try {
           await FriendSyncService.instance.syncFull(reason: 'bootstrap');
+          if (!isCurrent()) return;
           friendSyncBootstrapDone = true;
           await FriendContactIncrementalSyncService.instance.sync(
             reason: 'bootstrap',
           );
+          if (!isCurrent()) return;
           await GroupMembershipSyncService.instance
               .syncFull(reason: 'bootstrap');
+          if (!isCurrent()) return;
           groupSyncBootstrapDone = true;
           await GroupEntityIncrementalSyncService.instance.sync(
             reason: 'bootstrap',
           );
+          if (!isCurrent()) return;
           await GroupNoticeIncrementalSyncService.instance.sync(
             reason: 'bootstrap',
           );
+          if (!isCurrent()) return;
           await GroupMemberIncrementalSyncService.instance.syncAllJoined(
             reason: 'bootstrap',
           );
+          if (!isCurrent()) return;
           await friendship.loadContactListData();
-          await FriendSyncService.instance.reseedC2cDisplayNamesFromLocalFriends();
+          if (!isCurrent()) return;
+          await FriendSyncService.instance
+              .reseedC2cDisplayNamesFromLocalFriends();
+          if (!isCurrent()) return;
           await friendship.loadContactApplicationData();
+          if (!isCurrent()) return;
           if ((friendship.friendList?.isNotEmpty ?? false)) {
             await friendship.loadUserStatus();
+            if (!isCurrent()) return;
           }
         } catch (e) {
+          if (!isCurrent()) return;
           friendshipOk = false;
           _trace('AuthBootstrap: loadContactListData failed: $e');
         }
@@ -615,12 +786,19 @@ class AuthBootstrapService {
       Future<void>(() async {
         try {
           // sync 前先灌限量快照，避免进 Home 前只有空窗。
-          await ConversationListNotifier.instance.reloadFromLocal();
-          final meta = await ConversationLocalStore.instance.readSyncMeta();
-          final rowCount = await ConversationLocalStore.instance.countRows();
-          final owner = ChatIdFormat.rawUserUid(
-            ContactSocialCacheStore.safeLoginUserId(),
+          await ConversationListNotifier.instance.restoreStoreProjection(
+            reason: ConversationStoreProjectionReason.authBootstrap,
           );
+          if (!isCurrent()) return;
+          final owner = identity.ownerUserId;
+          final meta = await ConversationLocalStore.instance.readSyncMeta(
+            ownerUserId: owner,
+          );
+          if (!isCurrent()) return;
+          final rowCount = await ConversationLocalStore.instance.countRows(
+            ownerUserId: owner,
+          );
+          if (!isCurrent()) return;
           if (ConversationSyncService
                   .shouldAttemptImSnapshotOnLoginBootstrap() &&
               owner.isNotEmpty) {
@@ -632,6 +810,7 @@ class AuthBootstrapService {
               );
               final snapOk = await ImSnapshotBootstrapService.instance
                   .tryBootstrapOnLogin(ownerUserId: owner);
+              if (!isCurrent()) return;
               if (snapOk) {
                 conversationListBootstrapDone = true;
                 debugPrint(
@@ -648,6 +827,7 @@ class AuthBootstrapService {
                 reset: !(meta.hasSyncedOnce && rowCount > 0),
                 drainMode: ConversationSdkDrainMode.foregroundLimited,
               );
+              if (!isCurrent()) return;
               conversationListBootstrapDone = true;
               return;
             } finally {
@@ -665,13 +845,18 @@ class AuthBootstrapService {
             reset: shouldReset,
             drainMode: ConversationSdkDrainMode.foregroundLimited,
           );
+          if (!isCurrent()) return;
           conversationListBootstrapDone = true;
         } catch (e) {
+          if (!isCurrent()) return;
           conversationOk = false;
           _trace('AuthBootstrap: conversation sync failed: $e');
         }
       }),
     ]);
+    if (!isCurrent()) {
+      return false;
+    }
     final conversationCount =
         conversation.conversationList.where((item) => item != null).length;
     final friendCount = friendship.friendList?.length ?? 0;
@@ -694,20 +879,28 @@ class AuthBootstrapService {
     // Background listeners will refill lists after enter.
     if (kIsWeb) {
       if (!ok && scheduleWebRetry) {
-        unawaited(_retryWebListBootstrapInBackground());
+        unawaited(_retryWebListBootstrapInBackground(identity));
       }
       return true;
     }
     return ok;
   }
 
-  Future<void> _retryWebListBootstrapInBackground() async {
+  Future<void> _retryWebListBootstrapInBackground(
+    SessionIdentity identity,
+  ) async {
     if (!kIsWeb) {
       return;
     }
     try {
       await Future<void>.delayed(const Duration(seconds: 2));
+      if (!SessionIdentityService.instance.isCurrent(identity)) {
+        return;
+      }
       await ImWebReadyGuard.instance.wait(timeout: const Duration(seconds: 12));
+      if (!SessionIdentityService.instance.isCurrent(identity)) {
+        return;
+      }
       await refreshImUIKitLists(scheduleWebRetry: false);
       _trace('AuthBootstrap: web background list retry finished');
     } catch (e) {
@@ -748,14 +941,20 @@ class AuthBootstrapService {
   Future<void> _runPostLoginSideEffectsCore({
     required bool includeImListRefresh,
   }) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
+    bool isCurrent() => SessionIdentityService.instance.isCurrent(identity);
     try {
-      await ListenerStore.afterLogin().timeout(const Duration(seconds: 8));
+      await ListenerStore.afterLogin(expectedIdentity: identity)
+          .timeout(const Duration(seconds: 8));
     } catch (_) {}
+    if (!isCurrent()) return;
 
     final navContext = AppNavigator.context;
     if (navContext != null && navContext.mounted) {
       await ImConnectStatusService.syncToLocalSetting(navContext);
     }
+    if (!isCurrent()) return;
 
     PlatformOfficialAccountService.resetSessionState();
     unawaited(
@@ -764,20 +963,25 @@ class AuthBootstrapService {
           .catchError((_) => false),
     );
     DeviceSyncService.instance.scheduleSyncAfterLogin();
+    if (!isCurrent()) return;
     try {
       StarredFriendProvider.shared.refresh(force: true);
     } catch (_) {}
     try {
       await ArchivedConversationSyncService.instance.syncOnLogin();
     } catch (_) {}
+    if (!isCurrent()) return;
     try {
       await ConversationFolderSyncService.instance.syncOnLogin();
     } catch (_) {}
+    if (!isCurrent()) return;
     try {
       await ConversationPinSyncService.instance.syncOnLogin();
     } catch (_) {}
+    if (!isCurrent()) return;
     try {
       await UserStickerProvider.shared.refresh(force: true);
+      if (!isCurrent()) return;
       if (navContext != null && navContext.mounted) {
         await InitStep.publishStickerPackages(navContext);
       }
@@ -785,12 +989,15 @@ class AuthBootstrapService {
     try {
       await GroupNoticeBootstrap.install();
     } catch (_) {}
+    if (!isCurrent()) return;
     if (includeImListRefresh) {
       await refreshImUIKitLists();
+      if (!isCurrent()) return;
     }
     try {
       await ConversationNotifySyncService.instance.syncAllOnLogin();
     } catch (_) {}
+    if (!isCurrent()) return;
     try {
       await ArchivedConversationSyncService.instance.syncOnLogin();
     } catch (_) {}
@@ -857,6 +1064,7 @@ class AuthBootstrapService {
 
   /// Password/SMS login: native IM 已匹配则不再走会挂死的 [loginImStack] 全量重登。
   Future<int> completeImSessionAfterAuth(UserSigResult sig) async {
+    final sessionGeneration = SessionIdentityService.instance.generation;
     _trace(
       'AuthBootstrap: completeImSessionAfterAuth START userId=${sig.userId}',
     );
@@ -869,6 +1077,8 @@ class AuthBootstrapService {
       await clearLocalImSession(
         reason: 'foreground_identity_mismatch',
         clearCachedSession: false,
+        expectedUserId: nativeUserId,
+        expectedSessionGeneration: sessionGeneration,
       );
     }
     if (await isNativeLoggedIn(sig)) {
@@ -891,7 +1101,11 @@ class AuthBootstrapService {
       'AuthBootstrap: completeImSessionAfterAuth SLOW PATH — calling loginImStack '
       'userId=${sig.userId}',
     );
-    final code = await loginImStack(sig, forceLogin: true);
+    final code = await loginImStack(
+      sig,
+      forceLogin: true,
+      expectedSessionGeneration: sessionGeneration,
+    );
     _trace(
       'AuthBootstrap: completeImSessionAfterAuth loginImStack DONE code=$code',
     );
@@ -913,12 +1127,17 @@ class AuthBootstrapService {
     String reason = 'identity_check',
     Duration timeout = const Duration(seconds: 4),
   }) async {
+    final sessionGeneration = SessionIdentityService.instance.generation;
     final results = await Future.wait<Object>([
       AuthApi.instance.fetchMe().timeout(timeout),
       AuthApi.instance.fetchUserSig().timeout(timeout),
     ]);
     final me = results[0] as MeResult;
     var sig = results[1] as UserSigResult;
+    if (!SessionIdentityService.instance
+        .isGenerationCurrent(sessionGeneration)) {
+      return null;
+    }
     if (sig.userId.trim().isEmpty || sig.userSig.trim().isEmpty) {
       _diag('AuthBootstrap: identity check empty sig reason=$reason');
       return null;
@@ -939,17 +1158,33 @@ class AuthBootstrapService {
       await clearLocalImSession(
         reason: '${reason}_native_mismatch',
         clearCachedSession: true,
+        expectedUserId: nativeUserId,
+        expectedSessionGeneration: sessionGeneration,
       );
       return null;
     }
-    await ImSessionCache.instance.save(sig);
-    return sig;
+    final saved = await ImSessionCache.instance.saveIfCurrent(
+      sig,
+      () => SessionIdentityService.instance.isGenerationCurrent(
+        sessionGeneration,
+      ),
+    );
+    return saved ? sig : null;
   }
 
   Future<void> clearLocalImSession({
     required String reason,
     bool clearCachedSession = false,
+    String? expectedUserId,
+    int? expectedSessionGeneration,
   }) async {
+    final sessionGeneration =
+        expectedSessionGeneration ?? SessionIdentityService.instance.generation;
+    if (expectedSessionGeneration != null &&
+        !SessionIdentityService.instance
+            .isGenerationCurrent(expectedSessionGeneration)) {
+      return;
+    }
     _trace('AuthBootstrap: clear local IM session ($reason)');
     NativePostHomeBootstrapQueue.instance.reset(reason: reason);
     _setBackgroundSyncing(false);
@@ -966,11 +1201,25 @@ class AuthBootstrapService {
             const Duration(seconds: 3),
           );
     } catch (_) {}
+    if (!SessionIdentityService.instance
+        .isGenerationCurrent(sessionGeneration)) {
+      return;
+    }
     try {
       await CallLifecycleService.instance.teardown();
     } catch (_) {}
     if (clearCachedSession) {
-      await ImSessionCache.instance.clear();
+      final cacheOwner = (expectedUserId?.trim().isNotEmpty == true
+                  ? expectedUserId
+                  : await ImSessionCache.instance.readCachedUserId())
+              ?.trim() ??
+          '';
+      if (cacheOwner.isNotEmpty &&
+          SessionIdentityService.instance.isGenerationCurrent(
+            sessionGeneration,
+          )) {
+        await ImSessionCache.instance.clearForUser(cacheOwner);
+      }
     }
   }
 
@@ -1010,18 +1259,33 @@ class AuthBootstrapService {
     UserSigResult sig, {
     bool skipNetworkSideEffects = false,
     bool forceLogin = false,
+    int? expectedSessionGeneration,
   }) async {
+    final sessionGeneration =
+        expectedSessionGeneration ?? SessionIdentityService.instance.generation;
+    if (expectedSessionGeneration != null &&
+        !SessionIdentityService.instance
+            .isGenerationCurrent(expectedSessionGeneration)) {
+      return -1;
+    }
     try {
       return await _loginImStack(
         sig,
         skipNetworkSideEffects: skipNetworkSideEffects,
         forceLogin: forceLogin,
+        sessionGeneration: sessionGeneration,
       ).timeout(
         _imLoginTimeout,
-        onTimeout: () => _recoverImLoginAfterTimeout(sig),
+        onTimeout: () => _recoverImLoginAfterTimeout(
+          sig,
+          expectedSessionGeneration: sessionGeneration,
+        ),
       );
     } catch (_) {
-      return _recoverImLoginAfterTimeout(sig);
+      return _recoverImLoginAfterTimeout(
+        sig,
+        expectedSessionGeneration: sessionGeneration,
+      );
     }
   }
 
@@ -1046,6 +1310,7 @@ class AuthBootstrapService {
     UserSigResult sig, {
     bool skipNetworkSideEffects = false,
     bool forceLogin = false,
+    required int sessionGeneration,
   }) async {
     sig = _normalizeUserSig(sig);
     if (sig.sdkAppId <= 0) {
@@ -1053,7 +1318,9 @@ class AuthBootstrapService {
       return -1;
     }
     final sdkReady = await ensureImSdkInitialized(sdkAppId: sig.sdkAppId);
-    if (!sdkReady) {
+    if (!sdkReady ||
+        !SessionIdentityService.instance
+            .isGenerationCurrent(sessionGeneration)) {
       _diag(
         'AuthBootstrap: _loginImStack abort IM SDK not ready '
         'for sdkAppId=${sig.sdkAppId}',
@@ -1068,14 +1335,30 @@ class AuthBootstrapService {
       // During iOS network switching the SDK and app can both trigger relogin.
       // Reuse the in-flight login instead of starting another one, otherwise the
       // SDK reports: send packet interrupt because of relogin, login ticket has changed.
-      try {
-        return await runningTask.timeout(
-          _imLoginTimeout,
-          onTimeout: () => _recoverImLoginAfterTimeout(sig),
-        );
-      } catch (_) {
-        return _recoverImLoginAfterTimeout(sig);
+      final runningKey = _imLoginTaskKey;
+      if (runningKey == loginKey) {
+        try {
+          return await runningTask.timeout(
+            _imLoginTimeout,
+            onTimeout: () => _recoverImLoginAfterTimeout(sig),
+          );
+        } catch (_) {
+          return _recoverImLoginAfterTimeout(sig);
+        }
       }
+      try {
+        await runningTask.timeout(_imLoginTimeout);
+      } catch (_) {
+        _diag('AuthBootstrap: old IM login still active for new account');
+        return -1;
+      }
+      if (_imLoginTask != null) return -1;
+      return _loginImStack(
+        sig,
+        skipNetworkSideEffects: skipNetworkSideEffects,
+        forceLogin: forceLogin,
+        sessionGeneration: sessionGeneration,
+      );
     }
 
     final currentUser = await TencentImSDKPlugin.v2TIMManager.getLoginUser();
@@ -1086,6 +1369,8 @@ class AuthBootstrapService {
       await clearLocalImSession(
         reason: 'native_user_mismatch_before_login',
         clearCachedSession: false,
+        expectedUserId: currentUserId,
+        expectedSessionGeneration: sessionGeneration,
       );
     }
     final now = DateTime.now();
@@ -1112,6 +1397,7 @@ class AuthBootstrapService {
       sig,
       loginKey: loginKey,
       skipNetworkSideEffects: skipNetworkSideEffects,
+      sessionGeneration: sessionGeneration,
     );
     try {
       return await _imLoginTask!;
@@ -1127,6 +1413,7 @@ class AuthBootstrapService {
     UserSigResult sig, {
     required String loginKey,
     required bool skipNetworkSideEffects,
+    required int sessionGeneration,
   }) async {
     final gen = _loginGeneration;
     _trace(
@@ -1134,6 +1421,10 @@ class AuthBootstrapService {
     );
 
     final nativeOk = await isNativeLoggedIn(sig);
+    if (!SessionIdentityService.instance
+        .isGenerationCurrent(sessionGeneration)) {
+      return -1;
+    }
     _trace(
       'AuthBootstrap: _doLoginImStack nativeOk=$nativeOk gen=$gen',
     );
@@ -1147,6 +1438,10 @@ class AuthBootstrapService {
       await primeUIKitSession(sig);
       if (gen != _loginGeneration) {
         _trace('AuthBootstrap: _doLoginImStack gen changed after prime, abort');
+        return -1;
+      }
+      if (!SessionIdentityService.instance
+          .isGenerationCurrent(sessionGeneration)) {
         return -1;
       }
       if (kDebugMode) {
@@ -1171,11 +1466,17 @@ class AuthBootstrapService {
 
     _trace(
         'AuthBootstrap: _doLoginImStack SLOW: calling _loginImWithKickRetry');
-    var code = await _loginImWithKickRetry(sig);
+    var code = await _loginImWithKickRetry(
+      sig,
+      sessionGeneration: sessionGeneration,
+    );
     _trace('AuthBootstrap: _doLoginImStack _loginImWithKickRetry code=$code');
     if (code != 0) {
       _trace('AuthBootstrap: _doLoginImStack kickRetry failed, recover');
-      code = await _recoverImLoginAfterTimeout(sig);
+      code = await _recoverImLoginAfterTimeout(
+        sig,
+        expectedSessionGeneration: sessionGeneration,
+      );
       _trace(
           'AuthBootstrap: _doLoginImStack _recoverImLoginAfterTimeout code=$code');
     }
@@ -1184,6 +1485,10 @@ class AuthBootstrapService {
       if (gen != _loginGeneration) {
         _trace(
             'AuthBootstrap: _doLoginImStack gen changed after refresh, abort');
+        return -1;
+      }
+      if (!SessionIdentityService.instance
+          .isGenerationCurrent(sessionGeneration)) {
         return -1;
       }
       _markImLoginSuccess(
@@ -1195,7 +1500,10 @@ class AuthBootstrapService {
     return code;
   }
 
-  Future<int> _loginImWithKickRetry(UserSigResult sig) async {
+  Future<int> _loginImWithKickRetry(
+    UserSigResult sig, {
+    required int sessionGeneration,
+  }) async {
     var lastCode = -1;
     for (var attempt = 0; attempt < _kickRetryDelays.length + 1; attempt++) {
       lastCode = await _tryTimUIKitLogin(sig);
@@ -1210,24 +1518,33 @@ class AuthBootstrapService {
           'AuthBootstrap: IM login kicked offline, retry ${attempt + 1}',
         );
       }
-      await _resetLocalImSessionBeforeRetry();
+      await _resetLocalImSessionBeforeRetry(sig, sessionGeneration);
       await Future<void>.delayed(_kickRetryDelays[attempt]);
     }
     return await resolveImLoginCode(sig, lastCode);
   }
 
-  Future<void> _resetLocalImSessionBeforeRetry() async {
+  Future<void> _resetLocalImSessionBeforeRetry(
+    UserSigResult sig,
+    int sessionGeneration,
+  ) async {
     await clearLocalImSession(
       reason: 'retry_after_kick',
       clearCachedSession: false,
+      expectedUserId: sig.userId,
+      expectedSessionGeneration: sessionGeneration,
     );
   }
 
   /// Ensures [CoreServicesImpl] has [userID] set (sync prefix of [login]).
   /// Native IM may already be online while the Dart [login] Future still hangs.
   Future<void> primeUIKitSession(UserSigResult sig) async {
-    final loginFuture = TIMUIKitCore.getInstance()
-        .login(userID: sig.userId, userSig: sig.userSig);
+    final loginFuture = _trackImOperation(
+      TIMUIKitCore.getInstance().login(
+        userID: sig.userId,
+        userSig: sig.userSig,
+      ),
+    );
     await Future<void>.delayed(Duration.zero);
     try {
       final imRes = await loginFuture.timeout(_uikitLoginWait);
@@ -1238,12 +1555,10 @@ class AuthBootstrapService {
       if (kDebugMode) {
         _trace('AuthBootstrap: primeUIKitSession timed out, continue');
       }
-      unawaited(loginFuture);
     } catch (e) {
       if (kDebugMode) {
         _trace('AuthBootstrap: primeUIKitSession error: $e');
       }
-      unawaited(loginFuture);
     }
   }
 
@@ -1263,16 +1578,18 @@ class AuthBootstrapService {
 
     // Helper to attempt one login call.
     Future<dynamic> _attemptLogin() async {
-      final loginFuture = TIMUIKitCore.getInstance()
-          .login(userID: sig.userId, userSig: sig.userSig);
+      final loginFuture = _trackImOperation(
+        TIMUIKitCore.getInstance().login(
+          userID: sig.userId,
+          userSig: sig.userSig,
+        ),
+      );
       await Future<void>.delayed(Duration.zero);
       try {
         return await loginFuture.timeout(_uikitLoginWait);
       } on TimeoutException {
-        unawaited(loginFuture);
         return null;
       } catch (e) {
-        unawaited(loginFuture);
         rethrow;
       }
     }
@@ -1358,7 +1675,15 @@ class AuthBootstrapService {
 
   /// TIMUIKitCore.login can outlive native IM login; clear the stuck task and
   /// accept success when the SDK already has the expected user.
-  Future<int> _recoverImLoginAfterTimeout(UserSigResult sig) async {
+  Future<int> _recoverImLoginAfterTimeout(
+    UserSigResult sig, {
+    int? expectedSessionGeneration,
+  }) async {
+    if (expectedSessionGeneration != null &&
+        !SessionIdentityService.instance
+            .isGenerationCurrent(expectedSessionGeneration)) {
+      return -1;
+    }
     resetImLoginState();
     final loginRes = await TencentImSDKPlugin.v2TIMManager.getLoginUser();
     final userId = loginRes.data?.trim() ?? '';
@@ -1366,6 +1691,11 @@ class AuthBootstrapService {
       _lastImLoginKey = '${sig.sdkAppId}:${sig.userId}:${sig.userSig}';
       _lastImLoginAt = DateTime.now();
       await primeUIKitSession(sig);
+      if (expectedSessionGeneration != null &&
+          !SessionIdentityService.instance
+              .isGenerationCurrent(expectedSessionGeneration)) {
+        return -1;
+      }
       await _refreshCallStack(sig);
       return 0;
     }
@@ -1401,10 +1731,16 @@ class AuthBootstrapService {
   }
 
   Future<bool> _doRefreshUserSigAndRelogin() async {
+    lastUserSigRefreshWasAuthFailure = false;
+    final sessionGeneration = SessionIdentityService.instance.generation;
     LoginCoordinator.instance.markSessionRefreshing();
     try {
       final me = await AuthApi.instance.fetchMe();
       var sig = await AuthApi.instance.fetchUserSig();
+      if (!SessionIdentityService.instance
+          .isGenerationCurrent(sessionGeneration)) {
+        return false;
+      }
       if (sig.userId.trim().isEmpty || sig.userSig.trim().isEmpty) {
         LoginCoordinator.instance.markFailed(
           LoginErrorType.fetchUserSigFailed,
@@ -1425,8 +1761,22 @@ class AuthBootstrapService {
         userId: sig.userId,
         isRecovering: true,
       );
-      await ImSessionCache.instance.save(sig);
-      final imCode = await _loginImStack(sig, forceLogin: true);
+      final cacheSaved = await ImSessionCache.instance.saveIfCurrent(
+        sig,
+        () => SessionIdentityService.instance.isGenerationCurrent(
+          sessionGeneration,
+        ),
+      );
+      if (!cacheSaved) return false;
+      final imCode = await loginImStack(
+        sig,
+        forceLogin: true,
+        expectedSessionGeneration: sessionGeneration,
+      );
+      if (!SessionIdentityService.instance
+          .isGenerationCurrent(sessionGeneration)) {
+        return false;
+      }
       if (imCode == 0) {
         await refreshImUIKitLists();
         LoginCoordinator.instance.markImReady(userId: sig.userId);
@@ -1440,7 +1790,11 @@ class AuthBootstrapService {
         isHomeEntered: true,
       );
       return false;
-    } on DioError catch (_) {
+    } on DioError catch (error) {
+      lastUserSigRefreshWasAuthFailure =
+          ApiClient.isExplicitSessionExpiryError(error) ||
+              (error.response?.statusCode == 401 &&
+                  !DioErrorMessage.isNetworkRelated(error));
       LoginCoordinator.instance.markFailed(
         LoginErrorType.fetchUserSigFailed,
         message: 'Failed to refresh userSig',
@@ -1463,8 +1817,8 @@ class AuthBootstrapService {
 
   void resetImLoginState() {
     _loginGeneration++;
-    _imLoginTask = null;
-    _imLoginTaskKey = null;
+    // _loginImStack.finally owns the in-flight task. Dropping it here allowed
+    // a second account to issue login while the old native call still ran.
     _lastImLoginKey = null;
     _lastImLoginAt = null;
   }
@@ -1475,6 +1829,7 @@ class AuthBootstrapService {
   Future<bool> restoreSessionForPushWake() async {
     if (_pushWakeRestoring) return false;
     _pushWakeRestoring = true;
+    final sessionGeneration = SessionIdentityService.instance.generation;
     try {
       await ApiClient.instance.loadToken();
       final token = ApiClient.instance.token;
@@ -1485,6 +1840,10 @@ class AuthBootstrapService {
       final me = await AuthApi.instance.fetchMe().timeout(
             const Duration(seconds: 4),
           );
+      if (!SessionIdentityService.instance
+          .isGenerationCurrent(sessionGeneration)) {
+        return false;
+      }
       final expectedUserId = me.userId.trim();
       if (expectedUserId.isEmpty) {
         return false;
@@ -1495,11 +1854,16 @@ class AuthBootstrapService {
         await clearLocalImSession(
           reason: 'push_wake_native_user_mismatch',
           clearCachedSession: true,
+          expectedUserId: nativeUserId,
+          expectedSessionGeneration: sessionGeneration,
         );
       }
 
       if (_isSameUserId(nativeUserId, expectedUserId)) {
-        await _refreshCallStackForWake(expectedUserId: expectedUserId);
+        await _refreshCallStackForWake(
+          expectedUserId: expectedUserId,
+          expectedSessionGeneration: sessionGeneration,
+        );
         return true;
       }
 
@@ -1517,13 +1881,25 @@ class AuthBootstrapService {
           await clearLocalImSession(
             reason: 'push_wake_sig_user_mismatch',
             clearCachedSession: true,
+            expectedUserId: sig.userId,
+            expectedSessionGeneration: sessionGeneration,
           );
           return false;
         }
-        await ImSessionCache.instance.save(sig);
+        final saved = await ImSessionCache.instance.saveIfCurrent(
+          sig,
+          () => SessionIdentityService.instance.isGenerationCurrent(
+            sessionGeneration,
+          ),
+        );
+        if (!saved) return false;
       }
 
-      final imCode = await _loginImStack(sig, forceLogin: true);
+      final imCode = await loginImStack(
+        sig,
+        forceLogin: true,
+        expectedSessionGeneration: sessionGeneration,
+      );
       if (imCode == 0) {
         return true;
       }
@@ -1535,11 +1911,23 @@ class AuthBootstrapService {
         await clearLocalImSession(
           reason: 'push_wake_refresh_sig_user_mismatch',
           clearCachedSession: true,
+          expectedUserId: refreshedSig.userId,
+          expectedSessionGeneration: sessionGeneration,
         );
         return false;
       }
-      await ImSessionCache.instance.save(refreshedSig);
-      final refreshedCode = await _loginImStack(refreshedSig, forceLogin: true);
+      final refreshedSaved = await ImSessionCache.instance.saveIfCurrent(
+        refreshedSig,
+        () => SessionIdentityService.instance.isGenerationCurrent(
+          sessionGeneration,
+        ),
+      );
+      if (!refreshedSaved) return false;
+      final refreshedCode = await loginImStack(
+        refreshedSig,
+        forceLogin: true,
+        expectedSessionGeneration: sessionGeneration,
+      );
       return refreshedCode == 0;
     } catch (_) {
       return false;
@@ -1548,8 +1936,10 @@ class AuthBootstrapService {
     }
   }
 
-  Future<void> _refreshCallStackForWake(
-      {required String expectedUserId}) async {
+  Future<void> _refreshCallStackForWake({
+    required String expectedUserId,
+    int? expectedSessionGeneration,
+  }) async {
     UserSigResult? sig = await ImSessionCache.instance.loadIfValidForUser(
       expectedUserId,
     );
@@ -1563,10 +1953,22 @@ class AuthBootstrapService {
       await clearLocalImSession(
         reason: 'call_stack_wake_sig_user_mismatch',
         clearCachedSession: true,
+        expectedUserId: resolvedSig.userId,
+        expectedSessionGeneration: expectedSessionGeneration,
       );
       return;
     }
-    await ImSessionCache.instance.save(resolvedSig);
+    if (expectedSessionGeneration != null) {
+      final saved = await ImSessionCache.instance.saveIfCurrent(
+        resolvedSig,
+        () => SessionIdentityService.instance.isGenerationCurrent(
+          expectedSessionGeneration,
+        ),
+      );
+      if (!saved) return;
+    } else {
+      await ImSessionCache.instance.save(resolvedSig);
+    }
     await CallLifecycleService.instance.ensureObserversAttached();
     await CallLifecycleService.instance.ensureFloatWindowEnabled();
   }

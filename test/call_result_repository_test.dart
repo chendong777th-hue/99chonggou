@@ -90,6 +90,52 @@ void main() {
       expect(record.protocolType, CallProtocolType.reject);
       expect(record.operatorUserId, 'peer_y');
     });
+
+    test('canceled is not rolled back by a late accept', () {
+      const callId = 'call_terminal_cancel_then_accept';
+      CallResultRepository.instance.save(
+        CallResultRecord.fromSignaling(
+          callId: callId,
+          action: 'cancel',
+          peerUserId: 'peer_terminal_a',
+        ),
+      );
+      CallResultRepository.instance.save(
+        CallResultRecord.fromSignaling(
+          callId: callId,
+          action: 'accept',
+          peerUserId: 'peer_terminal_a',
+        ),
+      );
+
+      expect(
+        CallResultRepository.instance.get(callId)!.effectiveStatus,
+        CallSessionStatus.canceled,
+      );
+    });
+
+    test('ended is not rolled back by a late invite', () {
+      const callId = 'call_terminal_end_then_invite';
+      CallResultRepository.instance.save(
+        CallResultRecord.fromSignaling(
+          callId: callId,
+          action: 'hangup',
+          peerUserId: 'peer_terminal_b',
+        ),
+      );
+      CallResultRepository.instance.save(
+        CallResultRecord.fromSignaling(
+          callId: callId,
+          action: 'invite',
+          peerUserId: 'peer_terminal_b',
+        ),
+      );
+
+      expect(
+        CallResultRepository.instance.get(callId)!.effectiveStatus,
+        CallSessionStatus.ended,
+      );
+    });
   });
 
   group('CallResultRecord.protocolTypeFromServerResult', () {

@@ -24,6 +24,13 @@ bool conversationSlidableShouldArm({
   return accumulatedDx >= armDistance && accumulatedDx > accumulatedDy * 1.25;
 }
 
+bool conversationSlidableShouldRelease({
+  required bool wasTickerActive,
+  required bool tickerActive,
+  required bool pointerCanceled,
+}) =>
+    pointerCanceled || (wasTickerActive && !tickerActive);
+
 Widget applyConversationSlidableTouchSlop({required Widget child}) {
   return Builder(
     builder: (context) {
@@ -86,18 +93,92 @@ Widget conversationSlidable({
   Object groupTag = 'conversation-list',
   bool enabled = true,
 }) {
-  final webFeel = conversationSlidableUseWebFeel(context);
-  return ClipRect(
-    child: applyConversationSlidableTouchSlop(
-      child: Slidable(
-        groupTag: groupTag,
-        enabled: enabled,
-        closeOnScroll: !webFeel,
-        dragStartBehavior: DragStartBehavior.start,
-        startActionPane: startActionPane,
-        endActionPane: endActionPane,
-        child: child,
-      ),
-    ),
+  return _ConversationSlidableLifecycle(
+    groupTag: groupTag,
+    enabled: enabled,
+    startActionPane: startActionPane,
+    endActionPane: endActionPane,
+    child: child,
   );
+}
+
+class _ConversationSlidableLifecycle extends StatefulWidget {
+  const _ConversationSlidableLifecycle({
+    required this.groupTag,
+    required this.enabled,
+    required this.startActionPane,
+    required this.endActionPane,
+    required this.child,
+  });
+
+  final Object groupTag;
+  final bool enabled;
+  final ActionPane? startActionPane;
+  final ActionPane? endActionPane;
+  final Widget child;
+
+  @override
+  State<_ConversationSlidableLifecycle> createState() =>
+      _ConversationSlidableLifecycleState();
+}
+
+class _ConversationSlidableLifecycleState
+    extends State<_ConversationSlidableLifecycle>
+    with SingleTickerProviderStateMixin {
+  late final SlidableController _controller;
+  bool _tickerActive = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = SlidableController(this);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final active = TickerMode.of(context);
+    if (conversationSlidableShouldRelease(
+      wasTickerActive: _tickerActive,
+      tickerActive: active,
+      pointerCanceled: false,
+    )) {
+      _closeImmediately();
+    }
+    _tickerActive = active;
+  }
+
+  void _closeImmediately() {
+    if (_controller.ratio != 0 && !_controller.closing) {
+      _controller.close(duration: Duration.zero);
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final webFeel = conversationSlidableUseWebFeel(context);
+    return ClipRect(
+      child: applyConversationSlidableTouchSlop(
+        child: Listener(
+          onPointerCancel: (_) => _closeImmediately(),
+          child: Slidable(
+            controller: _controller,
+            groupTag: widget.groupTag,
+            enabled: widget.enabled,
+            closeOnScroll: !webFeel,
+            dragStartBehavior: DragStartBehavior.start,
+            startActionPane: widget.startActionPane,
+            endActionPane: widget.endActionPane,
+            child: widget.child,
+          ),
+        ),
+      ),
+    );
+  }
 }

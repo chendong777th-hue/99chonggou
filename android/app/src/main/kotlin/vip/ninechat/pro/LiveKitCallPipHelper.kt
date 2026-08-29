@@ -4,9 +4,9 @@ import android.app.Activity
 import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.os.Build
-import android.util.Log
 import android.util.Rational
 import java.lang.ref.WeakReference
+import vip.ninechat.pro.logging.SilentLog as Log
 
 /**
  * LiveKit video-call system PiP (replaces TUICallKit state-gated helper).

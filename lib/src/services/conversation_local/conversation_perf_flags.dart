@@ -16,8 +16,8 @@ class ConversationPerfFlags {
   /// 登录首屏后在 idle/background 按游标分批续翻，补齐大账号会话。
   /// 每轮仍只拉一页并让出主线程，避免阻塞首屏。
   // 后台分页会在 UI isolate 上持续执行 SDK 解码和 SQLite mirror 写入。
-  // 高频交互期间默认关闭，触底/搜索仍按需分页；需要补齐时由业务显式开启。
-  static const bool idleBackgroundDrainEnabled = false;
+  // 首屏限页完成后自动在后台续翻，确保冷启动不会只停留在首屏快照。
+  static const bool idleBackgroundDrainEnabled = true;
 
   /// 误开 [idleBackgroundDrainEnabled] 时的每会话启动页预算；用尽不再 resume。
   static const int idleDrainSessionPageBudget = 64;
@@ -38,8 +38,8 @@ class ConversationPerfFlags {
   /// 后台 drain 页与页之间让出主线程。
   static const Duration backgroundPageYield = Duration(milliseconds: 80);
 
-  /// drain 默认不刷新 UI（0）；仅窗口 patch 路径单独处理。
-  static const int backgroundUiRefreshEveryPages = 0;
+  /// 后台 drain 每完成一页就刷新一次会话投影，确保续翻写库后当前进程可见。
+  static const int backgroundUiRefreshEveryPages = 1;
 
   /// 前台限页结束后多久才允许开始 idle drain。
   static const Duration idleDrainStartDelay = Duration(seconds: 3);
@@ -160,6 +160,12 @@ class ConversationPerfFlags {
   /// `false`：聊中也刷离屏 Feed（列表实时性优先）。
   static const bool deferUiNotifyWhileActiveChat = true;
 
+  /// SDK-primary committed rows are durable in SQLite before they reach the
+  /// TabStore. While Chat owns the foreground, keep non-visible rows in a
+  /// coalesced projection buffer instead of repeatedly copying and sorting the
+  /// full conversation window on the UI isolate.
+  static const bool deferTabStoreProjectionWhileActiveChat = true;
+
   /// Chat 页内列表 UI notify 最长推迟；到期仍 flush 一次，防永不回列表饿死。
   static const Duration activeChatUiNotifyMaxDefer = Duration(
     milliseconds: 1200,
@@ -203,9 +209,9 @@ class ConversationPerfFlags {
   /// 离开聊天后 HistoryWarm 抑制时长。
   static const Duration postChatLeaveWarmSuppress = Duration(seconds: 8);
 
-  /// `true`：会话行 `onTapDown` 即 press 暖历史（易与滑动冲突）。
-  /// `false`：不在 onTapDown 暖（进聊路径仍可暖）。
-  static const bool pressWarmOnTapDownEnabled = false;
+  /// `true`：C2C 会话行 `onTapDown` 即开始 LOCAL-only 历史预热。
+  /// 预热不打云，进聊路径仍负责云端首窗和完整性校验。
+  static const bool pressWarmOnTapDownEnabled = true;
 
   /// `true`：群聊行允许按下目标会话时 LOCAL warm 这一条。
   /// 群聊不做批量 press，不走 CLOUD，只给用户明确按下/点击的目标让路。
@@ -409,7 +415,11 @@ class ConversationPerfFlags {
   ///
   /// Phase3：TabStore 排除归档；SQLite 列表字段 mirror-only。
   /// Phase4：停 hydrate 双写 / pendingUiApply 主列表路径；见 docs。
-  static bool conversationListSdkPrimary = false;
+  static bool conversationListSdkPrimary = true;
+
+  /// TabStore pages read the SQLite committed conversation view. Disable only
+  /// as a rollback to the Tencent SDK pagination source.
+  static bool tabStoreCommittedViewEnabled = true;
 
   /// `true`：热启发现 `c2cHaveMore=false` 且本地单聊行数低于 [uiSnapshotC2cLimit]
   /// 时重开 C2C 游标并至少拉一页（修复混流/脏 meta 导致单聊永久不灌）。
@@ -454,11 +464,10 @@ class ConversationPerfFlags {
     return 24;
   }
 
-  /// Android 全档：滚动中不发起虚拟水合，仅 scroll_end / force 补一次。
-  /// 边滑边水合会在主线程叠 SQLite/SDK 解码，是普遍卡顿的主要来源之一。
-  /// iOS 仍允许边滑边补，减少骨架闪现。
-  static bool get virtualHydrateOnlyOnScrollSettle =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+  /// `true`：滚动中不发起虚拟水合，仅 scroll_end / force 补一次。
+  /// `false`：iOS/Android 均恢复边滑边水合，减少骨架闪现；
+  /// 代价是滚动中主线程会叠加 SQLite/SDK 解码，低端 Android 可能掉帧。
+  static bool get virtualHydrateOnlyOnScrollSettle => false;
 
   /// 启动后禁止 viewport history warm 的时长（press 仍可）。
   static Duration get historyWarmSuppressAfterLaunch {

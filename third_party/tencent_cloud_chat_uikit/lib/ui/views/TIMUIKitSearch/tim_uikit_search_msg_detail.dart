@@ -86,7 +86,8 @@ class TIMUIKitSearchMsgDetail extends StatefulWidget {
   State<StatefulWidget> createState() => TIMUIKitSearchMsgDetailState();
 }
 
-class TIMUIKitSearchMsgDetailState extends TIMUIKitState<TIMUIKitSearchMsgDetail> {
+class TIMUIKitSearchMsgDetailState
+    extends TIMUIKitState<TIMUIKitSearchMsgDetail> {
   final model = serviceLocator<TUISearchViewModel>();
   String keywordState = "";
   int currentPage = 0;
@@ -286,7 +287,8 @@ class TIMUIKitSearchMsgDetailState extends TIMUIKitState<TIMUIKitSearchMsgDetail
         return TIM_t("[表情]");
       case MessageElemType.V2TIM_ELEM_TYPE_FILE:
         final option1 = message.fileElem?.fileName ?? TIM_t("[文件]");
-        return TIM_t_para("[文件] {{option1}}", "[文件] $option1")(option1: option1);
+        return TIM_t_para("[文件] {{option1}}", "[文件] $option1")(
+            option1: option1);
       case MessageElemType.V2TIM_ELEM_TYPE_IMAGE:
         return TIM_t("[图片]");
       case MessageElemType.V2TIM_ELEM_TYPE_VIDEO:
@@ -410,7 +412,8 @@ class TIMUIKitSearchMsgDetailState extends TIMUIKitState<TIMUIKitSearchMsgDetail
     }).toList();
   }
 
-  Widget _renderShowMore(bool showMore, TUITheme theme, {required VoidCallback onTap}) {
+  Widget _renderShowMore(bool showMore, TUITheme theme,
+      {required VoidCallback onTap}) {
     if (!showMore) {
       return const SizedBox.shrink();
     }
@@ -434,7 +437,8 @@ class TIMUIKitSearchMsgDetailState extends TIMUIKitState<TIMUIKitSearchMsgDetail
     }
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider.value(value: serviceLocator<TUISearchViewModel>()),
+        ChangeNotifierProvider.value(
+            value: serviceLocator<TUISearchViewModel>()),
       ],
       builder: (context, w) {
         final isDesktopScreen =
@@ -453,13 +457,9 @@ class TIMUIKitSearchMsgDetailState extends TIMUIKitState<TIMUIKitSearchMsgDetail
           searchResults = widget.initMessageList!;
         }
 
-        final totalMsgInConversationCount =
-            Provider.of<TUISearchViewModel>(context).totalMsgInConversationCount;
-        final textResultCount = Provider.of<TUISearchViewModel>(context)
-            .currentMsgListForConversation
-            .length;
-        final showTextLoadMore =
-            hasKeyword && totalMsgInConversationCount > textResultCount;
+        final showTextLoadMore = hasKeyword &&
+            Provider.of<TUISearchViewModel>(context)
+                .hasMoreConversationTextResults;
 
         return GestureDetector(
           onTap: () => FocusScope.of(context).unfocus(),
@@ -546,11 +546,12 @@ class TIMUIKitSearchMsgDetailState extends TIMUIKitState<TIMUIKitSearchMsgDetail
                         showTextLoadMore,
                         theme,
                         onTap: () {
+                          final nextPage = currentPage;
                           setState(() => currentPage = currentPage + 1);
                           model.getMsgForConversation(
                             keywordState,
                             widget.currentConversation.conversationID,
-                            currentPage,
+                            nextPage,
                           );
                         },
                       ),

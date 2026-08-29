@@ -847,7 +847,63 @@ class GroupTipsMessageHelper {
     }
     final existingPeer = existing.isPeerRead == true;
     final incomingPeer = incoming.isPeerRead == true;
-    return existingPeer != incomingPeer;
+    if (existingPeer != incomingPeer) {
+      return true;
+    }
+    if (messageStatusRank(incoming.status) <
+        messageStatusRank(existing.status)) {
+      return false;
+    }
+    return contentFingerprint(existing) != contentFingerprint(incoming);
+  }
+
+  /// Lightweight preview identity for late SDK enrichment of one msgID.
+  @visibleForTesting
+  static String contentFingerprint(V2TimMessage? message) {
+    if (message == null) {
+      return '';
+    }
+    final custom = message.customElem;
+    final tips = message.groupTipsElem;
+    return Object.hash(
+      Object.hash(
+        message.elemType,
+        message.textElem?.text?.trim() ?? '',
+        custom?.data?.trim() ?? '',
+        custom?.desc?.trim() ?? '',
+        custom?.extension?.trim() ?? '',
+        message.faceElem?.data?.trim() ?? '',
+        message.sender?.trim() ?? '',
+        message.nickName?.trim() ?? '',
+        message.nameCard?.trim() ?? '',
+        message.localCustomData?.trim() ?? '',
+        message.cloudCustomData?.trim() ?? '',
+      ),
+      Object.hash(
+        tips?.type,
+        tips?.groupID.trim() ?? '',
+        tips?.opMember.userID?.trim() ?? '',
+        tips?.opMember.nickName?.trim() ?? '',
+        tips?.opMember.nameCard?.trim() ?? '',
+        tips?.memberList
+                ?.map((member) =>
+                    '${member?.userID?.trim() ?? ''}:${member?.nickName?.trim() ?? ''}:${member?.nameCard?.trim() ?? ''}')
+                .join(',') ??
+            '',
+        tips?.memberCount,
+        tips?.groupChangeInfoList
+                ?.map((change) =>
+                    '${change?.type ?? -1}:${change?.key ?? ''}:${change?.value ?? ''}:${change?.boolValue ?? false}:${change?.intValue ?? 0}')
+                .join(',') ??
+            '',
+        tips?.memberChangeInfoList
+                ?.map((change) =>
+                    '${change?.userID?.trim() ?? ''}:${change?.muteTime ?? 0}')
+                .join(',') ??
+            '',
+      ),
+      message.revokeReason?.trim() ?? '',
+    ).toString();
   }
 
   static bool _shouldSkipAsConversationLastMessage(V2TimMessage message) {

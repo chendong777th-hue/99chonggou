@@ -11,6 +11,7 @@ import 'package:tencent_cloud_chat_demo/src/services/livekit_call_ringtone.dart'
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_telemetry_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_types.dart';
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_ui_log.dart';
+import 'package:tencent_cloud_chat_demo/src/services/call_result_enrichment_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/voice_output_route_service.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/call_user_id.dart';
 import 'package:tencent_cloud_chat_demo/utils/toast.dart';
@@ -46,8 +47,10 @@ class LiveKitCallSession extends ChangeNotifier {
   DateTime? _connectedAt;
   Timer? _ringTimeout;
   bool _finalizing = false;
+
   /// True while this device is accepting as callee (ignore answered_elsewhere echo).
   bool _localAcceptInFlight = false;
+
   /// Bumped on every finalize so in-flight connect/publish can abort.
   int _sessionGen = 0;
   bool _micEnabled = true;
@@ -71,7 +74,8 @@ class LiveKitCallSession extends ChangeNotifier {
   LiveKitCallCredentials? get credentials => _creds;
   Room? get room => _room;
   AppCallRole get role => _role;
-  bool get isBusy => _phase != LiveKitCallPhase.idle && _phase != LiveKitCallPhase.ended;
+  bool get isBusy =>
+      _phase != LiveKitCallPhase.idle && _phase != LiveKitCallPhase.ended;
   bool get isInCall =>
       _phase == LiveKitCallPhase.ringingOut ||
       _phase == LiveKitCallPhase.ringingIn ||
@@ -122,7 +126,7 @@ class LiveKitCallSession extends ChangeNotifier {
     _creds = creds;
     _role = AppCallRole.caller;
     _phase = LiveKitCallPhase.ringingOut;
-    _speakerOn = creds.isVideo;
+    _applyDefaultCallRoute(creds.isVideo);
     notifyListeners();
     _armRingTimeout(creds.timeoutSec);
   }
@@ -152,7 +156,7 @@ class LiveKitCallSession extends ChangeNotifier {
     );
     _role = AppCallRole.caller;
     _phase = LiveKitCallPhase.ringingOut;
-    _speakerOn = video;
+    _applyDefaultCallRoute(video);
     notifyListeners();
     _armRingTimeout(60);
   }
@@ -252,7 +256,7 @@ class LiveKitCallSession extends ChangeNotifier {
     );
     _role = AppCallRole.callee;
     _phase = LiveKitCallPhase.ringingIn;
-    _speakerOn = _creds?.isVideo == true;
+    _applyDefaultCallRoute(_creds?.isVideo == true);
     notifyListeners();
     _armRingTimeout(timeoutSec);
     _ensureTelemetryRecorder(_creds!);
@@ -278,7 +282,8 @@ class LiveKitCallSession extends ChangeNotifier {
     final nextCallee = calleeUserId.trim().isNotEmpty
         ? calleeUserId.trim()
         : existing.calleeUserId;
-    final nextRoom = roomName.trim().isNotEmpty ? roomName.trim() : existing.roomName;
+    final nextRoom =
+        roomName.trim().isNotEmpty ? roomName.trim() : existing.roomName;
     if (nextMedia == existing.mediaType &&
         nextCaller == existing.callerUserId &&
         nextCallee == existing.calleeUserId &&
@@ -405,9 +410,11 @@ class LiveKitCallSession extends ChangeNotifier {
     _pendingEndReason = AppCallEndReason.hangup;
     if (id.isNotEmpty) {
       try {
-        await _api
-            .hangup(callId: id)
-            .timeout(const Duration(seconds: 2));
+        await _api.hangup(callId: id).timeout(const Duration(seconds: 2));
+      } on LiveKitCallApiException catch (e) {
+        if (e.code == 'CALL_ENDED' || e.code == 'CALL_ALREADY_ANSWERED') {
+          unawaited(CallResultEnrichmentService.instance.reconcileStatus(id));
+        }
       } catch (_) {}
     }
     await _finalize(reason: AppCallEndReason.hangup, operatorIsSelf: true);
@@ -502,7 +509,8 @@ class LiveKitCallSession extends ChangeNotifier {
         _micEnabled = false;
         notifyListeners();
         ToastUtils.toast(liveKitPublishFailureMessage('mic'));
-        if (_phase != LiveKitCallPhase.idle && _phase != LiveKitCallPhase.ended) {
+        if (_phase != LiveKitCallPhase.idle &&
+            _phase != LiveKitCallPhase.ended) {
           await _finalizePublishFailure();
         }
         return;
@@ -523,22 +531,41 @@ class LiveKitCallSession extends ChangeNotifier {
 
   Future<void> setSpeakerphoneOn(bool enabled) async {
     _speakerOn = enabled;
+    // Keep the shared route state and the call-page icon in sync before the
+    // native switch completes. This prevents a reconnect/CallKit callback
+    // from re-applying the previous route while the user is tapping.
+    final route =
+        enabled ? VoiceOutputRoute.speaker : VoiceOutputRoute.earpiece;
+    VoiceOutputRouteService.routeNotifier.value = route;
     liveKitCallUiLog(
       'setSpeakerphoneOn enabled=$enabled role=$_role phase=$_phase '
       '${describeCallAudioState(_room)}',
     );
     try {
-      await Hardware.instance.setSpeakerphoneOn(
-        enabled,
-        forceSpeakerOutput: enabled,
+      await VoiceOutputRouteService.setRoute(
+        route,
+        configureSession: true,
+        forRecording: true,
+        activate: true,
+        forceApply: true,
       );
     } catch (e, st) {
       liveKitCallUiLog('setSpeakerphoneOn failed enabled=$enabled error=$e');
       if (kDebugMode) {
-        debugPrint('LiveKitCallSession: setSpeakerphoneOn($enabled) failed: $e\n$st');
+        debugPrint(
+            'LiveKitCallSession: setSpeakerphoneOn($enabled) failed: $e\n$st');
       }
     }
     notifyListeners();
+  }
+
+  void _applyDefaultCallRoute(bool video) {
+    _speakerOn = video;
+    // Audio-only calls follow the phone-call convention (receiver); video
+    // calls follow the video-chat convention (speaker). Keep this synchronous
+    // so the initial UI state is correct before the first frame.
+    VoiceOutputRouteService.routeNotifier.value =
+        video ? VoiceOutputRoute.speaker : VoiceOutputRoute.earpiece;
   }
 
   /// Stop ringtone and re-apply LiveKit speaker route after media is live.
@@ -609,7 +636,8 @@ class LiveKitCallSession extends ChangeNotifier {
   }
 
   bool _localMicPublishedUnmuted() {
-    for (final pub in _room?.localParticipant?.audioTrackPublications ?? const []) {
+    for (final pub
+        in _room?.localParticipant?.audioTrackPublications ?? const []) {
       if (pub.track != null && !pub.muted) {
         return true;
       }
@@ -696,10 +724,6 @@ class LiveKitCallSession extends ChangeNotifier {
       } else {
         await VoiceOutputRouteService.applyCurrentRoute(activate: true);
       }
-      await Hardware.instance.setSpeakerphoneOn(
-        _speakerOn,
-        forceSpeakerOutput: _speakerOn,
-      );
     } catch (e, st) {
       liveKitCallUiLog('_ensureCallAudioRoute failed: $e');
       if (kDebugMode) {
@@ -848,12 +872,16 @@ class LiveKitCallSession extends ChangeNotifier {
         if (_maybeRecoverFromDisconnect(event.reason)) {
           return;
         }
+        final disconnectedCallId = callId;
+        if (disconnectedCallId.isNotEmpty) {
+          unawaited(CallResultEnrichmentService.instance.reconcileStatus(
+            disconnectedCallId,
+          ));
+        }
         final mapped = disconnectReasonToEndReason(event.reason);
         unawaited(
           _finalize(
-            reason: mapped ??
-                _pendingEndReason ??
-                AppCallEndReason.hangup,
+            reason: mapped ?? _pendingEndReason ?? AppCallEndReason.hangup,
             operatorIsSelf: false,
           ),
         );

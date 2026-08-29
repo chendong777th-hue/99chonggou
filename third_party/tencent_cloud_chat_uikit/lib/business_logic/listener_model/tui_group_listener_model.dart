@@ -117,19 +117,26 @@ class TUIGroupListenerModel extends ChangeNotifier {
             GroupChangeInfoType.V2TIM_GROUP_INFO_CHANGE_TYPE_FACE_URL) {
           final url = info.value?.trim();
           if (url != null && url.isNotEmpty) {
-            serviceLocator<TUIConversationViewModel>()
-                .updateGroupFaceUrl(groupID, url);
+            // Self-hosted groups commit metadata through the app's guarded
+            // GroupLocalStore pipeline. The SDK callback is only a hint; do
+            // not write its potentially stale snapshot into the conversation.
+            if (!SelfHostedGroupBridge.enabled) {
+              serviceLocator<TUIConversationViewModel>()
+                  .updateGroupFaceUrl(groupID, url);
+            }
           }
         }
         if (info.type ==
             GroupChangeInfoType.V2TIM_GROUP_INFO_CHANGE_TYPE_NAME) {
           final name = info.value?.trim();
           if (name != null && name.isNotEmpty) {
-            DisplayNameStore.instance.setGroup(groupID, name, notify: false);
-            serviceLocator<TUIConversationViewModel>()
-                .updateGroupShowName(groupID, name);
-            serviceLocator<TUIFriendShipViewModel>()
-                .updateGroupNameLocal(groupID, name);
+            if (!SelfHostedGroupBridge.enabled) {
+              DisplayNameStore.instance.setGroup(groupID, name, notify: false);
+              serviceLocator<TUIConversationViewModel>()
+                  .updateGroupShowName(groupID, name);
+              serviceLocator<TUIFriendShipViewModel>()
+                  .updateGroupNameLocal(groupID, name);
+            }
           }
         }
         if (info.type ==

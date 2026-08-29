@@ -154,7 +154,10 @@ class _GroupLiveAuthorizePageState extends State<GroupLiveAuthorizePage> {
         .map(
           (record) => RedPacketMember(
             userId: record.userId,
-            name: record.displayName,
+            name: record.friendRemark.trim().isNotEmpty
+                ? record.friendRemark.trim()
+                : record.displayName,
+            publicName: record.nickname,
             avatar: record.avatarUrl,
           ),
         )

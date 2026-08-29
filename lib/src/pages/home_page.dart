@@ -13,6 +13,7 @@ import 'package:tencent_cloud_chat_demo/config.dart';
 import 'package:tencent_cloud_chat_demo/src/contact.dart';
 import 'package:tencent_cloud_chat_demo/src/conversation.dart';
 import 'package:tencent_cloud_chat_demo/src/services/auth_bootstrap_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/services/account_session_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/app_update_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/interaction_idle_scheduler.dart';
@@ -198,13 +199,22 @@ class HomePageState extends State<HomePage> {
     if (PlatformUtils().isWeb || !mounted) {
       return;
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) {
+      return;
+    }
     final res = await _sdkInstance.getLoginUser();
+    if (!SessionIdentityService.instance.isCurrent(identity)) {
+      return;
+    }
     final userId = res.data?.trim() ?? '';
     if (res.code != 0 || userId.isEmpty) {
       return;
     }
     final result = await _sdkInstance.getUsersInfo(userIDList: [userId]);
-    if (!mounted) return;
+    if (!mounted || !SessionIdentityService.instance.isCurrent(identity)) {
+      return;
+    }
     if (result.code == 0 && result.data != null && result.data!.isNotEmpty) {
       Provider.of<LoginUserInfo>(context, listen: false)
           .setLoginUserInfo(result.data![0]);
@@ -306,7 +316,8 @@ class HomePageState extends State<HomePage> {
       final dark = Provider.of<DefaultThemeData>(context, listen: false)
               .currentThemeType ==
           ThemeType.dark;
-      final headerAsset = dark ? 'assets/img/card2.webp' : 'assets/img/card.webp';
+      final headerAsset =
+          dark ? 'assets/img/card2.webp' : 'assets/img/card.webp';
       final inviteAsset =
           dark ? 'assets/img/invite2.webp' : 'assets/img/invite.webp';
       final headerSourceWidth = 1024;
@@ -1429,8 +1440,7 @@ class HomePageState extends State<HomePage> {
                     preferredSize:
                         Size.fromHeight(tabContentHeight + safeBottom),
                     child: ColoredBox(
-                      color: barBg ??
-                          Theme.of(context).scaffoldBackgroundColor,
+                      color: barBg ?? Theme.of(context).scaffoldBackgroundColor,
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [

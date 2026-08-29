@@ -9,4 +9,9 @@ class AppNavigator {
   static OverlayState? get overlay => key.currentState?.overlay;
 
   static BuildContext? get context => key.currentState?.context;
+
+  static String? get currentRouteName {
+    final context = key.currentState?.context;
+    return context == null ? null : ModalRoute.of(context)?.settings.name;
+  }
 }

@@ -5,12 +5,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_join_application_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_feed_log.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_system_notice_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_group_application.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_group_application.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
-import 'package:tencent_cloud_chat_uikit/data_services/core/core_services_implements.dart';
-import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 
 const String groupNoticeLastReadTimestampStorageKey =
     'groupNoticeLastReadTimestamp';
@@ -26,7 +25,8 @@ class GroupNoticeUnreadService extends ChangeNotifier {
 
   int _readWatermarkMs = 0;
   bool _loaded = false;
-  Future<void>? _loading;
+  String _loadedOwner = '';
+  final Map<String, Future<void>> _loadingByOwner = <String, Future<void>>{};
 
   int get readWatermarkMs => _readWatermarkMs;
 
@@ -37,18 +37,31 @@ class GroupNoticeUnreadService extends ChangeNotifier {
       );
 
   Future<void> ensureLoaded() {
-    return _loading ??= _loadReadWatermark();
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) {
+      return Future<void>.value();
+    }
+    if (_loaded && _loadedOwner == identity.ownerUserId) {
+      return Future<void>.value();
+    }
+    return _loadingByOwner[identity.ownerUserId] ??=
+        _loadReadWatermark(identity);
   }
 
-  Future<void> _loadReadWatermark() async {
+  Future<void> _loadReadWatermark(SessionIdentity identity) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      _readWatermarkMs = prefs.getInt(_storageKey()) ?? 0;
+      if (!SessionIdentityService.instance.isCurrent(identity)) {
+        return;
+      }
+      _readWatermarkMs =
+          prefs.getInt(_storageKeyForOwner(identity.ownerUserId)) ?? 0;
       _loaded = true;
-      _mergeServerReadWatermark(notify: false);
+      _loadedOwner = identity.ownerUserId;
+      _mergeServerReadWatermark(notify: false, identity: identity);
       notifyListeners();
     } finally {
-      _loading = null;
+      _loadingByOwner.remove(identity.ownerUserId);
     }
   }
 
@@ -59,17 +72,24 @@ class GroupNoticeUnreadService extends ChangeNotifier {
       'watermark': _readWatermarkMs,
       'loaded': _loaded,
     });
-    _mergeServerReadWatermark(notify: true);
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
+    _mergeServerReadWatermark(notify: true, identity: identity);
   }
 
-  void _mergeServerReadWatermark({required bool notify}) {
-    if (!_loaded) {
+  void _mergeServerReadWatermark({
+    required bool notify,
+    required SessionIdentity identity,
+  }) {
+    if (!_loaded ||
+        _loadedOwner != identity.ownerUserId ||
+        !SessionIdentityService.instance.isCurrent(identity)) {
       return;
     }
     final serverRead = GroupSystemNoticeService.instance.lastReadAtMs;
     if (serverRead != null && serverRead > _readWatermarkMs) {
       _readWatermarkMs = serverRead;
-      unawaited(_persistReadWatermark());
+      unawaited(_persistReadWatermark(identity));
       if (notify) {
         notifyListeners();
       }
@@ -81,19 +101,32 @@ class GroupNoticeUnreadService extends ChangeNotifier {
   }
 
   Future<void> markRead({int? readAtMs}) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
     await ensureLoaded();
+    if (!SessionIdentityService.instance.isCurrent(identity) ||
+        _loadedOwner != identity.ownerUserId) {
+      return;
+    }
     final ms = readAtMs ?? DateTime.now().millisecondsSinceEpoch;
     if (ms <= _readWatermarkMs) {
       return;
     }
     _readWatermarkMs = ms;
-    await _persistReadWatermark();
+    await _persistReadWatermark(identity);
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     unawaited(GroupSystemNoticeService.instance.markRead(ms));
     notifyListeners();
   }
 
   Future<void> markReadUpToLatest() async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
     await ensureLoaded();
+    if (!SessionIdentityService.instance.isCurrent(identity) ||
+        _loadedOwner != identity.ownerUserId) {
+      return;
+    }
     final latestMs = latestGroupNoticeTimestampMs(
       GroupJoinApplicationService.instance.applications,
       GroupSystemNoticeService.instance.notices,
@@ -107,7 +140,8 @@ class GroupNoticeUnreadService extends ChangeNotifier {
   void clearSession() {
     _readWatermarkMs = 0;
     _loaded = false;
-    _loading = null;
+    _loadedOwner = '';
+    _loadingByOwner.clear();
     notifyListeners();
   }
 
@@ -122,19 +156,25 @@ class GroupNoticeUnreadService extends ChangeNotifier {
     await prefs.remove('${groupNoticeLastReadTimestampStorageKey}_$owner');
   }
 
-  String _storageKey() {
-    final userId = ChatIdFormat.rawUserUid(
-      serviceLocator<CoreServicesImpl>().loginUserInfo?.userID ?? '',
-    );
-    if (userId.isEmpty) {
+  String _storageKeyForOwner(String userId) {
+    final owner = ChatIdFormat.rawUserUid(userId);
+    if (owner.isEmpty) {
       return groupNoticeLastReadTimestampStorageKey;
     }
-    return '${groupNoticeLastReadTimestampStorageKey}_$userId';
+    return '${groupNoticeLastReadTimestampStorageKey}_$owner';
   }
 
-  Future<void> _persistReadWatermark() async {
+  Future<void> _persistReadWatermark(SessionIdentity identity) async {
+    if (!SessionIdentityService.instance.isCurrent(identity) ||
+        _loadedOwner != identity.ownerUserId) {
+      return;
+    }
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setInt(_storageKey(), _readWatermarkMs);
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
+    await prefs.setInt(
+      _storageKeyForOwner(identity.ownerUserId),
+      _readWatermarkMs,
+    );
   }
 }
 

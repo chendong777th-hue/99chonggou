@@ -284,10 +284,9 @@ class RouteHandler {
         ExternalChatEntryService.instance.requestActivation(
           conversationID: conversationID,
           source: source,
-          reason:
-              ExternalChatEntryService.instance.isVisibleChatReady(
-                conversationID,
-              )
+          reason: ExternalChatEntryService.instance.isVisibleChatReady(
+            conversationID,
+          )
               ? 'visible_chat_ready'
               : 'visible_chat_needs_activation',
           delay: const Duration(milliseconds: 120),
@@ -325,11 +324,10 @@ class RouteHandler {
           return false;
         }
         unawaited(
-          Navigator.of(pushCtx).push(
-            appChatRoute(
-              conversation,
-              entryUnreadCount: conversation.unreadCount ?? 0,
-            ),
+          openOrReuseAppChat(
+            pushCtx,
+            conversation,
+            entryUnreadCount: conversation.unreadCount ?? 0,
           ),
         );
         ExternalChatEntryService.instance.logFlow(

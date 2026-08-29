@@ -295,6 +295,13 @@ class LiveKitCallNavigator {
       liveKitCallUiLog('closeCallPage ignored — not open ($_diag)');
       return;
     }
+    // A delayed hangup/CallKit callback can arrive after another route has
+    // covered the call page. Popping in that state would remove the covered
+    // route (often the chat page) and return to the conversation list.
+    if (!_routeIsCurrent) {
+      liveKitCallUiLog('closeCallPage ignored — call route not current ($_diag)');
+      return;
+    }
     liveKitCallUiLog('closeCallPage popping ($_diag)');
     if (nav.canPop()) {
       nav.pop();

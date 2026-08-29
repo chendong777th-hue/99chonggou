@@ -8,6 +8,7 @@ import 'package:tencent_cloud_chat_demo/src/services/group_leave_diag_log.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_governance_trace.dart';
 import 'package:tencent_cloud_chat_demo/utils/api_response_util.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
+import 'package:tencent_cloud_chat_demo/utils/object_url_normalize.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_callback.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_callback.dart';
 
@@ -522,6 +523,25 @@ class MeGroupApi {
     return null;
   }
 
+  /// 全屏群头像预览专用。调用方只能在用户明确进入全屏预览后触发。
+  Future<GroupAvatarPreviewResult> fetchGroupAvatarPreview(
+    String groupId,
+  ) async {
+    final id = ChatIdFormat.apiGroupId(groupId);
+    if (id.isEmpty) {
+      throw const FormatException('groupId is empty');
+    }
+    final res = await _dio.get(
+      '/groups/${Uri.encodeComponent(id)}/avatar-preview',
+    );
+    final payload = unwrapApiPayload(res.data);
+    return GroupAvatarPreviewResult.fromJson(
+      payload is Map
+          ? Map<String, dynamic>.from(payload)
+          : const <String, dynamic>{},
+    );
+  }
+
   Future<GroupMembersPage> fetchGroupMembersPage({
     required String groupId,
     int limit = 50,
@@ -557,9 +577,7 @@ class MeGroupApi {
           fallbackOffset: offset,
         );
         // 首屏 200 但空列表常见于群 ID 形态不对：继续试下一候选，避免误用空结果。
-        if (offset <= 0 &&
-            page.items.isEmpty &&
-            id != candidates.last) {
+        if (offset <= 0 && page.items.isEmpty && id != candidates.last) {
           lastEmpty = page;
           debugPrint(
             'MeGroupApi.fetchGroupMembersPage empty retry id=$id',
@@ -1428,4 +1446,31 @@ class MeGroupApi {
     final text = value?.toString().trim().toLowerCase() ?? '';
     return text == 'true' || text == '1' || text == 'yes';
   }
+}
+
+class GroupAvatarPreviewResult {
+  const GroupAvatarPreviewResult({
+    required this.previewUrl,
+    required this.avatarVersion,
+  });
+
+  final String previewUrl;
+  final int avatarVersion;
+
+  factory GroupAvatarPreviewResult.fromJson(Map<String, dynamic> json) {
+    return GroupAvatarPreviewResult(
+      previewUrl: normalizeObjectUrl(
+        (json['previewUrl'] ?? json['preview_url'])?.toString().trim() ?? '',
+      ),
+      avatarVersion: _readIntValue(
+        json['avatarVersion'] ?? json['avatar_version'],
+      ),
+    );
+  }
+}
+
+int _readIntValue(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString().trim() ?? '') ?? 0;
 }

@@ -7,6 +7,9 @@ import 'package:tencent_cloud_chat_demo/src/services/chat_history_recovery_coord
 import 'package:tencent_cloud_chat_demo/src/services/chat_history_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
+import 'package:tencent_cloud_chat_demo/src/services/chat_history_peek_bootstrap.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_peek_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_request_notice_service.dart';
 import 'package:tencent_cloud_chat_demo/src/pages/wallet/order/wallet_pending_recovery_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im_connect_status_service.dart';
@@ -15,8 +18,11 @@ import 'package:tencent_cloud_chat_demo/src/utils/conversation_preview_history_s
 import 'package:tencent_cloud_chat_demo/src/utils/message_conversation_id.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
 import 'package:tencent_cloud_chat_sdk/tencent_im_sdk_plugin.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_history_coverage.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 
 class ImRecoveryService {
@@ -25,9 +31,11 @@ class ImRecoveryService {
   static final ImRecoveryService instance = ImRecoveryService._();
 
   Future<void>? _globalTask;
+  Future<void>? _coverageScanTask;
   DateTime? _lastGlobalRunAt;
   static const Duration _defaultGlobalMinInterval = Duration(seconds: 12);
   static const Duration _resumeGlobalMinInterval = Duration(seconds: 3);
+  static const Duration _reconnectGlobalMinInterval = Duration(seconds: 1);
   static const Duration _defaultHold = Duration(milliseconds: 600);
 
   Future<void> afterOnline({
@@ -38,7 +46,9 @@ class ImRecoveryService {
     final last = _lastGlobalRunAt;
     final minInterval = reason == 'app_resumed'
         ? _resumeGlobalMinInterval
-        : _defaultGlobalMinInterval;
+        : reason == 'im_reconnected'
+            ? _reconnectGlobalMinInterval
+            : _defaultGlobalMinInterval;
     if (last != null && now.difference(last) < minInterval) {
       return _globalTask ?? Future<void>.value();
     }
@@ -281,8 +291,97 @@ class ImRecoveryService {
         }
       }
       await refreshForegroundChatIfNeeded(reason: reason);
+      await _runBoundedCoverageRecoveryScan(
+        reason: reason,
+        globalModel: serviceLocator<TUIChatGlobalModel>(),
+      );
     }
 
     ConversationRefreshBus.instance.requestRefresh(reason: '${reason}_done');
+  }
+
+  /// Account-scoped, finite recovery pass. Coverage is metadata only; message
+  /// bodies are still fetched by the existing chat reconciliation writer.
+  Future<void> _runBoundedCoverageRecoveryScan({
+    required String reason,
+    required TUIChatGlobalModel globalModel,
+  }) {
+    final inFlight = _coverageScanTask;
+    if (inFlight != null) return inFlight;
+    late final Future<void> task;
+    task = () async {
+      final conversations = ConversationListNotifier.instance.conversations;
+      final candidates = <V2TimConversation>[];
+      for (final conversation in conversations.take(20)) {
+        final key = MessageConversationId.normalizeComparableKey(
+          conversation.conversationID,
+        );
+        if (key.isEmpty || !ConversationPeekService.canPeek(conversation)) {
+          continue;
+        }
+        final coverage = await globalModel.ensureMessageHistoryCoverageLoaded(
+          key,
+        );
+        final previewAhead = await _isPreviewAheadOfHistory(
+          conversationId: conversation.conversationID,
+          conversationKey: key,
+          globalModel: globalModel,
+        );
+        final needsRecovery = previewAhead ||
+            coverage.continuationPending ||
+            coverage.hasOpenHoles ||
+            coverage.status == MessageHistoryCoverageStatus.partial ||
+            coverage.status == MessageHistoryCoverageStatus.offlineLocalOnly ||
+            coverage.status == MessageHistoryCoverageStatus.failed;
+        if (needsRecovery) candidates.add(conversation);
+      }
+      var nextIndex = 0;
+      Future<void> worker() async {
+        while (true) {
+          final index = nextIndex++;
+          if (index >= candidates.length) return;
+          final conversation = candidates[index];
+          final id = conversation.conversationID.trim();
+          final key = MessageConversationId.normalizeComparableKey(id);
+          try {
+            final previewAhead = await _isPreviewAheadOfHistory(
+              conversationId: id,
+              conversationKey: key,
+              globalModel: globalModel,
+            );
+            final coverage =
+                await globalModel.ensureMessageHistoryCoverageLoaded(key);
+            final continuationNeedsWindow =
+                coverage.continuationPending &&
+                    coverage.continuationDirection !=
+                        MessageHistoryCoverageDirection.newer;
+            if ((previewAhead || continuationNeedsWindow) &&
+                !globalModel.hasActiveHistoryReconciliation(key)) {
+              await ChatHistoryPeekBootstrap.apply(
+                conversation: conversation,
+                globalModel: globalModel,
+              );
+            } else {
+              await globalModel.reconcileConversationCloud(
+                key,
+                reason: 'account_recovery_$reason',
+              );
+            }
+          } catch (error) {
+            if (kDebugMode) {
+              debugPrint('coverage recovery failed for $key: $error');
+            }
+          }
+        }
+      }
+      await Future.wait(<Future<void>>[
+        worker(),
+        worker(),
+      ]);
+    }().whenComplete(() {
+      if (identical(_coverageScanTask, task)) _coverageScanTask = null;
+    });
+    _coverageScanTask = task;
+    return task;
   }
 }

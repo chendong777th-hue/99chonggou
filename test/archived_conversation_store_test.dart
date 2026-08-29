@@ -57,7 +57,7 @@ void main() {
     expect(archivedConversationGroupIDsNotifier.value, {'group_g1'});
   });
 
-  test('migrates legacy global archived ids into first account scope', () async {
+  test('formal account never imports ownerless legacy archived ids', () async {
     SharedPreferences.setMockInitialValues({
       archivedConversationIDsC2cStorageKey: ['c2c_legacy'],
       archivedConversationIDsGroupStorageKey: ['group_legacy'],
@@ -68,21 +68,45 @@ void main() {
     setArchivedConversationAccountScopeResolverForTest(() => 'legacy_user');
     await ensureArchivedConversationIDsLoaded();
 
-    expect(archivedConversationC2cIDsNotifier.value, {'c2c_legacy'});
-    expect(archivedConversationGroupIDsNotifier.value, {'group_legacy'});
+    expect(archivedConversationC2cIDsNotifier.value, isEmpty);
+    expect(archivedConversationGroupIDsNotifier.value, isEmpty);
 
     final prefs = await SharedPreferences.getInstance();
     expect(
       prefs.getStringList(
         'archivedConversationIDs_c2c_v2_legacy_user',
       ),
-      ['c2c_legacy'],
+      isNull,
     );
     expect(
       prefs.getStringList(
         'archivedConversationIDs_group_v2_legacy_user',
       ),
-      ['group_legacy'],
+      isNull,
+    );
+  });
+
+  test('clear removes only the requested account archive cache', () async {
+    await saveArchivedConversationIDs(
+      ConversationArchiveScope.c2c,
+      {'c2c_a'},
+      accountScope: 'user_a',
+    );
+    await saveArchivedConversationIDs(
+      ConversationArchiveScope.c2c,
+      {'c2c_b'},
+      accountScope: 'user_b',
+    );
+
+    await clearArchivedConversationDataForAccountScope('user_a');
+    clearArchivedConversationSessionState();
+    await ensureArchivedConversationIDsLoaded(accountScope: 'user_b');
+
+    expect(archivedConversationC2cIDsNotifier.value, {'c2c_b'});
+    final prefs = await SharedPreferences.getInstance();
+    expect(
+      prefs.getStringList('archivedConversationIDs_c2c_v2_user_a'),
+      isNull,
     );
   });
 }

@@ -43,6 +43,15 @@ void main() {
     expect(picker.contains('picker_permission_begin'), isTrue);
     expect(picker.contains('picker_failed'), isTrue);
     expect(picker.contains('picker_push_returned'), isTrue);
+    expect(picker.contains('GalleryResolveOutcome'), isTrue);
+    expect(picker.contains('cloudTimeout'), isTrue);
+    expect(picker.contains('permissionLimited'), isTrue);
+    expect(picker.contains('unsupportedOrCorrupt'), isTrue);
+    expect(picker.contains('outcome=\${outcome.name}'), isTrue);
+    expect(picker.contains('retries = 2'), isTrue);
+    expect(panel.contains('resolve_categorized_failure'), isTrue);
+    expect(panel.contains('outcome=oversize'), isTrue);
+    expect(panel.contains('stage_failed'), isTrue);
     expect(
       File(
         'third_party/tencent_cloud_chat_uikit/lib/ui/utils/image_edit/'

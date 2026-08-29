@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/web_chat_open_policy.dart';
@@ -23,6 +22,7 @@ class _CallMsgMeta {
     required this.stableKey,
     required this.nearKey,
     required this.durationSec,
+    required this.lifecycleRank,
     required this.roomId,
     required this.conversationId,
     required this.inviteId,
@@ -35,6 +35,7 @@ class _CallMsgMeta {
   final String stableKey;
   final String nearKey;
   final int durationSec;
+  final int lifecycleRank;
   final String roomId;
   final String conversationId;
   final String inviteId;
@@ -50,6 +51,7 @@ class _CallMsgMeta {
     stableKey: '',
     nearKey: '',
     durationSec: 0,
+    lifecycleRank: 0,
     roomId: '',
     conversationId: '',
     inviteId: '',
@@ -362,12 +364,13 @@ class CallBubbleDedupe {
     for (final message in messages) {
       final id = message.msgID?.trim() ?? '';
       hash = 0x1fffffff & (hash + id.hashCode);
+      hash = 0x1fffffff & (hash + (message.customElem?.data ?? '').hashCode);
+      hash = 0x1fffffff & (hash + (message.localCustomData ?? '').hashCode);
       hash = 0x1fffffff & (hash + ((0x0007ffff & hash) << 10));
       hash ^= (hash >> 6);
     }
-    final tipExtra = preserveTipIdentity
-        ? '|tip:${tipMsgIdOf(messages) ?? ''}'
-        : '';
+    final tipExtra =
+        preserveTipIdentity ? '|tip:${tipMsgIdOf(messages) ?? ''}' : '';
     return '${messages.length}|$first|$mid|$last|$hash$tipExtra';
   }
 
@@ -564,11 +567,13 @@ class CallBubbleDedupe {
 
   static String _cacheKey(V2TimMessage message) {
     final id = message.msgID?.trim() ?? '';
-    if (id.isNotEmpty) {
-      return id;
-    }
     final data = message.customElem?.data ?? '';
     final local = message.localCustomData ?? '';
+    if (id.isNotEmpty) {
+      // Local lifecycle projections deliberately reuse one msgID per callId.
+      // Include mutable payloads so RINGING metadata is not reused for ENDED.
+      return '$id:${data.hashCode}:${local.hashCode}';
+    }
     return 'noid:${message.timestamp ?? 0}:${data.length}:${local.length}:'
         '${data.hashCode}:${local.hashCode}';
   }
@@ -593,6 +598,7 @@ class CallBubbleDedupe {
           ? provider.conversationID.trim()
           : _fallbackConversationId(message);
       final inviteId = provider.inviteID.trim();
+      final lifecycleRank = _protocolLifecycleRank(provider.protocolType);
 
       var stable = '';
       var near = '';
@@ -600,12 +606,10 @@ class CallBubbleDedupe {
         stable = provider.callStableKey.trim();
         near = provider.callNearDuplicateKey.trim();
       }
-      // 仅终态可写 stableKey。invite/accept 也带 inviteId，若写成 call:$id
-      // 会在插入判定里被当成「已有气泡」，导致本地通话气泡漏插。
+      // Every visible C2C lifecycle state uses callId as its stable identity,
+      // allowing RINGING -> ANSWERED -> terminal to update one row.
       if (shouldDisplay) {
-        if (stable.isEmpty &&
-            duration > 0 &&
-            roomId.isNotEmpty) {
+        if (stable.isEmpty && duration > 0 && roomId.isNotEmpty) {
           stable = 'call-room:$roomId:$duration';
         }
         if (stable.isEmpty && inviteId.isNotEmpty) {
@@ -638,6 +642,7 @@ class CallBubbleDedupe {
         stableKey: stable,
         nearKey: near,
         durationSec: duration,
+        lifecycleRank: lifecycleRank,
         roomId: roomId,
         conversationId: convId,
         inviteId: inviteId,
@@ -651,6 +656,7 @@ class CallBubbleDedupe {
         stableKey: '',
         nearKey: '',
         durationSec: 0,
+        lifecycleRank: 0,
         roomId: '',
         conversationId: '',
         inviteId: '',
@@ -672,8 +678,9 @@ class CallBubbleDedupe {
       // Duration may live on marker (preferred) or on customElem payload.
       var duration = _readDuration(decoded);
       var roomId = _readRoomId(decoded);
+      Map? customMap;
       if (duration <= 0 || roomId.isEmpty) {
-        final customMap = _tryDecodeMap(message.customElem?.data?.trim() ?? '');
+        customMap = _tryDecodeMap(message.customElem?.data?.trim() ?? '');
         if (customMap != null) {
           if (duration <= 0) {
             duration = _readDuration(customMap);
@@ -697,10 +704,17 @@ class CallBubbleDedupe {
       ]);
       final conversationId =
           conv.isNotEmpty ? conv : _fallbackConversationId(message);
+      customMap ??= _tryDecodeMap(message.customElem?.data?.trim() ?? '');
+      final lifecycleRank = _localLifecycleRank(
+        marker: decoded,
+        payload: customMap,
+        durationSec: duration,
+      );
       // Always keep callId key so hangup-shaped IM rows can collapse with us.
       final inviteKey = inviteId.isNotEmpty ? 'call:$inviteId' : '';
       var stable = inviteKey;
-      if (duration > 0 && CallBubbleDedupeKey.isC2cConversation(conversationId)) {
+      if (duration > 0 &&
+          CallBubbleDedupeKey.isC2cConversation(conversationId)) {
         stable = CallBubbleDedupeKey.c2cHangup(
           conversationId: conversationId,
           durationSec: duration,
@@ -717,6 +731,7 @@ class CallBubbleDedupe {
         stableKey: stable,
         nearKey: inviteKey.isNotEmpty ? inviteKey : stable,
         durationSec: duration,
+        lifecycleRank: lifecycleRank,
         roomId: roomId,
         conversationId: conversationId,
         inviteId: inviteId,
@@ -734,6 +749,65 @@ class CallBubbleDedupe {
       return true;
     }
     return meta.isCallingSignal && meta.shouldDisplayInHistory;
+  }
+
+  static int _protocolLifecycleRank(CallProtocolType protocol) {
+    switch (protocol) {
+      case CallProtocolType.send:
+        return 10;
+      case CallProtocolType.accept:
+        return 20;
+      case CallProtocolType.reject:
+      case CallProtocolType.cancel:
+      case CallProtocolType.timeout:
+      case CallProtocolType.lineBusy:
+        return 30;
+      case CallProtocolType.hangup:
+        return 40;
+      case CallProtocolType.switchToAudio:
+      case CallProtocolType.switchToAudioConfirm:
+      case CallProtocolType.unknown:
+        return 0;
+    }
+  }
+
+  static int _localLifecycleRank({
+    required Map marker,
+    required Map? payload,
+    required int durationSec,
+  }) {
+    final action = _firstNonEmpty(<Object?>[
+      marker['action'],
+      marker['status'],
+      marker['phase'],
+      payload?['action'],
+      payload?['status'],
+      payload?['phase'],
+    ]).toLowerCase();
+    switch (action) {
+      case 'invite':
+      case 'ringing':
+        return 10;
+      case 'accept':
+      case 'answered':
+        return 20;
+      case 'reject':
+      case 'rejected':
+      case 'cancel':
+      case 'canceled':
+      case 'cancelled':
+      case 'timeout':
+      case 'missed':
+      case 'busy':
+      case 'line_busy':
+        return 30;
+      case 'hangup':
+      case 'ended':
+      case 'answered_elsewhere':
+        return 40;
+      default:
+        return durationSec > 0 ? 40 : 0;
+    }
   }
 
   /// 轻量从原始 JSON 读 duration，不构造完整 provider 字段树之外的二次 decode 尽量复用。
@@ -870,6 +944,13 @@ class CallBubbleDedupe {
     V2TimMessage current, {
     String? tipMsgId,
   }) {
+    final nextMeta = _metaFor(next);
+    final currentMeta = _metaFor(current);
+    // Lifecycle is monotonic by callId: a late invite/accept must never replace
+    // a terminal projection, even when the older state is the current list tip.
+    if (nextMeta.lifecycleRank != currentMeta.lifecycleRank) {
+      return nextMeta.lifecycleRank > currentMeta.lifecycleRank;
+    }
     final tip = tipMsgId?.trim() ?? '';
     if (tip.isNotEmpty) {
       final nextId = next.msgID?.trim() ?? '';
@@ -881,9 +962,7 @@ class CallBubbleDedupe {
         return false;
       }
     }
-    final nextMeta = _metaFor(next);
-    final currentMeta = _metaFor(current);
-    // Prefer IM terminal over legacy local marker; then richer duration; then newer.
+    // For equal states prefer IM, richer duration, then newer.
     if (currentMeta.isLocalBubble && !nextMeta.isLocalBubble) {
       return true;
     }
@@ -926,7 +1005,7 @@ class CallBubbleDedupe {
         .map(messageId)
         .whereType<String>()
         .toList(growable: false);
-    return const ListEquality<String>().equals(beforeIds, afterIds);
+    return listEquals(beforeIds, afterIds);
   }
 
   static bool _sameMessageIds(List<V2TimMessage> a, List<V2TimMessage> b) {

@@ -101,6 +101,8 @@ class GroupMembershipSyncService {
   }
 
   bool _groupListSyncedOnce = false;
+  final Map<String, Future<void>> _groupDetailRefreshInFlight = {};
+  final Map<String, bool> _groupDetailRefreshForcesRemote = {};
   final Map<String, Future<void>> _groupMemberRefreshInFlight = {};
   final Map<String, Future<void>> _membershipSnapshotInFlight = {};
   final Map<String, int> _membershipSnapshotCooldownUntilMs = <String, int>{};
@@ -398,6 +400,8 @@ class GroupMembershipSyncService {
     required int limit,
   }) async {
     try {
+      final storageGroupId = ChatIdFormat.canonicalGroupStorageId(groupID);
+      final localGroupId = storageGroupId.isNotEmpty ? storageGroupId : groupID;
       // REST 多形态候选（短码 / @TGS# / 完整社群 ID）；优先本地 /me/groups 记录。
       final preferred = await _resolveApiGroupIdForMembers(groupID);
       final page = await MeGroupApi.instance.fetchGroupMembersPage(
@@ -428,13 +432,13 @@ class GroupMembershipSyncService {
       if (offset <= 0 && !hasMore) {
         await GroupMemberLocalStore.instance.replaceSnapshot(
           ownerUserId: owner,
-          groupId: groupID,
+          groupId: localGroupId,
           records: page.items,
         );
       } else {
         await GroupMemberLocalStore.instance.replacePage(
           ownerUserId: owner,
-          groupId: groupID,
+          groupId: localGroupId,
           offset: offset,
           records: page.items,
         );
@@ -681,30 +685,16 @@ class GroupMembershipSyncService {
       return MeGroupApi.successCallback();
     }
     try {
-      var updated = await MeGroupApi.instance.updateGroup(
+      await MeGroupApi.instance.updateGroup(
         groupId: groupId,
         groupName: hasName ? info.groupName : null,
         notice: hasNotice ? info.notification : null,
       );
-      // REST 应返回 noticeUpdatedBy；若缺省则用当前操作者兜底。
-      if (hasNotice && updated.noticeUpdatedBy.trim().isEmpty) {
-        final selfId = _ownerUserId();
-        if (selfId.isNotEmpty) {
-          updated = updated.copyWith(noticeUpdatedBy: selfId);
-        }
-      }
-      await GroupLocalStore.instance.upsert(
-        ownerUserId: _ownerUserId(),
-        record: updated,
-      );
+      // The mutation response is not the metadata read model. Re-read the
+      // canonical group detail so name/memberCount enter the Store through one
+      // path only.
+      await refreshGroupDetail(groupId, refresh: true);
       if (hasName) {
-        final name = (info.groupName ?? updated.groupName).trim();
-        if (name.isNotEmpty) {
-          await publishGroupConversationDisplay(
-            groupId: groupId,
-            groupName: name,
-          );
-        }
         unawaited(
           GroupTipCustomSender.instance.send(
             groupId: groupId,
@@ -859,7 +849,6 @@ class GroupMembershipSyncService {
     }
 
     final removedUserIds = <String>[];
-    int? latestMemberCount;
     String? firstFailureCode;
 
     for (var offset = 0; offset < normalized.length; offset += 100) {
@@ -877,7 +866,6 @@ class GroupMembershipSyncService {
         return MeGroupApi.failureCallback(response.topLevelCode!);
       }
       removedUserIds.addAll(response.removedUserIds);
-      latestMemberCount = response.memberCount ?? latestMemberCount;
       for (final item in response.results) {
         if (item.status == GroupKickMemberStatus.failed) {
           firstFailureCode ??= item.code?.trim();
@@ -902,29 +890,9 @@ class GroupMembershipSyncService {
       groupId: id,
       userIds: removedUserIds,
     );
-    if (latestMemberCount != null && latestMemberCount >= 0) {
-      await _patchGroupFields(
-        owner: owner,
-        groupId: id,
-        memberCount: latestMemberCount,
-      );
-    } else {
-      final current = await GroupLocalStore.instance.read(
-        groupId: id,
-        ownerUserId: owner,
-      );
-      if (current != null) {
-        final nextCount = (current.memberCount - removedUserIds.length).clamp(
-          0,
-          current.memberCount,
-        );
-        await _patchGroupFields(
-          owner: owner,
-          groupId: id,
-          memberCount: nextCount,
-        );
-      }
-    }
+    // memberCount from the mutation response is not a metadata authority.
+    // GroupSyncService will trigger a fresh group detail after the member
+    // list sync completes; only that detail may update GroupLocalStore.
     unawaited(
       GroupSyncService.instance.notifyGroupMembersChanged(
         id,
@@ -1871,7 +1839,7 @@ class GroupMembershipSyncService {
     }
   }
 
-  /// 入站 `group_tip`（改名/换头）→ 只写群 Entity + 双写展示，非全量。
+  /// 入站 `group_tip`（改名/换头）→ 触发群详情刷新，非全量成员同步。
   Future<void> applyInboundGroupDisplayFromMessage(
     V2TimMessage message,
   ) async {
@@ -1895,24 +1863,9 @@ class GroupMembershipSyncService {
       return;
     }
     try {
-      final fields = extractGroupTipDisplayFields(map);
-      final name = fields.groupName;
-      final avatar = fields.avatarUrl;
-      if (action == 'group_name_changed' && name.isEmpty) {
-        // tip 缺名：强制拉单群详情，避免会话列表长期挂旧名。
-        await refreshGroupDetail(groupId, refresh: true);
-        return;
-      }
-      if (action == 'group_avatar_changed' && avatar.isEmpty) {
-        await refreshGroupDetail(groupId, refresh: true);
-        return;
-      }
-      if (name.isNotEmpty) {
-        await applyOptimisticGroupName(groupId: groupId, groupName: name);
-      }
-      if (avatar.isNotEmpty) {
-        await upsertGroupAvatar(groupId: groupId, avatarUrl: avatar);
-      }
+      // A historical App Custom / GroupTips message may be replayed while
+      // loading chat history. Its payload is never a metadata source.
+      await refreshGroupDetail(groupId, refresh: true);
     } catch (e) {
       _log(
           'applyInboundGroupDisplayFromMessage failed groupId=$groupId error=$e');
@@ -1921,7 +1874,7 @@ class GroupMembershipSyncService {
     }
   }
 
-  /// 入站拉人/踢人/退群 tip（App Custom 或 IM 原生 GroupTips）→ 成员首屏 + 刷聊天头。
+  /// 入站拉人/踢人/退群 tip（App Custom 或 IM 原生 GroupTips）→ 成员首屏 + 资料刷新。
   /// 与 TCP 路径共用 `syncMembersAfterMembershipChange` 单飞，避免双拉。
   Future<void> applyInboundMembershipTipFromMessage(
     V2TimMessage message,
@@ -1974,7 +1927,10 @@ class GroupMembershipSyncService {
         groupId,
         reason: 'tip_$action',
       );
-      // 不走 notifyGroupMembersChanged（会再 sync 一次）；只推 lastChanged 刷头。
+      // This fallback path may not have a GroupSyncService event. The
+      // notification below invalidates the canonical metadata coordinator;
+      // do not start a second direct detail request here.
+      // 不走 notifyGroupMembersChanged（会再 sync 一次）；仅通知其他聊天 UI。
       notifyMembershipChatHeader(
         groupId,
         action: action,
@@ -1990,7 +1946,7 @@ class GroupMembershipSyncService {
     }
   }
 
-  /// 成员人数/名单变更后通知打开中的群聊头刷新（写 [GroupSyncService.lastChanged]）。
+  /// 成员名单变更后通知打开中的群聊处理列表、灰字等非资料 UI。
   void notifyMembershipChatHeader(
     String groupId, {
     String action = 'member_added',
@@ -2000,40 +1956,68 @@ class GroupMembershipSyncService {
     if (id.isEmpty) {
       return;
     }
-    GroupSyncService.instance.lastChanged.value = GroupChangedNotice(
+    GroupSyncService.instance.notifyMemberMetadataChanged(
       groupId: id,
       action: action,
       memberUserIds: memberUserIds,
-      pushTs: DateTime.now().millisecondsSinceEpoch,
-    );
-  }
-
-  /// 增量/TCP 写回权威人数（不打全量详情）。
-  Future<void> patchMemberCountForSync({
-    required String groupId,
-    required int memberCount,
-  }) async {
-    final owner = _ownerUserId();
-    final id = ChatIdFormat.normalizeGroupId(groupId);
-    if (owner.isEmpty || id.isEmpty || memberCount < 0) {
-      return;
-    }
-    await _patchGroupFields(
-      owner: owner,
-      groupId: id,
-      memberCount: memberCount,
     );
   }
 
   Future<void> refreshGroupDetail(
     String groupId, {
     bool refresh = false,
-  }) async {
+  }) {
     final owner = _ownerUserId();
     final id = groupId.trim();
     if (owner.isEmpty || id.isEmpty) {
-      return;
+      return Future<void>.value();
     }
+    final key = '$owner|${GroupLocalStore.groupEquivalenceKey(id)}';
+    final active = _groupDetailRefreshInFlight[key];
+    if (active != null) {
+      if (!refresh || (_groupDetailRefreshForcesRemote[key] ?? false)) {
+        return active;
+      }
+      return _refreshGroupDetailAfterExisting(id, active);
+    }
+    late final Future<void> tracked;
+    tracked = _refreshGroupDetailImpl(
+      owner: owner,
+      groupId: id,
+      refresh: refresh,
+    ).whenComplete(() {
+      if (identical(_groupDetailRefreshInFlight[key], tracked)) {
+        _groupDetailRefreshInFlight.remove(key);
+        _groupDetailRefreshForcesRemote.remove(key);
+      }
+    });
+    _groupDetailRefreshInFlight[key] = tracked;
+    _groupDetailRefreshForcesRemote[key] = refresh;
+    return tracked;
+  }
+
+  Future<void> _refreshGroupDetailAfterExisting(
+    String groupId,
+    Future<void> existing,
+  ) async {
+    try {
+      await existing;
+    } catch (_) {
+      // The forced request must still get its own authoritative attempt.
+    }
+    await refreshGroupDetail(groupId, refresh: true);
+  }
+
+  Future<void> _refreshGroupDetailImpl({
+    required String owner,
+    required String groupId,
+    required bool refresh,
+  }) async {
+    final id = groupId;
+    final writeGeneration = GroupLocalStore.instance.beginMetadataWrite(
+      ownerUserId: owner,
+      groupId: id,
+    );
     try {
       final current = await GroupLocalStore.instance.read(
         groupId: id,
@@ -2045,10 +2029,16 @@ class GroupMembershipSyncService {
         preserveIsAllMutedFrom: current,
       );
       if (detail != null) {
-        await GroupLocalStore.instance.upsert(
+        final committed = await GroupLocalStore.instance.upsert(
           ownerUserId: owner,
           record: detail,
+          writeGeneration: writeGeneration,
         );
+        if (!committed) {
+          // An older detail response was rejected by the metadata gate.
+          // Never publish that rejected snapshot into SDK conversations.
+          return;
+        }
         final prevName = current?.groupName.trim() ?? '';
         final prevAvatar = current?.avatarUrl.trim() ?? '';
         final nextName = detail.groupName.trim();
@@ -2068,9 +2058,9 @@ class GroupMembershipSyncService {
     }
   }
 
-  /// 拉人/踢人/退群后：成员首屏 + total 写回，供聊天头人数与成员列表实时对齐。
+  /// 拉人/踢人/退群后同步成员首屏，供成员列表实时对齐。
   ///
-  /// 不依赖 TCP detail 是否带齐 memberUserIds / memberCount。
+  /// 人数由独立的群详情刷新写入 GroupLocalStore，成员分页的 total 不参与。
   /// 邀请本地增量后短窗内同群 member_added 族 reason 会 cooldown 跳过，避免双拉。
   Future<void> syncMembersAfterMembershipChange(
     String groupId, {
@@ -2115,7 +2105,6 @@ class GroupMembershipSyncService {
   Future<void> applyMembersAddedLocally({
     required String groupId,
     required List<String> addedUserIds,
-    int? memberCountOverride,
   }) async {
     final owner = _ownerUserId();
     final id = ChatIdFormat.normalizeGroupId(groupId);
@@ -2182,21 +2171,6 @@ class GroupMembershipSyncService {
       GroupMemberStore.instance.putMembers(id, v2);
     }
 
-    final newlyAdded = shells.length;
-    final current = await GroupLocalStore.instance.read(
-      groupId: id,
-      ownerUserId: owner,
-    );
-    final nextCount =
-        memberCountOverride ?? ((current?.memberCount ?? 0) + newlyAdded);
-    if (memberCountOverride != null || newlyAdded > 0) {
-      await _patchGroupFields(
-        owner: owner,
-        groupId: id,
-        memberCount: nextCount < 0 ? 0 : nextCount,
-      );
-    }
-
     markMembershipSyncCooldown(id);
     if (shells.isNotEmpty) {
       try {
@@ -2225,7 +2199,7 @@ class GroupMembershipSyncService {
     }
     _log(
       'applyMembersAddedLocally groupId=$id added=${normalized.length} '
-      'shells=${shells.length} memberCount=$nextCount',
+      'shells=${shells.length}',
     );
   }
 
@@ -2299,13 +2273,6 @@ class GroupMembershipSyncService {
           groupId: groupId,
           offset: 0,
           records: page.items,
-        );
-      }
-      if (page.total >= 0) {
-        await _patchGroupFields(
-          owner: owner,
-          groupId: groupId,
-          memberCount: page.total,
         );
       }
       notifyProfileRefresh(groupId, memberList: true);
@@ -2443,16 +2410,16 @@ class GroupMembershipSyncService {
     required String avatarUrl,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
-    final name = groupName.trim();
-    final face = normalizeObjectUrl(avatarUrl.trim());
+    // This is only a membership placeholder. The authoritative name, avatar,
+    // and memberCount arrive from refreshGroupDetail below.
     await GroupLocalStore.instance.upsert(
       ownerUserId: ownerUserId,
       record: MeGroupRecord(
         groupId: groupId,
         groupType: 'Work',
-        groupName: name,
+        groupName: '',
         displayAlias: '',
-        avatarUrl: face,
+        avatarUrl: '',
         notice: '',
         memberCount: 0,
         myRole: GroupMemberRoleType.V2TIM_GROUP_MEMBER_ROLE_MEMBER,
@@ -2535,29 +2502,15 @@ class GroupMembershipSyncService {
             groupId: groupId,
             userIds: memberIds,
           );
-          await _patchGroupFields(
-            owner: owner,
-            groupId: groupId,
-            memberCount: _readInt(detail['memberCount']),
-          );
         }
         return true;
       case 'member_added':
         if (selfAdded) {
           _clearExplicitGroupRemoval(groupId);
-          if (_detailLooksLikeGroupProfile(detail)) {
-            final record = MeGroupRecord.fromJson(detail);
-            if (record.groupId.isNotEmpty) {
-              await GroupLocalStore.instance.upsert(
-                ownerUserId: owner,
-                record: record,
-              );
-              _bumpJoinedGroupsRevision();
-            }
-          } else {
-            await refreshGroupDetail(groupId, refresh: true);
-            _bumpJoinedGroupsRevision();
-          }
+          // Event payloads are hints only; group detail owns the joined
+          // group's name and member count.
+          await refreshGroupDetail(groupId, refresh: true);
+          _bumpJoinedGroupsRevision();
           // IM 会话常早于成员库：补拉会话 + 冲刷挂起项，避免列表要杀进程才出现。
           unawaited(
             ConversationSyncService.instance.onLocalGroupMembershipExpanded(
@@ -2565,12 +2518,6 @@ class GroupMembershipSyncService {
             ),
           );
         } else {
-          await _patchGroupFields(
-            owner: owner,
-            groupId: groupId,
-            memberCount: _readInt(detail['memberCount']),
-            incrementIfMissing: memberIds.length,
-          );
           // TCP 常漏带被邀请人 ID：若 IM 已挂起该群会话，仍走入群恢复。
           if (!isJoinedGroup(groupId)) {
             unawaited(
@@ -2581,48 +2528,16 @@ class GroupMembershipSyncService {
         }
         return true;
       case 'group_name_changed':
-        final changedName = detail['groupName']?.toString().trim() ?? '';
-        if (changedName.isEmpty) {
-          await refreshGroupDetail(groupId, refresh: true);
-        } else {
-          await _patchGroupFields(
-            owner: owner,
-            groupId: groupId,
-            groupName: changedName,
-            updatedAt: _readInt(detail['updatedAt']),
-          );
-        }
+        // The event only invalidates the cached metadata. Do not write its
+        // optional name directly because it may be stale or out of order.
         return true;
       case 'group_notice_changed':
-        final noticeUpdatedBy = ChatIdFormat.rawUserUid(
-          detail['noticeUpdatedBy']?.toString() ??
-              detail['notice_updated_by']?.toString() ??
-              event.operatorUserId ??
-              '',
-        );
-        final noticeUpdatedAt = _readInt(
-          detail['noticeUpdatedAt'] ?? detail['notice_updated_at'],
-        );
-        final updatedAt = _readInt(detail['updatedAt']);
-        await _patchGroupFields(
-          owner: owner,
-          groupId: groupId,
-          notice: detail['notice']?.toString(),
-          noticeUpdatedAt: noticeUpdatedAt > 0 ? noticeUpdatedAt : null,
-          noticeUpdatedBy: noticeUpdatedBy.isNotEmpty ? noticeUpdatedBy : null,
-          updatedAt: updatedAt > 0 ? updatedAt : null,
-        );
+        // Event payloads are invalidation hints only. GroupSyncService starts
+        // the authoritative GET /group/{id} refresh after this returns.
         return true;
       case 'group_avatar_changed':
-        final changedAvatar = _readGroupAvatarUrl(detail);
-        if (changedAvatar.isEmpty) {
-          await refreshGroupDetail(groupId, refresh: true);
-        } else {
-          await upsertGroupAvatar(
-            groupId: groupId,
-            avatarUrl: changedAvatar,
-          );
-        }
+        // Event payloads are invalidation hints only. GroupSyncService starts
+        // the authoritative GET /group/{id} refresh after this returns.
         return true;
       case 'member_profile_changed':
         final userId = ChatIdFormat.rawUserUid(
@@ -2736,18 +2651,15 @@ class GroupMembershipSyncService {
   Future<void> upsertGroupAvatar({
     required String groupId,
     required String avatarUrl,
+    String? avatarPreviewUrl,
+    int? avatarVersion,
   }) async {
     final id = groupId.trim();
     final normalized = normalizeObjectUrl(avatarUrl.trim());
     if (id.isEmpty || normalized.isEmpty) {
       return;
     }
-    await _patchGroupFields(
-      owner: _ownerUserId(),
-      groupId: id,
-      avatarUrl: normalized,
-      updatedAt: DateTime.now().millisecondsSinceEpoch,
-    );
+    await refreshGroupDetail(id, refresh: true);
     notifyProfileRefresh(id);
     await refreshUIKitGroupList();
   }
@@ -2755,8 +2667,15 @@ class GroupMembershipSyncService {
   Future<void> applyOptimisticAvatar({
     required String groupId,
     required String avatarUrl,
+    String? avatarPreviewUrl,
+    int? avatarVersion,
   }) async {
-    await upsertGroupAvatar(groupId: groupId, avatarUrl: avatarUrl);
+    await upsertGroupAvatar(
+      groupId: groupId,
+      avatarUrl: avatarUrl,
+      avatarPreviewUrl: avatarPreviewUrl,
+      avatarVersion: avatarVersion,
+    );
   }
 
   Future<void> applyOptimisticMyNameCard({
@@ -2775,27 +2694,16 @@ class GroupMembershipSyncService {
     required String groupId,
     required String groupName,
   }) async {
-    await _patchGroupFields(
-      owner: _ownerUserId(),
-      groupId: groupId,
-      groupName: groupName,
-      updatedAt: DateTime.now().millisecondsSinceEpoch,
-    );
+    // A custom/TCP payload is an invalidation signal, not a metadata source.
+    // Read the authoritative group detail before publishing the new name.
+    await refreshGroupDetail(groupId, refresh: true);
   }
 
   Future<void> applyOptimisticNotice({
     required String groupId,
     required String notice,
   }) async {
-    final selfId = _ownerUserId();
-    await _patchGroupFields(
-      owner: selfId,
-      groupId: groupId,
-      notice: notice,
-      noticeUpdatedAt: DateTime.now().millisecondsSinceEpoch,
-      noticeUpdatedBy: selfId.isNotEmpty ? selfId : null,
-      updatedAt: DateTime.now().millisecondsSinceEpoch,
-    );
+    await refreshGroupDetail(groupId, refresh: true);
   }
 
   Future<void> refreshUIKitGroupList() async {
@@ -3156,70 +3064,32 @@ class GroupMembershipSyncService {
   Future<void> _patchGroupFields({
     required String owner,
     required String groupId,
-    String? groupName,
-    String? displayAlias,
-    String? avatarUrl,
-    String? notice,
-    int? memberCount,
     int? myRole,
     String? myNameCard,
     int? updatedAt,
     String? ownerUserId,
-    int? noticeUpdatedAt,
-    String? noticeUpdatedBy,
     bool? isAllMuted,
-    int incrementIfMissing = 0,
   }) async {
     final current = await GroupLocalStore.instance.read(
       groupId: groupId,
       ownerUserId: owner,
     );
     if (current == null) {
-      if (incrementIfMissing > 0) {
-        return;
-      }
-      final needFreshDisplay = (groupName?.trim().isNotEmpty ?? false) ||
-          (avatarUrl?.trim().isNotEmpty ?? false);
-      await refreshGroupDetail(groupId, refresh: needFreshDisplay);
+      await refreshGroupDetail(groupId);
       return;
-    }
-    var nextCount = current.memberCount;
-    if (memberCount != null) {
-      nextCount = memberCount;
-    } else if (incrementIfMissing > 0) {
-      nextCount = current.memberCount + incrementIfMissing;
     }
     await GroupLocalStore.instance.upsert(
       ownerUserId: owner,
       record: current.copyWith(
-        groupName: groupName ?? current.groupName,
-        displayAlias: displayAlias != null
-            ? ChatIdFormat.displayGroupAlias(
-                displayAlias,
-                groupIdFallback: groupId,
-              )
-            : current.displayAlias,
-        avatarUrl: avatarUrl ?? current.avatarUrl,
-        notice: notice ?? current.notice,
-        memberCount: nextCount,
+        // memberCount is owned exclusively by refreshGroupDetail().
+        memberCount: current.memberCount,
         myRole: myRole ?? current.myRole,
         myNameCard: myNameCard ?? current.myNameCard,
         updatedAt: updatedAt ?? current.updatedAt,
         ownerUserId: ownerUserId ?? current.ownerUserId,
-        noticeUpdatedAt: noticeUpdatedAt ?? current.noticeUpdatedAt,
-        noticeUpdatedBy: noticeUpdatedBy ?? current.noticeUpdatedBy,
         isAllMuted: isAllMuted ?? current.isAllMuted,
       ),
     );
-    final patchedName = groupName?.trim() ?? '';
-    final patchedAvatar = avatarUrl?.trim() ?? '';
-    if (patchedName.isNotEmpty || patchedAvatar.isNotEmpty) {
-      await publishGroupConversationDisplay(
-        groupId: groupId,
-        groupName: patchedName.isNotEmpty ? patchedName : null,
-        avatarUrl: patchedAvatar.isNotEmpty ? patchedAvatar : null,
-      );
-    }
   }
 
   /// 群名/头像写入群资料库后，双写会话列表内存与本地库（展示仍以群库为准）。
@@ -3305,42 +3175,17 @@ class GroupMembershipSyncService {
       }
     }
 
-    final realConversationId =
-        (match?.conversationID.trim().isNotEmpty ?? false)
-            ? match!.conversationID.trim()
-            : conversationId;
-    if (name.isNotEmpty) {
-      ConversationListNotifier.instance.applyShowNameLocally(
-        conversationID: realConversationId,
-        showName: name,
-      );
-      if (realConversationId != conversationId) {
-        ConversationListNotifier.instance.applyShowNameLocally(
-          conversationID: conversationId,
-          showName: name,
-        );
-      }
-    }
-    if (face.isNotEmpty) {
-      ConversationListNotifier.instance.applyFaceUrlLocally(
-        conversationID: realConversationId,
-        faceUrl: face,
-      );
-    }
-
     if (match != null) {
-      if (name.isNotEmpty) {
-        match.showName = name;
-      }
-      if (face.isNotEmpty) {
-        match.faceUrl = face;
-      }
       try {
-        await ConversationLocalStore.instance.upsertBatch(
-          conversations: <V2TimConversation>[match],
+        await ConversationSyncService.instance.applyConversationMetadataPatch(
+          conversationID: match.conversationID,
+          showName: name.isEmpty ? null : name,
+          faceUrl: face.isEmpty ? null : face,
+          snapshot: match,
+          remoteAuthority: true,
         );
       } catch (e) {
-        _log('publishGroupConversationDisplay upsertBatch failed: $e');
+        _log('publishGroupConversationDisplay commit failed: $e');
       }
     }
 
@@ -3354,17 +3199,6 @@ class GroupMembershipSyncService {
         _log('publishGroupConversationDisplay patchSearch failed: $e');
       }
     }
-
-    ConversationRefreshBus.instance.requestRefresh(
-      reason: 'group_display_updated',
-      conversationId: realConversationId,
-    );
-  }
-
-  bool _detailLooksLikeGroupProfile(Map<String, dynamic> detail) {
-    final groupName = detail['groupName']?.toString().trim() ?? '';
-    final groupType = detail['groupType']?.toString().trim() ?? '';
-    return groupName.isNotEmpty && groupType.isNotEmpty;
   }
 
   List<String> _memberIds(
@@ -3398,25 +3232,6 @@ class GroupMembershipSyncService {
     if (value is int) return value;
     if (value is num) return value.toInt();
     return int.tryParse(value?.toString() ?? '') ?? 0;
-  }
-
-  String _readGroupAvatarUrl(Map<String, dynamic> detail) {
-    for (final key in const [
-      'avatarUrl',
-      'avatar_url',
-      'groupFaceUrl',
-      'group_face_url',
-      'faceUrl',
-      'face_url',
-      'thumbUrl',
-      'thumb_url',
-    ]) {
-      final value = detail[key]?.toString().trim() ?? '';
-      if (value.isNotEmpty) {
-        return value;
-      }
-    }
-    return '';
   }
 
   V2TimGroupMemberFullInfo _toV2TimMember(GroupMemberRecord record) {

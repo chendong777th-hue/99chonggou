@@ -27,15 +27,6 @@ class SettingsApi {
     });
   }
 
-  Future<void> sendPayPinResetSms({
-    required String phone,
-  }) async {
-    await _dio.post('/sms/send', data: {
-      'phone': phone.trim(),
-      'scene': 'PAY_PIN_RESET',
-    });
-  }
-
   Future<void> resetTradePassword({
     required String smsCode,
     required String payPin,

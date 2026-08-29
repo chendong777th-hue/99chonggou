@@ -19,6 +19,10 @@ import 'package:tencent_cloud_chat_uikit/ui/utils/screen_shot.dart';
 const String kChatImageLayoutWidthKey = 'chatImageLayoutW';
 const String kChatImageLayoutHeightKey = 'chatImageLayoutH';
 const String kChatOutgoingStableIdKey = 'chatOutgoingStableId';
+const String kChatMediaBatchIdKey = 'chatMediaBatchId';
+const String kChatMediaBatchIndexKey = 'chatMediaBatchIndex';
+const String kChatImageSourcePendingKey = 'chatImageSourcePending';
+const String kChatImageDecodeStaggerKey = 'chatImageDecodeStagger';
 
 int _lastChatMediaUniqueValue = 0;
 
@@ -766,6 +770,31 @@ String? readOutgoingStableId(V2TimMessage? message) {
   }
 }
 
+String? readChatMediaBatchId(V2TimMessage? message) {
+  final raw = TencentUtils.checkString(message?.localCustomData);
+  if (raw == null || raw.isEmpty) return null;
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) return null;
+    return TencentUtils.checkString(decoded[kChatMediaBatchIdKey]?.toString());
+  } catch (_) {
+    return null;
+  }
+}
+
+int? readChatMediaBatchIndex(V2TimMessage? message) {
+  final raw = TencentUtils.checkString(message?.localCustomData);
+  if (raw == null || raw.isEmpty) return null;
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) return null;
+    final value = decoded[kChatMediaBatchIndexKey];
+    return value is num ? value.toInt() : int.tryParse(value?.toString() ?? "");
+  } catch (_) {
+    return null;
+  }
+}
+
 double? _layoutNumToDouble(Object? value) {
   if (value is num) {
     return value.toDouble();
@@ -826,6 +855,94 @@ void applyOutgoingStableIdToMessage(
     map = <String, dynamic>{};
   }
   map[kChatOutgoingStableIdKey] = id;
+  message.localCustomData = jsonEncode(map);
+}
+
+void applyChatMediaBatchToMessage(V2TimMessage message, {required String batchId, required int batchIndex}) {
+  final id = batchId.trim();
+  if (id.isEmpty || batchIndex < 0) return;
+  Map<String, dynamic> map = <String, dynamic>{};
+  final raw = TencentUtils.checkString(message.localCustomData);
+  if (raw != null && raw.isNotEmpty) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) map = Map<String, dynamic>.from(decoded);
+    } catch (_) {}
+  }
+  map[kChatMediaBatchIdKey] = id;
+  map[kChatMediaBatchIndexKey] = batchIndex;
+  message.localCustomData = jsonEncode(map);
+}
+
+bool isImageSourcePending(V2TimMessage? message) {
+  final raw = TencentUtils.checkString(message?.localCustomData);
+  if (raw == null || raw.isEmpty) {
+    return false;
+  }
+  try {
+    final decoded = jsonDecode(raw);
+    return decoded is Map && decoded[kChatImageSourcePendingKey] == true;
+  } catch (_) {
+    return false;
+  }
+}
+
+bool shouldStaggerImageDecode(V2TimMessage? message) {
+  final raw = TencentUtils.checkString(message?.localCustomData);
+  if (raw == null || raw.isEmpty) {
+    return false;
+  }
+  try {
+    final decoded = jsonDecode(raw);
+    return decoded is Map && decoded[kChatImageDecodeStaggerKey] == true;
+  } catch (_) {
+    return false;
+  }
+}
+
+void setImageSourcePending(V2TimMessage message, bool pending) {
+  Map<String, dynamic> map;
+  final raw = TencentUtils.checkString(message.localCustomData);
+  if (raw != null && raw.isNotEmpty) {
+    try {
+      final decoded = jsonDecode(raw);
+      map = decoded is Map
+          ? Map<String, dynamic>.from(decoded)
+          : <String, dynamic>{};
+    } catch (_) {
+      map = <String, dynamic>{};
+    }
+  } else {
+    map = <String, dynamic>{};
+  }
+  if (pending) {
+    map[kChatImageSourcePendingKey] = true;
+  } else {
+    map.remove(kChatImageSourcePendingKey);
+  }
+  message.localCustomData = jsonEncode(map);
+}
+
+void setImageDecodeStagger(V2TimMessage message, bool enabled) {
+  Map<String, dynamic> map;
+  final raw = TencentUtils.checkString(message.localCustomData);
+  if (raw != null && raw.isNotEmpty) {
+    try {
+      final decoded = jsonDecode(raw);
+      map = decoded is Map
+          ? Map<String, dynamic>.from(decoded)
+          : <String, dynamic>{};
+    } catch (_) {
+      map = <String, dynamic>{};
+    }
+  } else {
+    map = <String, dynamic>{};
+  }
+  if (enabled) {
+    map[kChatImageDecodeStaggerKey] = true;
+  } else {
+    map.remove(kChatImageDecodeStaggerKey);
+  }
   message.localCustomData = jsonEncode(map);
 }
 

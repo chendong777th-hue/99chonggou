@@ -113,7 +113,7 @@ class _ContactFriendsPageState extends State<ContactFriendsPage> {
       widget.directToChat!(conversation);
       return;
     }
-    await Navigator.push(context, appChatRoute(conversation));
+    await openOrReuseAppChat(context, conversation);
   }
 
   Future<void> _openAddFriend(ContactFriendEntry entry) async {

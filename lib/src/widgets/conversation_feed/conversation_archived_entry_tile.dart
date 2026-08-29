@@ -3,7 +3,6 @@ import 'package:tencent_cloud_chat_demo/src/i18n/app_i18n.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/conversation_unread_utils.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
-import 'package:tencent_cloud_chat_uikit/theme/color.dart';
 import 'package:tencent_cloud_chat_uikit/theme/tui_theme.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitConversation/archived_conversation_store.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/unread_message.dart';
@@ -39,93 +38,80 @@ class ConversationArchivedEntryTile extends StatelessWidget {
       color: conversationFeedItemBackground(theme, pinned: false),
       child: InkWell(
         onTap: onTap,
-        child: Stack(
-          children: [
-            Padding(
-              padding: conversationFeedRowPadding(context),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.only(top: 0, bottom: 2, right: 0),
-                    child: buildConversationSystemEntryAvatar(
-                      conversationArchivedEntryIconAsset,
-                      size: avatarSize,
-                    ),
-                  ),
-                  Expanded(
-                    child: Container(
-                      margin: const EdgeInsets.only(left: 12),
-                      padding: const EdgeInsets.symmetric(vertical: 6),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        mainAxisAlignment: MainAxisAlignment.center,
+        child: Padding(
+          padding: conversationFeedRowPadding(context),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Container(
+                padding: const EdgeInsets.only(top: 0, bottom: 2, right: 0),
+                child: buildConversationSystemEntryAvatar(
+                  conversationArchivedEntryIconAsset,
+                  size: avatarSize,
+                ),
+              ),
+              Expanded(
+                child: Container(
+                  margin: const EdgeInsets.only(left: 12),
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Row(
                         children: [
-                          Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  AppI18n.of(context).t(
-                                    zhHans: '归档',
-                                    zhHant: '封存',
-                                    en: 'Archive',
-                                    ja: 'アーカイブ',
-                                    ko: '보관',
-                                  ),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    height: 1.2,
-                                    color: theme.conversationItemTitleTextColor,
-                                    fontSize: titleSize,
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
+                          Expanded(
+                            child: Text(
+                              AppI18n.of(context).t(
+                                zhHans: '归档',
+                                zhHant: '封存',
+                                en: 'Archive',
+                                ja: 'アーカイブ',
+                                ko: '보관',
                               ),
-                            ],
-                          ),
-                          const SizedBox(height: 4),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  subtitle,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    height: 1.2,
-                                    color: theme
-                                        .conversationItemLastMessageTextColor,
-                                    fontSize: subtitleSize,
-                                  ),
-                                ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                height: 1.2,
+                                color: theme.conversationItemTitleTextColor,
+                                fontSize: titleSize,
+                                fontWeight: FontWeight.w600,
                               ),
-                              if (unreadCount > 0)
-                                Padding(
-                                  padding: const EdgeInsets.only(left: 8),
-                                  child: UnreadMessage(
-                                    unreadCount: unreadCount,
-                                  ),
-                                ),
-                            ],
+                            ),
                           ),
                         ],
                       ),
-                    ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              subtitle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                height: 1.2,
+                                color:
+                                    theme.conversationItemLastMessageTextColor,
+                                fontSize: subtitleSize,
+                              ),
+                            ),
+                          ),
+                          if (unreadCount > 0)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 8),
+                              child: UnreadMessage(
+                                unreadCount: unreadCount,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
                   ),
-                ],
+                ),
               ),
-            ),
-            Positioned(
-              left: conversationFeedDividerInset(context),
-              right: 0,
-              bottom: 0,
-              child: Container(
-                height: 0.6,
-                color: theme.weakDividerColor ?? hexToColor('E5E6E9'),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

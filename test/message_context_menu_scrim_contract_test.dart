@@ -54,7 +54,8 @@ void main() {
     expect(beforeCopy.contains('widget.onCloseTooltip();'), isTrue);
   });
 
-  test('menu close defers list flush to the next frame', () {
+  test('menu close preserves deferred messages during viewport restoration',
+      () {
     final globalModel = File(
       'third_party/tencent_cloud_chat_uikit/lib/business_logic/'
       'view_models/tui_chat_global_model.dart',
@@ -64,11 +65,9 @@ void main() {
     );
     expect(endAt, greaterThanOrEqualTo(0));
     final body = globalModel.substring(endAt, endAt + 1800);
-    expect(body.contains('addPostFrameCallback'), isTrue);
-    expect(body.contains('flushDeferredIncomingMessages'), isTrue);
     expect(
-      body.indexOf('addPostFrameCallback'),
-      lessThan(body.indexOf('flushDeferredIncomingMessages')),
-    );
+        body.contains('_contextMenuViewportRestoreConversations.add'), isTrue);
+    expect(body.contains('flushDeferredIncomingMessages'), isFalse);
+    expect(body.contains('close_defer'), isTrue);
   });
 }

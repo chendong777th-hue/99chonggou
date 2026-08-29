@@ -945,10 +945,7 @@ class _AllGroupApplicationListPageState
       widget.onOpenConversation!(conversation);
       return;
     }
-    await Navigator.push(
-      context,
-      appChatRoute(conversation),
-    );
+    await openOrReuseAppChat(context, conversation);
     if (mounted) {
       setState(() {});
     }
@@ -1619,11 +1616,9 @@ class _AllGroupApplicationListPageState
               ),
             );
           }
-          if (item.kind == _NoticeRowKind.system &&
-              item.systemNotice != null) {
+          if (item.kind == _NoticeRowKind.system && item.systemNotice != null) {
             return _wrapNoticeRowWithDelete(
-              onDelete: () =>
-                  _confirmAndDeleteSystemNotice(item.systemNotice!),
+              onDelete: () => _confirmAndDeleteSystemNotice(item.systemNotice!),
               child: _buildSystemNoticeItem(
                 context,
                 item.systemNotice!,
@@ -1715,11 +1710,13 @@ class _AllGroupApplicationListPageState
                 decoration: BoxDecoration(
                   color: listBackgroundColor,
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: dividerColor.withValues(alpha: 0.8)),
+                  border:
+                      Border.all(color: dividerColor.withValues(alpha: 0.8)),
                 ),
                 child: Text(
                   _getSystemNoticeContent(notice),
-                  style: TextStyle(fontSize: 15, color: titleColor, height: 1.45),
+                  style:
+                      TextStyle(fontSize: 15, color: titleColor, height: 1.45),
                 ),
               ),
               const Spacer(),
@@ -2141,8 +2138,8 @@ class _GroupApplicationDetailPage extends StatelessWidget {
                         vertical: 8,
                       ),
                       decoration: BoxDecoration(
-                        color: theme.selectPanelBgColor ??
-                            const Color(0xFFF1F2F6),
+                        color:
+                            theme.selectPanelBgColor ?? const Color(0xFFF1F2F6),
                         borderRadius: BorderRadius.circular(18),
                       ),
                       child: Text(

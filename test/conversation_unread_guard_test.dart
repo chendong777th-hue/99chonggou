@@ -51,6 +51,7 @@ void main() {
 
   tearDown(() {
     ForegroundChatGuard.debugOverride = null;
+    ConversationUnreadGuard.clearOptimisticUnread(_conversationId);
     ConversationLocalStore.instance.resetAnchorStateForTest();
     ConversationLocalStore.instance.debugOwnerUserId = null;
   });
@@ -95,7 +96,8 @@ void main() {
       expect(incoming.unreadCount, 0);
     });
 
-    test('keeps sdk unread even with read anchor (sdk is source of truth)', () {
+    test('suppresses sdk unread replay when last message equals read anchor',
+        () {
       final nowSec = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
       ConversationLocalStore.instance.recordReadClearedAnchor(
         _conversationId,
@@ -114,8 +116,8 @@ void main() {
         ownerUserId: _owner,
       );
 
-      expect(resolved, 4);
-      expect(incoming.unreadCount, 4);
+      expect(resolved, 0);
+      expect(incoming.unreadCount, 0);
     });
 
     test('preserves optimistic unread when sdk lags on new lastMessage', () {
@@ -151,6 +153,85 @@ void main() {
       );
 
       expect(resolved, 0);
+    });
+
+    test('preserves optimistic unread when sdk replays same message with zero',
+        () {
+      final nowSec = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+      final latest = _peerMessage(msgID: 'new_msg', tsSec: nowSec);
+      ConversationUnreadGuard.recordOptimisticUnread(
+        conversationId: _conversationId,
+        message: latest,
+        unreadCount: 1,
+      );
+      final incoming = _conversation(
+        unreadCount: 0,
+        lastMessage: _peerMessage(msgID: 'new_msg', tsSec: nowSec),
+      );
+
+      final resolved = ConversationUnreadGuard.resolveForListApply(
+        conversationId: _conversationId,
+        existingUnread: 1,
+        incoming: incoming,
+        existingLastMessage: latest,
+      );
+
+      expect(resolved, 1);
+      expect(incoming.unreadCount, 1);
+    });
+
+    test('preserves optimistic unread when sdk replays an older message', () {
+      final nowSec = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+      final latest = _peerMessage(msgID: 'new_msg', tsSec: nowSec);
+      ConversationUnreadGuard.recordOptimisticUnread(
+        conversationId: _conversationId,
+        message: latest,
+        unreadCount: 1,
+      );
+      final incoming = _conversation(
+        unreadCount: 0,
+        lastMessage: _peerMessage(msgID: 'old_msg', tsSec: nowSec - 1),
+      );
+
+      final resolved = ConversationUnreadGuard.resolveForListApply(
+        conversationId: _conversationId,
+        existingUnread: 1,
+        incoming: incoming,
+        existingLastMessage: latest,
+      );
+
+      expect(resolved, 1);
+      expect(incoming.unreadCount, 1);
+    });
+
+    test('explicit read barrier overrides optimistic unread protection', () {
+      final nowSec = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
+      final latest = _peerMessage(msgID: 'new_msg', tsSec: nowSec);
+      ConversationUnreadGuard.recordOptimisticUnread(
+        conversationId: _conversationId,
+        message: latest,
+        unreadCount: 1,
+      );
+      ConversationLocalStore.instance.recordReadClearedAnchor(
+        _conversationId,
+        ownerUserId: _owner,
+        lastMessageId: 'new_msg',
+      );
+      final incoming = _conversation(
+        unreadCount: 0,
+        lastMessage: latest,
+      );
+
+      final resolved = ConversationUnreadGuard.resolveForListApply(
+        conversationId: _conversationId,
+        existingUnread: 1,
+        incoming: incoming,
+        existingLastMessage: latest,
+        ownerUserId: _owner,
+      );
+
+      expect(resolved, 0);
+      expect(incoming.unreadCount, 0);
     });
   });
 
@@ -196,7 +277,9 @@ void main() {
       expect(conversation.unreadCount, 2);
     });
 
-    test('keeps sdk unread even with read anchor (sdk is source of truth)', () {
+    test(
+        'suppresses persisted unread replay when last message equals read anchor',
+        () {
       final nowSec = DateTime.now().toUtc().millisecondsSinceEpoch ~/ 1000;
       ConversationLocalStore.instance.recordReadClearedAnchor(
         _conversationId,
@@ -215,8 +298,144 @@ void main() {
         ownerUserId: _owner,
       );
 
-      expect(resolved, 2);
-      expect(conversation.unreadCount, 2);
+      expect(resolved, 0);
+      expect(conversation.unreadCount, 0);
+    });
+  });
+
+  group('ConversationLocalStore read version barrier', () {
+    test('rejects delayed sdk replay in the same read version', () {
+      final barrier = ConversationLocalStore.instance.recordReadClearedAnchor(
+        _conversationId,
+        ownerUserId: _owner,
+        lastMessageId: 'anchor_msg',
+      );
+      final replay = _conversation(
+        unreadCount: 6,
+        lastMessage: _peerMessage(msgID: 'anchor_msg', tsSec: 1),
+      );
+
+      final floor =
+          ConversationLocalStore.instance.resolveSdkUnreadAgainstReadBarrier(
+        replay,
+        ownerUserId: _owner,
+      );
+
+      expect(barrier, isNotNull);
+      expect(floor, barrier!.version);
+      expect(replay.unreadCount, 0);
+      expect(
+        ConversationLocalStore.instance.readBarrierFor(
+          _conversationId,
+          ownerUserId: _owner,
+        ),
+        isNotNull,
+      );
+    });
+
+    test('provably newer message consumes barrier at a higher version', () {
+      final barrier = ConversationLocalStore.instance.recordReadClearedAnchor(
+        _conversationId,
+        ownerUserId: _owner,
+        lastMessageId: 'anchor_msg',
+      )!;
+      final incoming = _conversation(
+        unreadCount: 1,
+        lastMessage: _peerMessage(msgID: 'new_msg', tsSec: 2),
+      );
+
+      final floor =
+          ConversationLocalStore.instance.resolveSdkUnreadAgainstReadBarrier(
+        incoming,
+        ownerUserId: _owner,
+      );
+
+      expect(floor, greaterThan(barrier.version));
+      expect(incoming.unreadCount, 1);
+      expect(
+        ConversationLocalStore.instance.readBarrierFor(
+          _conversationId,
+          ownerUserId: _owner,
+        ),
+        isNull,
+      );
+    });
+
+    test('old snapshot with a larger orderkey cannot consume barrier', () {
+      final barrier = ConversationLocalStore.instance.recordReadClearedAnchor(
+        _conversationId,
+        ownerUserId: _owner,
+        lastMessageId: 'anchor_msg',
+        lastMessageTimestamp: 100,
+        orderKey: 100,
+      )!;
+      final replay = _conversation(
+        unreadCount: 9,
+        lastMessage: _peerMessage(msgID: 'anchor_msg', tsSec: 100),
+      )..orderkey = 999999999;
+
+      final floor =
+          ConversationLocalStore.instance.resolveSdkUnreadAgainstReadBarrier(
+        replay,
+        ownerUserId: _owner,
+      );
+
+      expect(floor, barrier.version);
+      expect(replay.unreadCount, 0);
+      expect(
+        ConversationLocalStore.instance.readBarrierFor(
+          _conversationId,
+          ownerUserId: _owner,
+        ),
+        isNotNull,
+      );
+    });
+
+    test('group aliases resolve to one read barrier', () {
+      const canonical = 'group_@TGS#watermark';
+      const sdkAlias = '@TGS#watermark';
+      ConversationLocalStore.instance.recordReadClearedAnchor(
+        canonical,
+        ownerUserId: _owner,
+        lastMessageId: 'anchor_group',
+        lastMessageTimestamp: 100,
+      );
+      final replay = V2TimConversation(
+        conversationID: sdkAlias,
+        type: 2,
+        groupID: sdkAlias,
+        unreadCount: 4,
+        lastMessage: _peerMessage(msgID: 'anchor_group', tsSec: 100),
+      );
+
+      ConversationLocalStore.instance.resolveSdkUnreadAgainstReadBarrier(
+        replay,
+        ownerUserId: _owner,
+      );
+
+      expect(replay.unreadCount, 0);
+      expect(
+        ConversationLocalStore.instance.readBarrierFor(
+          sdkAlias,
+          ownerUserId: _owner,
+        ),
+        isNotNull,
+      );
+    });
+
+    test('each local clear advances the barrier version', () {
+      final first = ConversationLocalStore.instance.recordReadClearedAnchor(
+        _conversationId,
+        ownerUserId: _owner,
+        lastMessageId: 'anchor_msg',
+      )!;
+      final second = ConversationLocalStore.instance.recordReadClearedAnchor(
+        _conversationId,
+        ownerUserId: _owner,
+        lastMessageId: 'anchor_msg',
+      )!;
+
+      expect(second.version, greaterThan(first.version));
     });
   });
 }

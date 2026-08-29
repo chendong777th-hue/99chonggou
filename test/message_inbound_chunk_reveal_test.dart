@@ -205,6 +205,35 @@ void main() {
     reveal.dispose();
   });
 
+  test('authoritative replacement cancels presentation without buffering', () {
+    var superseded = 0;
+    var drained = 0;
+    var ended = 0;
+    final reveal = MessageInboundChunkedReveal(
+      onRevealChunk: (_, __) {},
+      onDrainRemaining: (_, messages) => drained += messages.length,
+      onSupersede: (_) => superseded++,
+      onSessionBegin: (_) {},
+      onSessionEnd: (_) => ended++,
+      interval: const Duration(seconds: 1),
+      maxChunkSize: 1,
+      alignToFrame: false,
+    );
+
+    reveal.enqueueAll('conversation', List<V2TimMessage>.generate(3, message));
+    expect(reveal.isActiveFor('conversation'), isTrue);
+
+    reveal.cancelForAuthoritativeReplace('conversation');
+
+    expect(superseded, 1);
+    expect(drained, 0);
+    expect(ended, 0);
+    expect(reveal.pendingCountFor('conversation'), 0);
+    expect(reveal.isWaitingForTransaction('conversation'), isFalse);
+    expect(reveal.isActiveFor('conversation'), isFalse);
+    reveal.dispose();
+  });
+
   test('missing UI acknowledgement is recovered by transaction watchdog',
       () async {
     final revealed = <V2TimMessage>[];

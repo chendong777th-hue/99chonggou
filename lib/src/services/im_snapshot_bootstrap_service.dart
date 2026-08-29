@@ -139,16 +139,18 @@ class ImSnapshotBootstrapService {
         return false;
       }
 
-      await ConversationLocalStore.instance.upsertBatch(
-        conversations: merged,
+      await ConversationSyncService.instance.commitSnapshotConversations(
         ownerUserId: owner,
+        conversations: merged,
       );
       await _writeSyncMetaAfterSnapshot(
         ownerUserId: owner,
         rowCountBefore: rowCountBefore,
         existing: syncMetaBefore,
       );
-      await ConversationListNotifier.instance.reloadFromLocal();
+      await ConversationListNotifier.instance.restoreStoreProjection(
+        reason: ConversationStoreProjectionReason.snapshotBootstrap,
+      );
       unawaited(
         ConversationSyncService.instance.syncFromSdk(
           reason: 'bootstrap_snapshot_followup',

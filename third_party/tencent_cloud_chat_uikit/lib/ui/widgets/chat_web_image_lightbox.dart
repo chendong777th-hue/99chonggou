@@ -1,3 +1,4 @@
+import 'dart:async' show unawaited;
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
@@ -10,19 +11,25 @@ import 'package:tencent_cloud_chat_uikit/ui/widgets/media_preview_chrome.dart';
 class ChatWebImageLightbox extends StatefulWidget {
   const ChatWebImageLightbox({
     required this.imageUrl,
+    this.imageUrlResolver,
     this.onDownload,
+    this.onDownloadUrl,
     this.onOpenExternal,
     super.key,
   });
 
   final String imageUrl;
+  final Future<String?> Function()? imageUrlResolver;
   final VoidCallback? onDownload;
+  final Future<void> Function(String imageUrl)? onDownloadUrl;
   final VoidCallback? onOpenExternal;
 
   static Future<void> show({
     required BuildContext context,
     required String imageUrl,
+    Future<String?> Function()? imageUrlResolver,
     VoidCallback? onDownload,
+    Future<void> Function(String imageUrl)? onDownloadUrl,
     VoidCallback? onOpenExternal,
   }) {
     return showGeneralDialog<void>(
@@ -34,7 +41,9 @@ class ChatWebImageLightbox extends StatefulWidget {
       pageBuilder: (context, animation, secondaryAnimation) {
         return ChatWebImageLightbox(
           imageUrl: imageUrl,
+          imageUrlResolver: imageUrlResolver,
           onDownload: onDownload,
+          onDownloadUrl: onDownloadUrl,
           onOpenExternal: onOpenExternal,
         );
       },
@@ -51,18 +60,38 @@ class ChatWebImageLightbox extends StatefulWidget {
 class _ChatWebImageLightboxState extends State<ChatWebImageLightbox> {
   final TransformationController _transformController =
       TransformationController();
-  final GlobalKey _viewerKey = GlobalKey(debugLabel: 'ChatWebImageLightboxViewer');
+  final GlobalKey _viewerKey =
+      GlobalKey(debugLabel: 'ChatWebImageLightboxViewer');
   final FocusNode _focusNode = FocusNode(debugLabel: 'ChatWebImageLightbox');
   int _rotationTurns = 0;
+  late String _imageUrl;
+  bool _resolvedUrlAvailable = false;
 
   @override
   void initState() {
     super.initState();
+    _imageUrl = widget.imageUrl;
+    if (widget.imageUrlResolver != null) {
+      unawaited(_resolveImageUrl());
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         _focusNode.requestFocus();
       }
     });
+  }
+
+  Future<void> _resolveImageUrl() async {
+    try {
+      final resolved = (await widget.imageUrlResolver!())?.trim() ?? '';
+      if (!mounted || resolved.isEmpty) {
+        return;
+      }
+      setState(() {
+        _imageUrl = resolved;
+        _resolvedUrlAvailable = true;
+      });
+    } catch (_) {}
   }
 
   @override
@@ -128,7 +157,7 @@ class _ChatWebImageLightboxState extends State<ChatWebImageLightbox> {
   }
 
   Widget _buildImage() {
-    final url = widget.imageUrl;
+    final url = _imageUrl;
     return Image.network(
       url,
       fit: BoxFit.contain,
@@ -217,11 +246,16 @@ class _ChatWebImageLightboxState extends State<ChatWebImageLightbox> {
                       icon: Icons.fit_screen_rounded,
                       onPressed: _resetView,
                     ),
-                    if (widget.onDownload != null) ...[
+                    if (widget.onDownload != null ||
+                        (_resolvedUrlAvailable &&
+                            widget.onDownloadUrl != null)) ...[
                       const SizedBox(width: 6),
                       _ToolbarButton(
                         icon: Icons.download_rounded,
-                        onPressed: widget.onDownload,
+                        onPressed: widget.onDownload ??
+                            () {
+                              unawaited(widget.onDownloadUrl!(_imageUrl));
+                            },
                       ),
                     ],
                     if (widget.onOpenExternal != null) ...[

@@ -1,8 +1,92 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
+import 'package:tencent_cloud_chat_sdk/enum/message_status.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/image_gallery_item.dart';
+
+class ChatBubbleImageWarmDecodeHint {
+  const ChatBubbleImageWarmDecodeHint({
+    required this.decodeByWidth,
+    required this.targetPx,
+  });
+
+  final bool decodeByWidth;
+  final int targetPx;
+}
+
+class _ChatBubbleImageWarmDecodeEntry {
+  const _ChatBubbleImageWarmDecodeEntry({
+    required this.hint,
+    required this.expiresAtMs,
+  });
+
+  final ChatBubbleImageWarmDecodeHint hint;
+  final int expiresAtMs;
+}
+
+const int _maxChatBubbleImageWarmDecodeHints = 48;
+const Duration _chatBubbleImageWarmDecodeHintTtl = Duration(seconds: 12);
+final Map<String, _ChatBubbleImageWarmDecodeEntry>
+    _chatBubbleImageWarmDecodeHints =
+    <String, _ChatBubbleImageWarmDecodeEntry>{};
+
+/// Registers the exact ResizeImage key used by route-entry media prefetch.
+///
+/// The short-lived hint lets the mounted bubble join the same in-flight image
+/// decode instead of creating a second provider at a different cache size.
+void registerChatBubbleImageWarmDecodeHint(
+  String cacheKey, {
+  required bool decodeByWidth,
+  required int targetPx,
+}) {
+  final key = cacheKey.trim();
+  if (key.isEmpty || targetPx <= 0) {
+    return;
+  }
+  final now = DateTime.now().millisecondsSinceEpoch;
+  _chatBubbleImageWarmDecodeHints.removeWhere(
+    (_, entry) => entry.expiresAtMs <= now,
+  );
+  _chatBubbleImageWarmDecodeHints.remove(key);
+  _chatBubbleImageWarmDecodeHints[key] = _ChatBubbleImageWarmDecodeEntry(
+    hint: ChatBubbleImageWarmDecodeHint(
+      decodeByWidth: decodeByWidth,
+      targetPx: targetPx,
+    ),
+    expiresAtMs: now + _chatBubbleImageWarmDecodeHintTtl.inMilliseconds,
+  );
+  while (_chatBubbleImageWarmDecodeHints.length >
+      _maxChatBubbleImageWarmDecodeHints) {
+    _chatBubbleImageWarmDecodeHints.remove(
+      _chatBubbleImageWarmDecodeHints.keys.first,
+    );
+  }
+}
+
+ChatBubbleImageWarmDecodeHint? chatBubbleImageWarmDecodeHint(
+  String cacheKey,
+) {
+  final key = cacheKey.trim();
+  if (key.isEmpty) {
+    return null;
+  }
+  final entry = _chatBubbleImageWarmDecodeHints[key];
+  if (entry == null) {
+    return null;
+  }
+  if (entry.expiresAtMs <= DateTime.now().millisecondsSinceEpoch) {
+    _chatBubbleImageWarmDecodeHints.remove(key);
+    return null;
+  }
+  return entry.hint;
+}
+
+void forgetChatBubbleImageWarmDecodeHint(String cacheKey) {
+  _chatBubbleImageWarmDecodeHints.remove(cacheKey.trim());
+}
 
 /// 退出大图/图集时驱逐预览位图；勿传入气泡 thumb provider。
 void evictChatPreviewImageProviders(Iterable<ImageProvider?> providers) {
@@ -145,13 +229,36 @@ bool isChatListNonMessageRow(V2TimMessage message) {
   return message.elemType == 11 || message.elemType == 101;
 }
 
+/// Revoked media keeps its original image/video element in the SDK message so
+/// the chat row can render a revoke tip. It must not remain previewable merely
+/// because that payload is still attached.
+bool isChatMediaMessageRevoked(V2TimMessage message) {
+  if (message.status == MessageStatus.V2TIM_MSG_STATUS_LOCAL_REVOKED) {
+    return true;
+  }
+  final raw = message.cloudCustomData?.trim() ?? '';
+  if (raw.isEmpty) {
+    return false;
+  }
+  try {
+    final decoded = jsonDecode(raw);
+    return decoded is Map && decoded['isRevoke'] == true;
+  } catch (_) {
+    return false;
+  }
+}
+
 /// 去掉时间分割线，保留与 [TIMUIKitHistoryMessageList] 一致的消息行。
 List<V2TimMessage> filterChatGalleryOriginRows(List<V2TimMessage> messages) {
   if (messages.isEmpty) {
     return const <V2TimMessage>[];
   }
   return messages
-      .where((message) => !isChatListNonMessageRow(message))
+      .where(
+        (message) =>
+            !isChatListNonMessageRow(message) &&
+            !isChatMediaMessageRevoked(message),
+      )
       .toList(growable: false);
 }
 
@@ -333,8 +440,9 @@ List<V2TimMessage> collectChatMediaMessages({
   }
 
   final canonical = resolveCanonicalChatMediaMessage(tappedMessage, originList);
-  if (!entries
-      .any((entry) => isSameChatMediaMessage(entry.message, canonical))) {
+  if (isPreviewable(canonical) &&
+      !entries
+          .any((entry) => isSameChatMediaMessage(entry.message, canonical))) {
     entries.add(
       _IndexedChatMediaMessage(
         message: canonical,

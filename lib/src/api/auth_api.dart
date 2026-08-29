@@ -1,14 +1,21 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:tencent_cloud_chat_demo/src/utils/client_device_info.dart';
 import 'api_client.dart';
 
 class AuthApi {
-  AuthApi._();
+  AuthApi._({Dio? dio}) : _dioOverride = dio;
+
   static final AuthApi instance = AuthApi._();
 
-  Dio get _dio => ApiClient.instance.dio;
+  @visibleForTesting
+  AuthApi.withDio(Dio dio) : this._(dio: dio);
+
+  final Dio? _dioOverride;
+
+  Dio get _dio => _dioOverride ?? ApiClient.instance.dio;
 
   Future<Map<String, String>> _authDeviceFields() async {
     await ApiClient.instance.ensureDeviceIdReady();
@@ -27,10 +34,11 @@ class AuthApi {
   }) async {
     final data = <String, dynamic>{
       'phone': phone.trim(),
-      'scene': scene,
+      'scene': scene.trim().toUpperCase(),
       if (phoneCountry?.trim().isNotEmpty == true)
         'phoneCountry': phoneCountry!.trim().toUpperCase(),
-      if (challengeId != null) 'challengeId': challengeId,
+      if (challengeId?.trim().isNotEmpty == true)
+        'challengeId': challengeId!.trim(),
     };
     await _dio.post('/sms/send', data: data);
   }
@@ -271,7 +279,8 @@ class QrLoginScanResult {
     final j = _authMap(raw);
     return QrLoginScanResult(
       sessionId: _readString(j, const ['sessionId', 'session_id']) ?? '',
-      status: (_readString(j, const ['status']) ?? 'scanned').trim().toLowerCase(),
+      status:
+          (_readString(j, const ['status']) ?? 'scanned').trim().toLowerCase(),
       siteLabel: _readString(j, const ['siteLabel', 'site_label']),
     );
   }
@@ -311,7 +320,8 @@ class TokenResult {
 
   factory TokenResult.fromJson(dynamic raw) {
     final j = _authMap(raw);
-    final token = _readString(j, const ['token', 'accessToken', 'access_token']);
+    final token =
+        _readString(j, const ['token', 'accessToken', 'access_token']);
     final userId = _readString(j, const ['userId', 'user_id']);
     if (token == null || token.isEmpty) {
       throw FormatException('TokenResult missing token');
@@ -355,11 +365,9 @@ class PasswordLoginResult {
       token: _readString(j, const ['token', 'accessToken', 'access_token']),
       userId: _readString(j, const ['userId', 'user_id']),
       expiresIn: _readInt(j, const ['expiresIn', 'expires_in']),
-      challengeId:
-          _readString(j, const ['challengeId', 'challenge_id']),
+      challengeId: _readString(j, const ['challengeId', 'challenge_id']),
       phone: _readPhone(j),
-      phoneMasked:
-          _readString(j, const ['phoneMasked', 'phone_masked']),
+      phoneMasked: _readString(j, const ['phoneMasked', 'phone_masked']),
     );
   }
 
@@ -397,6 +405,7 @@ class MeResult {
     required this.phoneMasked,
     required this.nickname,
     this.avatarUrl,
+    this.avatarVersion = 0,
     this.email,
     this.lastNicknameChangedAt,
     this.nextNicknameChangeableAt,
@@ -408,6 +417,7 @@ class MeResult {
   final String phoneMasked;
   final String nickname;
   final String? avatarUrl;
+  final int avatarVersion;
   final String? email;
   final DateTime? lastNicknameChangedAt;
   final DateTime? nextNicknameChangeableAt;
@@ -418,10 +428,11 @@ class MeResult {
     return MeResult(
       userId: _readString(j, const ['userId', 'user_id']) ?? '',
       phone: _readString(j, const ['phone']) ?? '',
-      phoneMasked:
-          _readString(j, const ['phoneMasked', 'phone_masked']) ?? '',
+      phoneMasked: _readString(j, const ['phoneMasked', 'phone_masked']) ?? '',
       nickname: _readString(j, const ['nickname']) ?? '',
       avatarUrl: _readString(j, const ['avatarUrl', 'avatar_url']),
+      avatarVersion:
+          _readInt(j, const ['avatarVersion', 'avatar_version']) ?? 0,
       email: _readString(j, const ['email']),
       lastNicknameChangedAt: _readDateTime(j, const [
         'lastNicknameChangedAt',
@@ -447,13 +458,11 @@ class MeResult {
         'nextChangeableAt',
         'next_changeable_at',
       ]),
-      bypassDeviceCheck:
-          j['bypassDeviceCheck'] as bool? ??
-              j['bypass_device_check'] as bool? ??
-              false,
+      bypassDeviceCheck: j['bypassDeviceCheck'] as bool? ??
+          j['bypass_device_check'] as bool? ??
+          false,
     );
   }
-
 
   static DateTime? _readDateTime(Map<String, dynamic> json, List<String> keys) {
     for (final key in keys) {

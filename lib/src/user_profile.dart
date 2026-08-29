@@ -36,10 +36,12 @@ import 'package:tencent_cloud_chat_demo/src/services/call_launcher.dart';
 import 'package:tencent_cloud_chat_demo/src/services/user_profile_local/user_profile_local_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_external_message_sender.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
-import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_local/friend_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/peer_profile_refresh_bus.dart';
 import 'package:tencent_cloud_chat_sdk/manager/v2_tim_manager.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_callback.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_callback.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_friend_info.dart'
@@ -76,7 +78,6 @@ import 'package:tencent_cloud_chat_demo/src/platform/permission_guard.dart';
 import 'package:tencent_cloud_chat_demo/src/services/moments/moments_settings_service.dart';
 import 'package:tencent_cloud_chat_demo/src/pages/complaint/complaint_reason_page.dart';
 import 'package:tencent_cloud_chat_demo/src/pages/common_group_chats_page.dart';
-import 'package:tencent_cloud_chat_demo/src/services/common_group_chats_service.dart';
 import 'package:tencent_cloud_chat_demo/src/models/me_group_record.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/group_member_join_meta_section.dart';
 import 'package:tencent_cloud_chat_demo/utils/friend_add_source.dart';
@@ -134,10 +135,8 @@ class UserProfileState extends State<UserProfile> {
   FriendRelation? _friendRelation;
   bool _isPrivilegedGameUser = PrivilegedGameUserService.instance.isPrivileged;
   String _ledgerDisplayName = '';
-  List<MeGroupRecord> _commonGroups = const [];
-  int _commonGroupsTotal = 0;
-  bool _commonGroupsLoading = false;
-  bool _commonGroupsLoaded = false;
+  bool _publishingProfile = false;
+  bool _profileEnrichmentInFlight = false;
   bool _blockMyMoments = false;
   bool _hideTheirMoments = false;
   GroupMemberRecord? _groupJoinMetaRecord;
@@ -272,8 +271,7 @@ class UserProfileState extends State<UserProfile> {
         current: profile.faceUrl,
         incoming: avatar,
       )) {
-        profile.faceUrl =
-            UserAvatarHelper.usableAvatarOrEmpty(avatar);
+        profile.faceUrl = UserAvatarHelper.usableAvatarOrEmpty(avatar);
       }
     }
     final r = remark;
@@ -311,25 +309,40 @@ class UserProfileState extends State<UserProfile> {
     final conversationId = 'c2c_$userId';
 
     DisplayNameStore.instance.setC2C(userId, showName);
-    ConversationListNotifier.instance.applyShowNameLocally(
-      conversationID: conversationId,
-      showName: showName,
-    );
-    if (avatar.isNotEmpty) {
-      ConversationListNotifier.instance.applyFaceUrlLocally(
+    unawaited(
+      ConversationSyncService.instance.applyConversationMetadataPatch(
         conversationID: conversationId,
-        faceUrl: avatar,
-      );
-    }
-    PeerProfileRefreshBus.instance.notify(userId);
-    ConversationRefreshBus.instance.requestRefresh(
-      reason: 'peer_profile_updated',
-      conversationId: conversationId,
-      debounce: Duration.zero,
+        showName: showName,
+        faceUrl: avatar.isEmpty ? null : avatar,
+        remoteAuthority: true,
+      ),
     );
+    // This page is the writer for the profile it just enriched. The bus
+    // listener is for external changes and must not immediately reload this
+    // same page again.
+    _publishingProfile = true;
+    try {
+      PeerProfileRefreshBus.instance.notify(userId);
+    } finally {
+      _publishingProfile = false;
+    }
   }
 
   Future<V2TimFriendInfo?> _enrichFriendInfoFromBackend(
+    V2TimFriendInfo? friendInfo,
+  ) async {
+    if (_profileEnrichmentInFlight) {
+      return friendInfo;
+    }
+    _profileEnrichmentInFlight = true;
+    try {
+      return await _enrichFriendInfoFromBackendImpl(friendInfo);
+    } finally {
+      _profileEnrichmentInFlight = false;
+    }
+  }
+
+  Future<V2TimFriendInfo?> _enrichFriendInfoFromBackendImpl(
     V2TimFriendInfo? friendInfo,
   ) async {
     final userId = widget.userID.trim();
@@ -373,6 +386,7 @@ class UserProfileState extends State<UserProfile> {
           userId: userId,
           nickname: remote.nickname,
           avatarUrl: remote.avatarUrl,
+          avatarVersion: remote.avatarVersion,
         );
       }
     } else if (friendRecord != null) {
@@ -507,10 +521,18 @@ class UserProfileState extends State<UserProfile> {
       initialRemark: _friendRemarkForEdit(),
       hintBaseline: _friendRemarkHintBaseline(),
       onSave: (String remark) async {
-        final res = await _timuiKitProfileController.updateRemarks(
-          widget.userID,
-          remark.trim(),
-        );
+        final res = await _timuiKitProfileController
+            .updateRemarks(
+              widget.userID,
+              remark.trim(),
+            )
+            .timeout(
+              const Duration(seconds: 12),
+              onTimeout: () => V2TimCallback(
+                code: -1,
+                desc: 'REQUEST_TIMEOUT',
+              ),
+            );
         if (res.code != 0) {
           ToastUtils.toast(
             DioErrorMessage.sanitizeUserText(
@@ -871,12 +893,34 @@ class UserProfileState extends State<UserProfile> {
   }) {
     final name = _getDisplayName(userInfo);
     final faceUrl = TencentUtils.checkString(userInfo?.faceUrl) ?? "";
+    final userId = ChatIdFormat.rawUserUid(
+      userInfo?.userID?.trim().isNotEmpty == true
+          ? userInfo!.userID!
+          : widget.userID,
+    );
+    final avatarVersion =
+        UserProfileLocalService.instance.readCached(userId)?.avatarVersion ?? 0;
+    final backendThumb =
+        UserProfileLocalService.instance.readCached(userId)?.avatarUrl.trim() ??
+            '';
+    final displayThumb = backendThumb.isNotEmpty ? backendThumb : faceUrl;
     return Avatar(
-      faceUrl: faceUrl,
+      faceUrl: displayThumb,
       showName: name,
       type: 1,
       borderRadius: BorderRadius.circular(size / 2),
-      isShowBigWhenClick: faceUrl.isNotEmpty,
+      isShowBigWhenClick: displayThumb.isNotEmpty,
+      previewUrlResolver: userId.isEmpty
+          ? null
+          : () async {
+              final result =
+                  await UserApi.instance.fetchUserAvatarPreview(userId);
+              return result.previewUrl;
+            },
+      avatarCacheKey:
+          userId.isEmpty ? null : 'avatar|user|$userId|$avatarVersion|thumb',
+      previewCacheKey:
+          userId.isEmpty ? null : 'avatar|user|$userId|$avatarVersion|preview',
     );
   }
 
@@ -1367,8 +1411,6 @@ class UserProfileState extends State<UserProfile> {
       AppMaterialPageRoute(
         builder: (_) => CommonGroupChatsPage(
           peerUserId: peerId,
-          initialGroups: _commonGroups,
-          initialTotal: _commonGroupsTotal,
           peerDisplayName: _friendRemarkHintBaseline(),
         ),
       ),
@@ -1693,13 +1735,11 @@ class UserProfileState extends State<UserProfile> {
         if (widget.onClickSendMessage != null) {
           widget.onClickSendMessage!(conversation);
         } else {
-          Navigator.push(
+          openOrReuseAppChat(
             context,
-            appChatRoute(
-              conversation,
-              initialC2cCanMessage: true,
-              c2cPermissionHintSource: 'friend_profile_send_message',
-            ),
+            conversation,
+            initialC2cCanMessage: true,
+            c2cPermissionHintSource: 'friend_profile_send_message',
           );
         }
         break;
@@ -2202,9 +2242,6 @@ class UserProfileState extends State<UserProfile> {
     final profileModel = _getProfileModel();
     final isBlocked = profileModel?.isAddToBlackList ?? false;
     final showMoments = _resolveIsFriend() || _resolveInMyFriendList();
-    final countText = _commonGroupsLoading && !_commonGroupsLoaded
-        ? ''
-        : '$_commonGroupsTotal';
     final displayUserId = ChatIdFormat.display(widget.userID);
 
     final basicRows = <Widget>[
@@ -2316,7 +2353,7 @@ class UserProfileState extends State<UserProfile> {
             ja: '共通のグループ',
             ko: '공통 그룹',
           ),
-          value: countText,
+          value: '',
           onTap: _openCommonGroupsPage,
         ),
       );
@@ -2532,8 +2569,11 @@ class UserProfileState extends State<UserProfile> {
     super.initState();
     unawaited(_ensureGroupProfileCanView());
     unawaited(_loadFriendRelation());
-    unawaited(_loadCommonGroups());
-    unawaited(_loadGroupMemberJoinMeta());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        unawaited(_loadGroupMemberJoinMeta());
+      }
+    });
     _isPrivilegedGameUser = PrivilegedGameUserService.instance.isPrivileged;
     PrivilegedGameUserService.instance.gameEnabled
         .addListener(_onPrivilegedGameAccessChanged);
@@ -2662,92 +2702,10 @@ class UserProfileState extends State<UserProfile> {
     }
   }
 
-  Future<void> _loadCommonGroups() async {
-    final peerId = ChatIdFormat.rawUserUid(widget.userID);
-    if (peerId.isEmpty || ProfilePageNav.isSelfUser(peerId)) {
-      if (mounted) {
-        setState(() {
-          _commonGroups = const [];
-          _commonGroupsTotal = 0;
-          _commonGroupsLoading = false;
-          _commonGroupsLoaded = true;
-        });
-      }
-      return;
-    }
-    if (mounted) {
-      setState(() => _commonGroupsLoading = true);
-    }
-    try {
-      // 资料页只拉首页：拿 total 展示数量，列表页再滚动分页。
-      final page = await CommonGroupChatsService.instance.loadCommonGroupsPage(
-        peerId,
-      );
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _commonGroups = page.items;
-        _commonGroupsTotal = page.total;
-        _commonGroupsLoading = false;
-        _commonGroupsLoaded = true;
-      });
-    } on DioError catch (e) {
-      if (!mounted) {
-        return;
-      }
-      final code = e.response?.statusCode ?? 0;
-      final body = e.response?.data;
-      String? reason;
-      if (body is Map) {
-        reason =
-            (body['code'] ?? body['message'] ?? body['msg'])?.toString().trim();
-      }
-      setState(() {
-        _commonGroups = const [];
-        _commonGroupsTotal = 0;
-        _commonGroupsLoading = false;
-        _commonGroupsLoaded = true;
-      });
-      if (code == 403) {
-        final hint = (reason != null && reason.isNotEmpty)
-            ? reason
-            : AppI18n.of(context).t(
-                zhHans: '当前群聊开启群隐私保护无法查看该用户信息',
-                zhHant: '目前群聊開啟群隱私保護，無法查看該用戶資訊',
-                en: 'Group privacy protection is on. You cannot view this user.',
-                ja: 'グループのプライバシー保護が有効なため、このユーザーを表示できません',
-                ko: '그룹 개인정보 보호가 켜져 있어 이 사용자를 볼 수 없습니다',
-              );
-        ToastUtils.toast(hint);
-        if (_viewGroupId != null) {
-          if (widget.onClose != null) {
-            widget.onClose!();
-          } else {
-            Navigator.of(context).maybePop();
-          }
-        }
-      }
-    } catch (_) {
-      if (!mounted) {
-        return;
-      }
-      setState(() {
-        _commonGroups = const [];
-        _commonGroupsTotal = 0;
-        _commonGroupsLoading = false;
-        _commonGroupsLoaded = true;
-      });
-    }
-  }
-
   Widget _buildCommonGroupsEntry(BuildContext context) {
     if (ProfilePageNav.isSelfUser(widget.userID)) {
       return const SizedBox.shrink();
     }
-    final countText = _commonGroupsLoading && !_commonGroupsLoaded
-        ? ''
-        : '$_commonGroupsTotal';
     return InkWell(
       onTap: _openCommonGroupsPage,
       child: TIMUIKitProfileWidget.operationItem(
@@ -2758,9 +2716,9 @@ class UserProfileState extends State<UserProfile> {
           ja: '共通のグループ',
           ko: '공통 그룹',
         ),
-        operationText: countText,
+        operationText: "",
         type: "text",
-        isEmpty: countText.isEmpty,
+        isEmpty: true,
         smallCardMode: false,
       ),
     );
@@ -2808,8 +2766,6 @@ class UserProfileState extends State<UserProfile> {
       case _WideProfileDetail.commonGroups:
         body = CommonGroupChatsPage(
           peerUserId: ChatIdFormat.rawUserUid(widget.userID),
-          initialGroups: _commonGroups,
-          initialTotal: _commonGroupsTotal,
           peerDisplayName: _friendRemarkHintBaseline(),
           embedded: true,
           onClose: close,
@@ -2921,7 +2877,9 @@ class UserProfileState extends State<UserProfile> {
   }
 
   void _onPeerProfileRefresh() {
-    if (!PeerProfileRefreshBus.instance.matches(widget.userID)) {
+    if (_profileEnrichmentInFlight ||
+        _publishingProfile ||
+        !PeerProfileRefreshBus.instance.matchesLatest(widget.userID)) {
       return;
     }
     unawaited(_reloadProfileAfterFriendChange());
@@ -3060,10 +3018,11 @@ class UserProfileState extends State<UserProfile> {
                                         TUIFriendShipViewModel>();
                                     final conversationModel = serviceLocator<
                                         TUIConversationViewModel>();
-                                    await conversationModel
-                                        .refreshConversationItem(
-                                            'c2c_${widget.userID}');
-                                    _applyFriendRemarkLocally(newRemark);
+                                    unawaited(
+                                      conversationModel.refreshConversationItem(
+                                        'c2c_${widget.userID}',
+                                      ),
+                                    );
                                     unawaited(
                                         friendModel.loadContactListData());
                                     ConversationRefreshBus.instance
@@ -3184,10 +3143,11 @@ class UserProfileState extends State<UserProfile> {
                                         TUIFriendShipViewModel>();
                                     final conversationModel = serviceLocator<
                                         TUIConversationViewModel>();
-                                    await conversationModel
-                                        .refreshConversationItem(
-                                            'c2c_${widget.userID}');
-                                    _applyFriendRemarkLocally(newRemark);
+                                    unawaited(
+                                      conversationModel.refreshConversationItem(
+                                        'c2c_${widget.userID}',
+                                      ),
+                                    );
                                     unawaited(
                                         friendModel.loadContactListData());
                                     ConversationRefreshBus.instance

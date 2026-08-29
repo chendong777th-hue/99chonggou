@@ -17,6 +17,21 @@ class VoiceOutputRouteService {
   static final ValueNotifier<VoiceOutputRoute> routeNotifier =
       ValueNotifier<VoiceOutputRoute>(VoiceOutputRoute.speaker);
 
+  // Native audio-session changes are not safely re-entrant. CallKit, LiveKit
+  // track callbacks and the UI can all request a route at the same time, so
+  // serialize them and only apply the newest desired route.
+  static int _routeGeneration = 0;
+  static bool _routeApplyInFlight = false;
+  static VoiceOutputRoute? _pendingRoute;
+  static bool _pendingConfigureSession = false;
+  static bool _pendingForRecording = false;
+  static bool _pendingActivate = false;
+  // Tracks the category most recently configured through this coordinator.
+  // AVAudioSession.overrideOutputAudioPort is only valid for a playAndRecord
+  // session; calling it after configuring playback is the common source of
+  // OSStatus -50 in this app.
+  static bool? _sessionUsesPlayAndRecord;
+
   static VoiceOutputRoute get currentRoute => routeNotifier.value;
 
   static bool get isSpeaker => currentRoute == VoiceOutputRoute.speaker;
@@ -95,39 +110,73 @@ class VoiceOutputRouteService {
       routeNotifier.value = route;
     }
 
-    if (kIsWeb) {
+    ++_routeGeneration;
+    _pendingRoute = route;
+    _pendingConfigureSession = _pendingConfigureSession || configureSession;
+    _pendingForRecording = _pendingForRecording || forRecording;
+    _pendingActivate = _pendingActivate || activate;
+    if (_routeApplyInFlight) {
       return true;
     }
+    _routeApplyInFlight = true;
 
+    var result = true;
     try {
-      final session = await AudioSession.instance;
-      if (configureSession) {
-        final config =
-            forRecording ? voiceChatConfigFor(route) : playbackConfigFor(route);
-        await session.configure(config);
-      }
+      while (true) {
+        final requestedGeneration = _routeGeneration;
+        final requestedRoute = _pendingRoute ?? route;
+        final requestedConfigure = _pendingConfigureSession;
+        final requestedRecording = _pendingForRecording;
+        final requestedActivate = _pendingActivate;
+        _pendingRoute = null;
+        _pendingConfigureSession = false;
+        _pendingForRecording = false;
+        _pendingActivate = false;
 
-      if (activate) {
-        try {
-          await session.setActive(true);
-        } catch (e) {
-          if (kDebugMode) {
-            debugPrint('VoiceOutputRouteService: setActive failed ($e)');
+        if (!kIsWeb) {
+          try {
+            final session = await AudioSession.instance;
+            if (requestedConfigure) {
+              final config = requestedRecording
+                  ? voiceChatConfigFor(requestedRoute)
+                  : playbackConfigFor(requestedRoute);
+              await session.configure(config);
+              _sessionUsesPlayAndRecord = requestedRecording ||
+                  requestedRoute == VoiceOutputRoute.earpiece;
+            }
+            if (requestedActivate) {
+              try {
+                await session.setActive(true);
+              } catch (e) {
+                result = false;
+                if (kDebugMode) {
+                  debugPrint('VoiceOutputRouteService: setActive failed ($e)');
+                }
+              }
+            }
+            // Speaker override is invalid for AVAudioSessionCategoryPlayback.
+            // For an inactive session, category/defaultToSpeaker is enough;
+            // apply the native port only once the session is active.
+            if (_sessionUsesPlayAndRecord == true && requestedActivate) {
+              await _applyNativeRoute(requestedRoute);
+            }
+          } catch (e) {
+            result = false;
+            if (kDebugMode) {
+              debugPrint('VoiceOutputRouteService: switch route failed ($e)');
+            }
           }
         }
+        // A newer request arrived while native calls were awaiting. Loop once
+        // more and apply only the latest route; never let an older request win.
+        if (requestedGeneration == _routeGeneration && _pendingRoute == null) {
+          break;
+        }
       }
-
-      // configure / setActive 都可能让系统重新选择默认输出端口。
-      // 原生路由必须最后应用，才能保证连续播放下一条时沿用用户选择。
-      await _applyNativeRoute(route);
-
-      return true;
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('VoiceOutputRouteService: switch route failed ($e)');
-      }
-      return false;
+    } finally {
+      _routeApplyInFlight = false;
     }
+    return result;
   }
 
   static Future<void> _applyNativeRoute(VoiceOutputRoute route) async {

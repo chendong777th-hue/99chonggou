@@ -279,6 +279,8 @@ class SettingsInputCell extends StatelessWidget {
   final TextInputType keyboardType;
   final TextEditingController? controller;
   final List<TextInputFormatter>? inputFormatters;
+  final Widget? leading;
+  final double leadingWidth;
 
   const SettingsInputCell({
     super.key,
@@ -289,6 +291,8 @@ class SettingsInputCell extends StatelessWidget {
     this.keyboardType = TextInputType.text,
     this.controller,
     this.inputFormatters,
+    this.leading,
+    this.leadingWidth = 96,
   });
 
   @override
@@ -323,6 +327,11 @@ class SettingsInputCell extends StatelessWidget {
               ),
             ),
           ),
+          if (leading != null)
+            SizedBox(
+              width: leadingWidth,
+              child: leading,
+            ),
           Expanded(
             child: TextField(
               controller: controller,

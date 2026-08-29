@@ -59,7 +59,8 @@ class ConversationNotifySyncService {
         muted: muted,
       );
     } catch (e, st) {
-      debugPrint('ConversationNotifySync: single sync failed $type/$id: $e\n$st');
+      debugPrint(
+          'ConversationNotifySync: single sync failed $type/$id: $e\n$st');
     }
   }
 
@@ -88,14 +89,17 @@ class ConversationNotifySyncService {
         DateTime.now().difference(_lastLoginSyncAt!) < _loginSyncCooldown) {
       return Future<void>.value();
     }
-    return _loginSyncInFlight ??= _syncAllOnLogin(force: force).whenComplete(() {
+    return _loginSyncInFlight ??=
+        _syncAllOnLogin(force: force).whenComplete(() {
       _loginSyncInFlight = null;
     });
   }
 
   Future<void> _syncAllOnLogin({required bool force}) async {
     try {
-      await ConversationListNotifier.instance.reloadFromLocal();
+      await ConversationListNotifier.instance.restoreStoreProjection(
+        reason: ConversationStoreProjectionReason.authBootstrap,
+      );
       final items = await _collectMuteItemsFromImAndLocal();
       if (items.isEmpty) {
         return;
@@ -148,7 +152,8 @@ class ConversationNotifySyncService {
       merged[_itemKey(item)] = item;
     }
 
-    final c2cBatches = _chunkList(c2cUserIds.toList(growable: false), _c2cImBatchSize);
+    final c2cBatches =
+        _chunkList(c2cUserIds.toList(growable: false), _c2cImBatchSize);
     for (final batch in c2cBatches) {
       final optByUserId = await _fetchC2cReceiveOpts(batch);
       for (final userId in batch) {
@@ -205,7 +210,8 @@ class ConversationNotifySyncService {
   Map<String, int?> _fallbackC2cOptsFromLocal(List<String> userIds) {
     final out = <String, int?>{};
     final byUserId = <String, V2TimConversation>{
-      for (final conversation in ConversationListNotifier.instance.conversations)
+      for (final conversation
+          in ConversationListNotifier.instance.conversations)
         if ((conversation.userID?.trim().isNotEmpty ?? false))
           conversation.userID!.trim(): conversation,
     };

@@ -51,13 +51,7 @@ class ChatBubble extends StatelessWidget {
               lineHeight: 1.45,
             ).copyWith(
               color: textColor,
-              fontWeight: null,
-              fontVariations: const [
-                FontVariation(
-                  'wght',
-                  MessageBubbleTextColor.messageBodyFontVariationWeight,
-                ),
-              ],
+              fontWeight: MessageBubbleTextColor.messageBodyFontWeight,
             ),
           ),
         ),

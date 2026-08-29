@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/message_conversation_id.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
@@ -47,8 +48,7 @@ class ArchivedConversationEntryVisibility {
       sdkGetConversationForTest;
 
   /// 供单测注入：跳过真实 LocalStore。
-  Future<List<V2TimConversation>> Function(List<String> ids)?
-      localByIdsForTest;
+  Future<List<V2TimConversation>> Function(List<String> ids)? localByIdsForTest;
 
   /// 供单测注入：跳过真实 save。
   Future<void> Function(ConversationArchiveScope scope, Set<String> ids)?
@@ -63,8 +63,7 @@ class ArchivedConversationEntryVisibility {
     }
   }
 
-  bool shouldShow(ConversationArchiveScope scope) =>
-      notifierFor(scope).value;
+  bool shouldShow(ConversationArchiveScope scope) => notifierFor(scope).value;
 
   void ensureStarted() {
     if (_started) {
@@ -242,9 +241,10 @@ class ArchivedConversationEntryVisibility {
           continue;
         }
         if (localByIdsForTest == null) {
-          await ConversationLocalStore.instance.upsertBatch(
-            conversations: [conversation],
-          );
+          await ConversationSyncService.instance
+              .commitSdkHydratedConversations(<V2TimConversation>[
+            conversation,
+          ]);
         }
         found.add(conversation);
       } catch (e) {

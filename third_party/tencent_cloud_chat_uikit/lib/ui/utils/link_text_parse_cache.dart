@@ -1,6 +1,7 @@
 import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/regexp_probe.dart';
 
 /// LRU cache for link/mention **parse products** (flagged strings, URL lists).
 ///
@@ -11,7 +12,10 @@ class LinkTextParseCache {
 
   static final LinkTextParseCache instance = LinkTextParseCache._();
 
-  static const int maxEntries = 256;
+  // Message rows are frequently rebuilt while scrolling. Keep a larger but
+  // bounded working set so returning to a recent viewport avoids rescanning
+  // regexes without allowing unbounded text retention.
+  static const int maxEntries = 1024;
 
   final LinkedHashMap<String, String> _flaggedContent =
       LinkedHashMap<String, String>();
@@ -66,10 +70,12 @@ class LinkTextParseCache {
     final hit = _flaggedContent.remove(key);
     if (hit != null) {
       flaggedHits++;
+      RegExpProbe.recordCacheHit('link.flaggedContent');
       _flaggedContent[key] = hit;
       return hit;
     }
     flaggedMisses++;
+    RegExpProbe.recordCacheMiss('link.flaggedContent');
     final value = compute();
     _flaggedContent[key] = value;
     _evict(_flaggedContent);
@@ -83,10 +89,12 @@ class LinkTextParseCache {
     final hit = _wrappedMentions.remove(text);
     if (hit != null) {
       wrappedHits++;
+      RegExpProbe.recordCacheHit('link.wrappedMentions');
       _wrappedMentions[text] = hit;
       return hit;
     }
     wrappedMisses++;
+    RegExpProbe.recordCacheMiss('link.wrappedMentions');
     final value = compute();
     _wrappedMentions[text] = value;
     _evict(_wrappedMentions);
@@ -100,10 +108,12 @@ class LinkTextParseCache {
     final hit = _urlMatches.remove(text);
     if (hit != null) {
       urlHits++;
+      RegExpProbe.recordCacheHit('link.urlMatches');
       _urlMatches[text] = hit;
       return hit;
     }
     urlMisses++;
+    RegExpProbe.recordCacheMiss('link.urlMatches');
     final value = List<String>.unmodifiable(compute());
     _urlMatches[text] = value;
     _evict(_urlMatches);

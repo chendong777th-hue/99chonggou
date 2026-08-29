@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tencent_cloud_chat_demo/src/api/conversation_folder_api.dart';
 import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/archived_conversation_ref.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 
@@ -16,6 +17,7 @@ class ExclusiveMembershipCollapse {
   });
 
   final List<ConversationFolder> folders;
+
   /// folderId → 因「一会话仅一组」被移出的 conversationId 列表。
   final Map<String, List<String>> removedByFolderId;
 }
@@ -38,9 +40,11 @@ class ConversationFolder {
 
   final String folderId;
   final String name;
+
   /// 始终为 [sharedScope]；读取时会把历史 `c2c`/`group` 归一化。
   final String scope;
   final int sortOrder;
+
   /// conversationId → 成员级 updatedAt（毫秒；可空）。
   final Map<String, int?> members;
   final int? updatedAt;
@@ -65,8 +69,8 @@ class ConversationFolder {
         if (key.isEmpty) {
           continue;
         }
-        rebuilt[key] = this.members[key] ??
-            _lookupMemberUpdatedAt(this.members, key);
+        rebuilt[key] =
+            this.members[key] ?? _lookupMemberUpdatedAt(this.members, key);
       }
       nextMembers = Map<String, int?>.unmodifiable(rebuilt);
     } else {
@@ -158,7 +162,8 @@ class ConversationFolder {
       }
     }
     return ConversationFolder(
-      folderId: (json['folderId'] ?? json['folder_id'])?.toString().trim() ?? '',
+      folderId:
+          (json['folderId'] ?? json['folder_id'])?.toString().trim() ?? '',
       name: json['name']?.toString().trim() ?? '',
       scope: sharedScope,
       sortOrder: _asInt(json['sortOrder'] ?? json['sort_order']) ?? 0,
@@ -235,8 +240,8 @@ class ConversationFolder {
   }
 
   static String? folderConversationIdentity(String? conversationId) {
-    final ref =
-        ArchivedConversationRef.fromConversationId(conversationId?.trim() ?? '');
+    final ref = ArchivedConversationRef.fromConversationId(
+        conversationId?.trim() ?? '');
     if (ref == null) {
       return null;
     }
@@ -261,7 +266,14 @@ class ConversationFolderStore {
 
   String _accountScope() => ContactSocialCacheStore.accountScope();
 
-  String _storageKey() => '$_storagePrefix${_accountScope()}';
+  String _storageKeyForScope(String scope) => '$_storagePrefix$scope';
+
+  bool _isOperationCurrent(SessionIdentity identity, String scope) {
+    return SessionIdentityService.instance
+            .isGenerationCurrent(identity.generation) &&
+        _accountScope() == scope &&
+        (identity.ownerUserId.isNotEmpty || scope == '_guest');
+  }
 
   /// 单聊/群聊共用：返回全部自定义分组。
   List<ConversationFolder> get folders {
@@ -457,14 +469,25 @@ class ConversationFolderStore {
     );
   }
 
-  Future<void> ensureLoaded() async {
+  Future<void> ensureLoaded({SessionIdentity? expectedIdentity}) async {
+    final identity =
+        expectedIdentity ?? SessionIdentityService.instance.capture();
     final scope = _accountScope();
+    if (!_isOperationCurrent(identity, scope)) {
+      return;
+    }
     if (_loadedAccountScope == scope) {
       return;
     }
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_storageKey());
+    if (!_isOperationCurrent(identity, scope)) {
+      return;
+    }
+    final raw = prefs.getString(_storageKeyForScope(scope));
     if (raw == null || raw.trim().isEmpty) {
+      if (!_isOperationCurrent(identity, scope)) {
+        return;
+      }
       _loadedAccountScope = scope;
       foldersNotifier.value = const <ConversationFolder>[];
       return;
@@ -487,28 +510,52 @@ class ConversationFolderStore {
         }
       }
       final collapsed = collapseExclusiveMembership(folders);
+      if (!_isOperationCurrent(identity, scope)) {
+        return;
+      }
       _loadedAccountScope = scope;
       foldersNotifier.value =
           List<ConversationFolder>.unmodifiable(collapsed.folders);
       if (collapsed.removedByFolderId.isNotEmpty) {
-        await _persist();
+        await _persist(identity: identity, scope: scope);
       }
     } catch (e) {
       debugPrint('ConversationFolderStore: load failed: $e');
+      if (!_isOperationCurrent(identity, scope)) {
+        return;
+      }
       _loadedAccountScope = scope;
       foldersNotifier.value = const <ConversationFolder>[];
     }
   }
 
-  Future<void> replaceAll(List<ConversationFolder> folders) async {
+  Future<void> replaceAll(
+    List<ConversationFolder> folders, {
+    SessionIdentity? expectedIdentity,
+  }) async {
+    final identity =
+        expectedIdentity ?? SessionIdentityService.instance.capture();
+    final scope = _accountScope();
+    if (!_isOperationCurrent(identity, scope)) {
+      return;
+    }
     final collapsed = collapseExclusiveMembership(folders);
     foldersNotifier.value =
         List<ConversationFolder>.unmodifiable(collapsed.folders);
-    _loadedAccountScope = _accountScope();
-    await _persist();
+    _loadedAccountScope = scope;
+    await _persist(identity: identity, scope: scope);
   }
 
-  Future<void> upsertFolder(ConversationFolder folder) async {
+  Future<void> upsertFolder(
+    ConversationFolder folder, {
+    SessionIdentity? expectedIdentity,
+  }) async {
+    final identity =
+        expectedIdentity ?? SessionIdentityService.instance.capture();
+    final scope = _accountScope();
+    if (!_isOperationCurrent(identity, scope)) {
+      return;
+    }
     final normalized = folder.scope == ConversationFolder.sharedScope
         ? folder
         : ConversationFolder(
@@ -531,10 +578,20 @@ class ConversationFolderStore {
     final collapsed = collapseExclusiveMembership(next);
     foldersNotifier.value =
         List<ConversationFolder>.unmodifiable(collapsed.folders);
-    await _persist();
+    _loadedAccountScope = scope;
+    await _persist(identity: identity, scope: scope);
   }
 
-  Future<void> removeFolder(String folderId) async {
+  Future<void> removeFolder(
+    String folderId, {
+    SessionIdentity? expectedIdentity,
+  }) async {
+    final identity =
+        expectedIdentity ?? SessionIdentityService.instance.capture();
+    final scope = _accountScope();
+    if (!_isOperationCurrent(identity, scope)) {
+      return;
+    }
     final id = folderId.trim();
     if (id.isEmpty) {
       return;
@@ -543,7 +600,8 @@ class ConversationFolderStore {
         .where((folder) => folder.folderId != id)
         .toList(growable: false);
     foldersNotifier.value = List<ConversationFolder>.unmodifiable(next);
-    await _persist();
+    _loadedAccountScope = scope;
+    await _persist(identity: identity, scope: scope);
   }
 
   /// 将会话放入指定分组集合。产品约束：至多一个分组；传入多个时只保留赢家。
@@ -551,7 +609,14 @@ class ConversationFolderStore {
     required String conversationId,
     required Set<String> folderIds,
     int? memberUpdatedAt,
+    SessionIdentity? expectedIdentity,
   }) async {
+    final identity =
+        expectedIdentity ?? SessionIdentityService.instance.capture();
+    final scope = _accountScope();
+    if (!_isOperationCurrent(identity, scope)) {
+      return;
+    }
     final target = conversationId.trim();
     if (target.isEmpty) {
       return;
@@ -595,13 +660,18 @@ class ConversationFolderStore {
     }
     next.sort(_compareFolders);
     foldersNotifier.value = List<ConversationFolder>.unmodifiable(next);
-    await _persist();
+    _loadedAccountScope = scope;
+    await _persist(identity: identity, scope: scope);
   }
 
-  Future<void> removeConversationFromAllFolders(String conversationId) async {
+  Future<void> removeConversationFromAllFolders(
+    String conversationId, {
+    SessionIdentity? expectedIdentity,
+  }) async {
     await setMemberInFolders(
       conversationId: conversationId,
       folderIds: const <String>{},
+      expectedIdentity: expectedIdentity,
     );
   }
 
@@ -620,17 +690,25 @@ class ConversationFolderStore {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('$_storagePrefix$scope');
     if (_loadedAccountScope == scope) {
-      _loadedAccountScope = null;
-      foldersNotifier.value = const <ConversationFolder>[];
+      await clearSession();
     }
   }
 
-  Future<void> _persist() async {
-    final prefs = await SharedPreferences.getInstance();
+  Future<void> _persist({
+    required SessionIdentity identity,
+    required String scope,
+  }) async {
+    if (!_isOperationCurrent(identity, scope)) {
+      return;
+    }
     final encoded = jsonEncode(
       foldersNotifier.value.map((f) => f.toJson()).toList(growable: false),
     );
-    await prefs.setString(_storageKey(), encoded);
+    final prefs = await SharedPreferences.getInstance();
+    if (!_isOperationCurrent(identity, scope)) {
+      return;
+    }
+    await prefs.setString(_storageKeyForScope(scope), encoded);
   }
 
   static int _compareFolders(ConversationFolder a, ConversationFolder b) {

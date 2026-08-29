@@ -6,8 +6,7 @@ import 'package:provider/provider.dart';
 import 'package:tencent_cloud_chat_demo/src/create_group.dart';
 import 'package:tencent_cloud_chat_demo/src/i18n/app_i18n.dart';
 import 'package:tencent_cloud_chat_demo/src/pages/cross_platform/wide_screen/desktop_create_group_host.dart';
-import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
-import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/api/conversation_pin_api.dart';
@@ -52,6 +51,7 @@ class C2cChatSettingsPage extends StatefulWidget {
     required this.conversation,
     this.directToChat,
     this.onRemarkUpdate,
+
     /// 嵌在宽屏右侧边栏时去掉内层 AppBar，避免与「设置」双标题。
     this.embeddedInSidePanel = false,
   });
@@ -154,8 +154,8 @@ class _C2cChatSettingsPageState extends State<C2cChatSettingsPage> {
         return;
       }
       final next = latest.data!;
-      next.isPinned = ConversationPinSyncService.instance
-          .isPinnedConversationId(id);
+      next.isPinned =
+          ConversationPinSyncService.instance.isPinnedConversationId(id);
       final nextFace = UserAvatarHelper.usableAvatarOrEmpty(next.faceUrl);
       if (nextFace.isEmpty && previousFace.isNotEmpty) {
         next.faceUrl = previousFace;
@@ -254,7 +254,7 @@ class _C2cChatSettingsPageState extends State<C2cChatSettingsPage> {
               widget.directToChat!(conversation);
               return;
             }
-            Navigator.of(context).push(appChatRoute(conversation));
+            openOrReuseAppChat(context, conversation);
           },
         ),
       ),
@@ -447,22 +447,6 @@ class _C2cChatSettingsPageState extends State<C2cChatSettingsPage> {
       return;
     }
 
-    // 乐观移出列表，避免清空过程中仍占一行空壳。
-    final convId = _conversationId;
-    if (convId.isNotEmpty) {
-      unawaited(
-        ConversationListNotifier.instance.applyConversationsFromStore(
-          upserted: const [],
-          deletedIds: [convId],
-        ),
-      );
-      unawaited(
-        ConversationLocalStore.instance.clearConversationLastMessage(convId),
-      );
-    }
-    widget.conversation.lastMessage = null;
-    _conversation.lastMessage = null;
-
     unawaited(AppDialog.showLoading(
       text: AppI18n.of(context).t(
         zhHans: '正在清空...',
@@ -480,6 +464,15 @@ class _C2cChatSettingsPageState extends State<C2cChatSettingsPage> {
         convType: 1,
       );
       if (result?.code == 0) {
+        final convId = _conversationId;
+        if (convId.isNotEmpty) {
+          await ConversationSyncService.instance.onConversationHistoryCleared(
+            conversationID: convId,
+            snapshot: _conversation,
+          );
+        }
+        widget.conversation.lastMessage = null;
+        _conversation.lastMessage = null;
         if (mounted) {
           ToastUtils.toast(AppI18n.of(context).t(
             zhHans: '聊天记录已清空',

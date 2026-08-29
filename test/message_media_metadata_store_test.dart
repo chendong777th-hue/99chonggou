@@ -68,6 +68,41 @@ void main() {
     expect(historical.imageElem?.imageList?.first?.width, 320);
   });
 
+  test('hydrates persisted thumb localUrl into historical image message',
+      () async {
+    final resolved = _message(
+      elemType: MessageElemType.V2TIM_ELEM_TYPE_IMAGE,
+      msgID: 'image-msg-local-thumb',
+    )..imageElem = V2TimImageElem(
+        imageList: <V2TimImage?>[
+          V2TimImage(
+            type: 1,
+            uuid: 'thumb-local-uuid',
+            localUrl: '/tmp/chat-thumb-local.jpg',
+          ),
+        ],
+      );
+
+    await store.persistFromMessages(<V2TimMessage>[resolved]);
+    store.debugClearMemoryForOwner(owner);
+
+    final historical = _message(
+      elemType: MessageElemType.V2TIM_ELEM_TYPE_IMAGE,
+      msgID: 'image-msg-local-thumb',
+    )..imageElem = V2TimImageElem(
+        imageList: <V2TimImage?>[
+          V2TimImage(type: 1, uuid: 'thumb-local-uuid'),
+        ],
+      );
+
+    await store.hydrateMessages(<V2TimMessage>[historical]);
+
+    expect(
+      historical.imageElem?.imageList?.first?.localUrl,
+      '/tmp/chat-thumb-local.jpg',
+    );
+  });
+
   test('hydrates persisted video snapshot and play URLs', () async {
     final resolved = _message(
       elemType: MessageElemType.V2TIM_ELEM_TYPE_VIDEO,

@@ -6,7 +6,6 @@ import 'dart:io';
 import 'package:tencent_cloud_chat_sdk/enum/V2TimAdvancedMsgListener.dart';
 import 'package:tencent_cloud_chat_sdk/enum/get_group_message_read_member_list_filter.dart';
 import 'package:tencent_cloud_chat_sdk/enum/history_msg_get_type_enum.dart';
-import 'package:tencent_cloud_chat_sdk/enum/image_types.dart';
 import 'package:tencent_cloud_chat_sdk/enum/message_elem_type.dart';
 import 'package:tencent_cloud_chat_sdk/enum/message_status.dart';
 import 'package:tencent_cloud_chat_sdk/enum/offlinePushInfo.dart';
@@ -60,7 +59,8 @@ class TIMMessageManager {
   final int _MAX_ABSTRACT_COUNT = 5;
   final int _MAX_ABSTRACT_LENGTH = 100;
   late V2TimAdvancedMsgListener _advancedMessageListener;
-  List<V2TimAdvancedMsgListener> v2TimAdvancedMsgListenerList = List.empty(growable: true);
+  List<V2TimAdvancedMsgListener> v2TimAdvancedMsgListenerList =
+      List.empty(growable: true);
 
   // messageIDMap 为了兼容旧版本 sdk 的实现
   Map<String, V2TimMessage> messageIDMap = {};
@@ -102,12 +102,15 @@ class TIMMessageManager {
     v2timMessage.id = tempID;
     messageIDMap.addAll({tempID: v2timMessage});
 
-    V2TimMsgCreateInfoResult result = V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
+    V2TimMsgCreateInfoResult result =
+        V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
     return result;
   }
 
-  V2TimMsgCreateInfoResult createCustomMessage({required String data, String desc = "", String extension = ""}) {
-    V2TimCustomElem customElem = V2TimCustomElem(data: data, desc: desc, extension: extension);
+  V2TimMsgCreateInfoResult createCustomMessage(
+      {required String data, String desc = "", String extension = ""}) {
+    V2TimCustomElem customElem =
+        V2TimCustomElem(data: data, desc: desc, extension: extension);
     int elemType = MessageElemType.V2TIM_ELEM_TYPE_CUSTOM;
     V2TimMessage v2timMessage = V2TimMessage(elemType: elemType);
     v2timMessage.customElem = customElem;
@@ -117,11 +120,13 @@ class TIMMessageManager {
     v2timMessage.id = tempID;
     messageIDMap.addAll({tempID: v2timMessage});
 
-    V2TimMsgCreateInfoResult result = V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
+    V2TimMsgCreateInfoResult result =
+        V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
     return result;
   }
 
-  V2TimMsgCreateInfoResult createImageMessage({required String imagePath, String? imageName}) {
+  V2TimMsgCreateInfoResult createImageMessage(
+      {required String imagePath, String? imageName}) {
     V2TimImageElem imageElem = V2TimImageElem(path: imagePath);
     int elemType = MessageElemType.V2TIM_ELEM_TYPE_IMAGE;
     V2TimMessage v2timMessage = V2TimMessage(elemType: elemType);
@@ -132,13 +137,20 @@ class TIMMessageManager {
     v2timMessage.id = tempID;
     messageIDMap.addAll({tempID: v2timMessage});
 
-    V2TimMsgCreateInfoResult result = V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
+    V2TimMsgCreateInfoResult result =
+        V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
     return result;
   }
 
   V2TimMsgCreateInfoResult createVideoMessage(
-      {required String videoFilePath, required String type, required int duration, required String snapshotPath}) {
-    V2TimVideoElem videoElem = V2TimVideoElem(videoPath: videoFilePath, snapshotPath: snapshotPath, duration: duration);
+      {required String videoFilePath,
+      required String type,
+      required int duration,
+      required String snapshotPath}) {
+    V2TimVideoElem videoElem = V2TimVideoElem(
+        videoPath: videoFilePath,
+        snapshotPath: snapshotPath,
+        duration: duration);
     int elemType = MessageElemType.V2TIM_ELEM_TYPE_VIDEO;
     V2TimMessage v2timMessage = V2TimMessage(elemType: elemType);
     v2timMessage.videoElem = videoElem;
@@ -148,12 +160,15 @@ class TIMMessageManager {
     v2timMessage.id = tempID;
     messageIDMap.addAll({tempID: v2timMessage});
 
-    V2TimMsgCreateInfoResult result = V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
+    V2TimMsgCreateInfoResult result =
+        V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
     return result;
   }
 
-  V2TimMsgCreateInfoResult createSoundMessage({required String soundPath, required int duration}) {
-    V2TimSoundElem soundElem = V2TimSoundElem(path: soundPath, duration: duration);
+  V2TimMsgCreateInfoResult createSoundMessage(
+      {required String soundPath, required int duration}) {
+    V2TimSoundElem soundElem =
+        V2TimSoundElem(path: soundPath, duration: duration);
     int elemType = MessageElemType.V2TIM_ELEM_TYPE_SOUND;
     V2TimMessage v2timMessage = V2TimMessage(elemType: elemType);
     v2timMessage.soundElem = soundElem;
@@ -163,11 +178,13 @@ class TIMMessageManager {
     v2timMessage.id = tempID;
     messageIDMap.addAll({tempID: v2timMessage});
 
-    V2TimMsgCreateInfoResult result = V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
+    V2TimMsgCreateInfoResult result =
+        V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
     return result;
   }
 
-  V2TimMsgCreateInfoResult createFileMessage({required String filePath, required String fileName}) {
+  V2TimMsgCreateInfoResult createFileMessage(
+      {required String filePath, required String fileName}) {
     V2TimFileElem fileElem = V2TimFileElem(path: filePath, fileName: fileName);
     int elemType = MessageElemType.V2TIM_ELEM_TYPE_FILE;
     V2TimMessage v2timMessage = V2TimMessage(elemType: elemType);
@@ -178,11 +195,13 @@ class TIMMessageManager {
     v2timMessage.id = tempID;
     messageIDMap.addAll({tempID: v2timMessage});
 
-    V2TimMsgCreateInfoResult result = V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
+    V2TimMsgCreateInfoResult result =
+        V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
     return result;
   }
 
-  V2TimMsgCreateInfoResult createFaceMessage({required int index, required String data}) {
+  V2TimMsgCreateInfoResult createFaceMessage(
+      {required int index, required String data}) {
     V2TimFaceElem faceElem = V2TimFaceElem(index: index, data: data);
     int elemType = MessageElemType.V2TIM_ELEM_TYPE_FACE;
     V2TimMessage v2timMessage = V2TimMessage(elemType: elemType);
@@ -193,13 +212,17 @@ class TIMMessageManager {
     v2timMessage.id = tempID;
     messageIDMap.addAll({tempID: v2timMessage});
 
-    V2TimMsgCreateInfoResult result = V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
+    V2TimMsgCreateInfoResult result =
+        V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
     return result;
   }
 
   V2TimMsgCreateInfoResult createLocationMessage(
-      {required String desc, required double longitude, required double latitude}) {
-    V2TimLocationElem locationElem = V2TimLocationElem(desc: desc, longitude: longitude, latitude: latitude);
+      {required String desc,
+      required double longitude,
+      required double latitude}) {
+    V2TimLocationElem locationElem =
+        V2TimLocationElem(desc: desc, longitude: longitude, latitude: latitude);
     int elemType = MessageElemType.V2TIM_ELEM_TYPE_LOCATION;
     V2TimMessage v2timMessage = V2TimMessage(elemType: elemType);
     v2timMessage.locationElem = locationElem;
@@ -209,7 +232,8 @@ class TIMMessageManager {
     v2timMessage.id = tempID;
     messageIDMap.addAll({tempID: v2timMessage});
 
-    V2TimMsgCreateInfoResult result = V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
+    V2TimMsgCreateInfoResult result =
+        V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
     return result;
   }
 
@@ -242,7 +266,8 @@ class TIMMessageManager {
       required List<String> abstractList,
       required String compatibleText}) async {
     if (msgList == null || msgList.isEmpty) {
-      V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: msgIDList ?? []);
+      V2TimValueCallback<List<V2TimMessage>> findResult =
+          await findMessages(messageIDList: msgIDList ?? []);
       if (findResult.code != TIMErrCode.ERR_SUCC.value) {
         return V2TimValueCallback(code: findResult.code, desc: findResult.desc);
       }
@@ -250,7 +275,9 @@ class TIMMessageManager {
       msgList = findResult.data!;
       if (msgList.isEmpty) {
         return V2TimValueCallback(
-            code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'message not found', data: V2TimMsgCreateInfoResult());
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: 'message not found',
+            data: V2TimMsgCreateInfoResult());
       }
 
       for (V2TimMessage msg in msgList) {
@@ -262,7 +289,8 @@ class TIMMessageManager {
         }
 
         for (var elem in msg.elemList) {
-          if (elem is V2TIMElem && elem.elemType == MessageElemType.V2TIM_ELEM_TYPE_GROUP_TIPS) {
+          if (elem is V2TIMElem &&
+              elem.elemType == MessageElemType.V2TIM_ELEM_TYPE_GROUP_TIPS) {
             return V2TimValueCallback(
                 code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
                 desc: 'group tips message is not support',
@@ -272,10 +300,15 @@ class TIMMessageManager {
       }
     }
 
-    List<String> abstractListAdjust =
-        abstractList.take(_MAX_ABSTRACT_COUNT).map((e) => _safeSubstring(e, _MAX_ABSTRACT_LENGTH)).toList();
+    List<String> abstractListAdjust = abstractList
+        .take(_MAX_ABSTRACT_COUNT)
+        .map((e) => _safeSubstring(e, _MAX_ABSTRACT_LENGTH))
+        .toList();
     V2TimMergerElem mergerElem = V2TimMergerElem(
-        title: title, abstractList: abstractListAdjust, compatibleText: compatibleText, messageList: msgList);
+        title: title,
+        abstractList: abstractListAdjust,
+        compatibleText: compatibleText,
+        messageList: msgList);
     int elemType = MessageElemType.V2TIM_ELEM_TYPE_MERGER;
     V2TimMessage v2timMessage = V2TimMessage(elemType: elemType);
     v2timMessage.mergerElem = mergerElem;
@@ -286,7 +319,8 @@ class TIMMessageManager {
     v2timMessage.id = tempID;
     messageIDMap.addAll({tempID: v2timMessage});
 
-    V2TimMsgCreateInfoResult result = V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
+    V2TimMsgCreateInfoResult result =
+        V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
     return V2TimValueCallback<V2TimMsgCreateInfoResult>.fromObject(result);
   }
 
@@ -295,11 +329,14 @@ class TIMMessageManager {
     if (message == null) {
       if (msgID == null) {
         return V2TimValueCallback(
-            code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message and msgID are both empty");
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message and msgID are both empty");
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
-          return V2TimValueCallback(code: findResult.code, desc: findResult.desc);
+          return V2TimValueCallback(
+              code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
@@ -319,7 +356,8 @@ class TIMMessageManager {
         }
 
         for (var elem in message.elemList) {
-          if (elem is V2TIMElem && elem.elemType == MessageElemType.V2TIM_ELEM_TYPE_GROUP_TIPS) {
+          if (elem is V2TIMElem &&
+              elem.elemType == MessageElemType.V2TIM_ELEM_TYPE_GROUP_TIPS) {
             return V2TimValueCallback(
                 code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
                 desc: 'group tips message is not support',
@@ -348,7 +386,8 @@ class TIMMessageManager {
     v2timMessage.id = tempID;
     messageIDMap.addAll({tempID: v2timMessage});
 
-    V2TimMsgCreateInfoResult result = V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
+    V2TimMsgCreateInfoResult result =
+        V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
 
     return V2TimValueCallback<V2TimMsgCreateInfoResult>.fromObject(result);
   }
@@ -360,7 +399,8 @@ class TIMMessageManager {
         return V2TimMsgCreateInfoResult();
       } else {
         if (!messageIDMap.containsKey(id)) {
-          print("createTargetedGroupMessage failed, created message id is not exist");
+          print(
+              "createTargetedGroupMessage failed, created message id is not exist");
           return V2TimMsgCreateInfoResult();
         }
 
@@ -371,8 +411,10 @@ class TIMMessageManager {
 
         // 不支持群@消息
         message = messageIDMap[id]!;
-        if (message.groupAtUserList != null && message.groupAtUserList!.isNotEmpty) {
-          print("createTargetedGroupMessage failed, targeted group message does not support at message");
+        if (message.groupAtUserList != null &&
+            message.groupAtUserList!.isNotEmpty) {
+          print(
+              "createTargetedGroupMessage failed, targeted group message does not support at message");
           return V2TimMsgCreateInfoResult();
         }
       }
@@ -388,10 +430,13 @@ class TIMMessageManager {
   }
 
   V2TimMsgCreateInfoResult createAtSignedGroupMessage(
-      {V2TimMessage? message, String? createdMsgID, required List<String> atUserList}) {
+      {V2TimMessage? message,
+      String? createdMsgID,
+      required List<String> atUserList}) {
     if (message == null) {
       if (createdMsgID == null) {
-        print("createAtSignedGroupMessage failed, message and msgID are both empty");
+        print(
+            "createAtSignedGroupMessage failed, message and msgID are both empty");
         return V2TimMsgCreateInfoResult();
       } else {
         if (!messageIDMap.containsKey(createdMsgID)) {
@@ -400,15 +445,20 @@ class TIMMessageManager {
         }
 
         message = messageIDMap[createdMsgID]!;
-        if (message.groupAtUserList != null && message.groupAtUserList!.isNotEmpty) {
-          print("createAtSignedGroupMessage failed, at message does not support at message");
+        if (message.groupAtUserList != null &&
+            message.groupAtUserList!.isNotEmpty) {
+          print(
+              "createAtSignedGroupMessage failed, at message does not support at message");
           return V2TimMsgCreateInfoResult();
         }
       }
     }
 
-    message.groupAtUserList =
-        atUserList.map((item) => item == V2TimGroupAtInfo.AT_ALL_TAG ? V2TimGroupAtInfo.c_api_tag : item).toList();
+    message.groupAtUserList = atUserList
+        .map((item) => item == V2TimGroupAtInfo.AT_ALL_TAG
+            ? V2TimGroupAtInfo.c_api_tag
+            : item)
+        .toList();
     if (createdMsgID != null && createdMsgID.isNotEmpty) {
       messageIDMap[createdMsgID] = message;
     }
@@ -421,7 +471,8 @@ class TIMMessageManager {
     V2TimMessageQuoteInfo quoteInfo = V2TimMessageQuoteInfo(
       msgID: quotedMessage.msgID,
       messageTime: quotedMessage.timestamp,
-      messageSequence: quotedMessage.seq != null ? int.tryParse(quotedMessage.seq!) : null,
+      messageSequence:
+          quotedMessage.seq != null ? int.tryParse(quotedMessage.seq!) : null,
     );
     message.quoteInfo = quoteInfo;
 
@@ -432,8 +483,10 @@ class TIMMessageManager {
     required String createMessageBaseId,
     required String createMessageAppendId,
   }) {
-    if (!messageIDMap.containsKey(createMessageBaseId) || !messageIDMap.containsKey(createMessageAppendId)) {
-      print("appendMessage failed, createMessageBaseId or createMessageAppendId is not exist");
+    if (!messageIDMap.containsKey(createMessageBaseId) ||
+        !messageIDMap.containsKey(createMessageAppendId)) {
+      print(
+          "appendMessage failed, createMessageBaseId or createMessageAppendId is not exist");
       return V2TimMessage(elemType: MessageElemType.V2TIM_ELEM_TYPE_NONE);
     }
 
@@ -450,18 +503,23 @@ class TIMMessageManager {
     required List<String> atUserList,
   }) {
     V2TimTextElem textElem = V2TimTextElem(text: text);
-    V2TimMessage v2timMessage = V2TimMessage(elemType: MessageElemType.V2TIM_ELEM_TYPE_TEXT);
+    V2TimMessage v2timMessage =
+        V2TimMessage(elemType: MessageElemType.V2TIM_ELEM_TYPE_TEXT);
     v2timMessage.textElem = textElem;
     v2timMessage.elemList.add(textElem);
 
-    v2timMessage.groupAtUserList =
-        atUserList.map((item) => item == V2TimGroupAtInfo.AT_ALL_TAG ? V2TimGroupAtInfo.c_api_tag : item).toList();
+    v2timMessage.groupAtUserList = atUserList
+        .map((item) => item == V2TimGroupAtInfo.AT_ALL_TAG
+            ? V2TimGroupAtInfo.c_api_tag
+            : item)
+        .toList();
 
     String tempID = _createMessageTempID();
     v2timMessage.id = tempID;
     messageIDMap.addAll({tempID: v2timMessage});
 
-    V2TimMsgCreateInfoResult result = V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
+    V2TimMsgCreateInfoResult result =
+        V2TimMsgCreateInfoResult(id: tempID, messageInfo: v2timMessage);
     return result;
   }
 
@@ -485,20 +543,23 @@ class TIMMessageManager {
     bool? isDisableCloudMessagePostHook,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimValueCallback<V2TimMessage>(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimValueCallback<V2TimMessage>(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     // 如果传入的 message 为空，则从 messageIDMap 中获取
     if (message == null) {
       if (id == null) {
         print('sendMessage, message and id are both empty');
-        return V2TimValueCallback<V2TimMessage>.fromBool(false, 'message and id are both empty');
+        return V2TimValueCallback<V2TimMessage>.fromBool(
+            false, 'message and id are both empty');
       }
 
       message = messageIDMap[id];
       if (message == null) {
         print('sendMessage, messageIDMap cannot find message of id: $id');
-        return V2TimValueCallback<V2TimMessage>.fromBool(false, 'messageIDMap cannot find message');
+        return V2TimValueCallback<V2TimMessage>.fromBool(
+            false, 'messageIDMap cannot find message');
       }
     } else {
       id ??= message.id;
@@ -542,10 +603,12 @@ class TIMMessageManager {
       message.offlinePushInfo = offlinePushInfo;
     }
 
-    if ((receiver == null || receiver.isEmpty) && (groupID == null || groupID.isEmpty)) {
-      print('sendMessage, receiver and groupID cannot be empty at the same time');
-      return V2TimValueCallback<V2TimMessage>.fromBool(
-          false, 'sendMessage, receiver and groupID cannot be empty at the same time');
+    if ((receiver == null || receiver.isEmpty) &&
+        (groupID == null || groupID.isEmpty)) {
+      print(
+          'sendMessage, receiver and groupID cannot be empty at the same time');
+      return V2TimValueCallback<V2TimMessage>.fromBool(false,
+          'sendMessage, receiver and groupID cannot be empty at the same time');
     }
 
     String convID = "";
@@ -561,20 +624,23 @@ class TIMMessageManager {
     String userData = Tools.generateUserData('sendMessage');
     Completer<V2TimValueCallback<V2TimMessage>> completer = Completer();
     void handleApiCallback(Map jsonResult) {
-      V2TimValueCallback<V2TimMessage> callbackResult = V2TimValueCallback<V2TimMessage>.fromJson(jsonResult);
+      V2TimValueCallback<V2TimMessage> callbackResult =
+          V2TimValueCallback<V2TimMessage>.fromJson(jsonResult);
       if (callbackResult.data != null) {
         callbackResult.data!.id = id;
       }
       completer.complete(callbackResult);
     }
 
-    NativeLibraryManager.addTimApiValueCallback2Map(userData, handleApiCallback);
+    NativeLibraryManager.addTimApiValueCallback2Map(
+        userData, handleApiCallback);
 
     Pointer<Char> pConvID = Tools.string2PointerChar(convID);
-    Pointer<Char> pMsgParam = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMsgParam =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    Pointer<Char> pMessageID =
-        NativeLibraryManager.bindings.DartSendMessage(pConvID, timConvType, pMsgParam, pUserData);
+    Pointer<Char> pMessageID = NativeLibraryManager.bindings
+        .DartSendMessage(pConvID, timConvType, pMsgParam, pUserData);
     String messageIDDart = Tools.pointerChar2String(pMessageID);
     if (onSyncMsgID != null) {
       onSyncMsgID.call(messageIDDart);
@@ -592,7 +658,8 @@ class TIMMessageManager {
     });
   }
 
-  Future<V2TimValueCallback<List<V2TimMessage>>> downloadMergerMessage({V2TimMessage? message, String? msgID}) async {
+  Future<V2TimValueCallback<List<V2TimMessage>>> downloadMergerMessage(
+      {V2TimMessage? message, String? msgID}) async {
     if (!TIMManager.instance.isInitSDK()) {
       return V2TimValueCallback<List<V2TimMessage>>(
           code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
@@ -600,17 +667,22 @@ class TIMMessageManager {
 
     if (message == null) {
       if (msgID == null) {
-        return V2TimValueCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'message not found');
+        return V2TimValueCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: 'message not found');
       } else {
         V2TimValueCallback<List<V2TimMessage>> findResult =
             await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
-          return V2TimValueCallback(code: findResult.code, desc: findResult.desc);
+          return V2TimValueCallback(
+              code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
-          return V2TimValueCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'message not found');
+          return V2TimValueCallback(
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: 'message not found');
         }
 
         message = msgList[0];
@@ -622,22 +694,31 @@ class TIMMessageManager {
     void handleApiCallback(Map jsonResult) {
       V2TimValueCallback<List<V2TimMessage>> callbackResult =
           V2TimValueCallback<List<V2TimMessage>>.fromJson(jsonResult);
-      if (callbackResult.code == 0 && callbackResult.data != null && callbackResult.data!.isNotEmpty) {
-        _mergerMessageMap.addAll({for (var message in callbackResult.data!) message.msgID!: message});
+      if (callbackResult.code == 0 &&
+          callbackResult.data != null &&
+          callbackResult.data!.isNotEmpty) {
+        _mergerMessageMap.addAll({
+          for (var message in callbackResult.data!) message.msgID!: message
+        });
       }
 
       completer.complete(callbackResult);
     }
 
-    NativeLibraryManager.addTimApiValueCallback2Map(userData, handleApiCallback);
+    NativeLibraryManager.addTimApiValueCallback2Map(
+        userData, handleApiCallback);
 
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartDownloadMergerMessage(pMessage, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartDownloadMergerMessage(pMessage, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pMessage, pUserData]);
-      return V2TimValueCallback<List<V2TimMessage>>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<List<V2TimMessage>>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -652,22 +733,29 @@ class TIMMessageManager {
     bool onlineUserOnly = false,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimValueCallback<V2TimMessage>(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimValueCallback<V2TimMessage>(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
-    V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+    V2TimValueCallback<List<V2TimMessage>> findResult =
+        await findMessages(messageIDList: [msgID]);
     if (findResult.code != TIMErrCode.ERR_SUCC.value) {
       return V2TimValueCallback(code: findResult.code, desc: findResult.desc);
     }
 
     List<V2TimMessage> msgList = findResult.data!;
     if (msgList.isEmpty) {
-      return V2TimValueCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'message not found');
+      return V2TimValueCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: 'message not found');
     }
 
     V2TimMessage message = msgList[0];
-    if ((message.userID == null || message.userID!.isEmpty) && (message.groupID == null || message.groupID!.isEmpty)) {
-      return V2TimValueCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'invalid message');
+    if ((message.userID == null || message.userID!.isEmpty) &&
+        (message.groupID == null || message.groupID!.isEmpty)) {
+      return V2TimValueCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: 'invalid message');
     }
 
     message.isOnlineOnly = onlineUserOnly;
@@ -686,9 +774,11 @@ class TIMMessageManager {
     NativeLibraryManager.addTimValueCallback2Map(userData, completer);
 
     Pointer<Char> pConvID = Tools.string2PointerChar(convID);
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(msgList[0].toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(msgList[0].toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    NativeLibraryManager.bindings.DartSendMessage(pConvID, timConvType, pMessage, pUserData);
+    NativeLibraryManager.bindings
+        .DartSendMessage(pConvID, timConvType, pMessage, pUserData);
 
     return completer.future.then((value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
@@ -702,21 +792,26 @@ class TIMMessageManager {
     required ReceiveMsgOptEnum opt,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     String userData = Tools.generateUserData('setC2CReceiveMessageOpt');
     Completer<V2TimCallback> completer = Completer();
     NativeLibraryManager.addTimCallback2Map(userData, completer);
 
-    Pointer<Char> pUserIDList = Tools.string2PointerChar(json.encode(userIDList));
+    Pointer<Char> pUserIDList =
+        Tools.string2PointerChar(json.encode(userIDList));
     TIMReceiveMessageOpt messageOpt = TIMReceiveMessageOpt.fromValue(opt.index);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartSetC2CReceiveMessageOpt(pUserIDList, messageOpt, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartSetC2CReceiveMessageOpt(pUserIDList, messageOpt, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pUserIDList, pUserData]);
-      return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -726,7 +821,8 @@ class TIMMessageManager {
     });
   }
 
-  Future<V2TimValueCallback<List<V2TimReceiveMessageOptInfo>>> getC2CReceiveMessageOpt({
+  Future<V2TimValueCallback<List<V2TimReceiveMessageOptInfo>>>
+      getC2CReceiveMessageOpt({
     required List<String> userIDList,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
@@ -735,16 +831,21 @@ class TIMMessageManager {
     }
 
     String userData = Tools.generateUserData('getC2CReceiveMessageOpt');
-    Completer<V2TimValueCallback<List<V2TimReceiveMessageOptInfo>>> completer = Completer();
+    Completer<V2TimValueCallback<List<V2TimReceiveMessageOptInfo>>> completer =
+        Completer();
     NativeLibraryManager.addTimValueCallback2Map(userData, completer);
 
-    Pointer<Char> pUserIDList = Tools.string2PointerChar(json.encode(userIDList));
+    Pointer<Char> pUserIDList =
+        Tools.string2PointerChar(json.encode(userIDList));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartGetC2CReceiveMessageOpt(pUserIDList, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartGetC2CReceiveMessageOpt(pUserIDList, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pUserIDList, pUserData]);
-      return V2TimValueCallback<List<V2TimReceiveMessageOptInfo>>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<List<V2TimReceiveMessageOptInfo>>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -759,7 +860,8 @@ class TIMMessageManager {
     required ReceiveMsgOptEnum opt,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     String userData = Tools.generateUserData('setGroupReceiveMessageOpt');
@@ -769,7 +871,8 @@ class TIMMessageManager {
     Pointer<Char> pGroupID = Tools.string2PointerChar(groupID);
     TIMReceiveMessageOpt messageOpt = TIMReceiveMessageOpt.fromValue(opt.index);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    NativeLibraryManager.bindings.DartSetGroupReceiveMessageOpt(pGroupID, messageOpt, pUserData);
+    NativeLibraryManager.bindings
+        .DartSetGroupReceiveMessageOpt(pGroupID, messageOpt, pUserData);
 
     return completer.future.then((value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
@@ -784,21 +887,27 @@ class TIMMessageManager {
     required String localCustomData,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     if (message == null) {
       if (msgID == null) {
-        return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'message not found');
+        return V2TimCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: 'message not found');
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           return V2TimCallback(code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
-          return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'message not found');
+          return V2TimCallback(
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: 'message not found');
         }
 
         message = msgList[0];
@@ -810,13 +919,17 @@ class TIMMessageManager {
     NativeLibraryManager.addTimCallback2Map(userData, completer);
 
     message.localCustomData = localCustomData;
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartSetLocalCustomData(pMessage, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartSetLocalCustomData(pMessage, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pMessage, pUserData]);
-      return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -832,21 +945,27 @@ class TIMMessageManager {
     required int localCustomInt,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     if (message == null) {
       if (msgID == null) {
-        return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'message not found');
+        return V2TimCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: 'message not found');
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           return V2TimCallback(code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
-          return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'message not found');
+          return V2TimCallback(
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: 'message not found');
         }
 
         message = msgList[0];
@@ -858,13 +977,17 @@ class TIMMessageManager {
     NativeLibraryManager.addTimCallback2Map(userData, completer);
 
     message.localCustomInt = localCustomInt;
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartSetLocalCustomData(pMessage, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartSetLocalCustomData(pMessage, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pMessage, pUserData]);
-      return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -880,21 +1003,27 @@ class TIMMessageManager {
     required String data,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     if (message == null) {
       if (msgID == null) {
-        return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'message not found');
+        return V2TimCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: 'message not found');
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           return V2TimCallback(code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
-          return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'message not found');
+          return V2TimCallback(
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: 'message not found');
         }
 
         message = msgList[0];
@@ -906,7 +1035,8 @@ class TIMMessageManager {
     NativeLibraryManager.addTimCallback2Map(userData, completer);
 
     message.cloudCustomData = data;
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
     NativeLibraryManager.bindings.DartModifyMessage(pMessage, pUserData);
 
@@ -930,15 +1060,18 @@ class TIMMessageManager {
 
     if (userID.isEmpty) {
       return V2TimValueCallback<List<V2TimMessage>>(
-          code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "userID is empty");
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "userID is empty");
     }
 
     if (lastMsg == null) {
       if (lastMsgID != null) {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [lastMsgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [lastMsgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("getC2CHistoryMessageList, find last message failed");
-          return V2TimValueCallback<List<V2TimMessage>>(code: findResult.code, desc: findResult.desc);
+          return V2TimValueCallback<List<V2TimMessage>>(
+              code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
@@ -950,18 +1083,26 @@ class TIMMessageManager {
 
     String userData = Tools.generateUserData('getC2CHistoryMessageList');
     Completer<V2TimValueCallback<List<V2TimMessage>>> completer = Completer();
-    NativeLibraryManager.addTimValueCallback2Map<List<V2TimMessage>>(userData, completer);
+    NativeLibraryManager.addTimValueCallback2Map<List<V2TimMessage>>(
+        userData, completer);
 
-    V2TimMessageGetHistoryMessageListParam param = V2TimMessageGetHistoryMessageListParam(
-        count: count, getType: HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_OLDER_MSG, lastMessage: lastMsg);
-    Pointer<Char> pParam = Tools.string2PointerChar(json.encode(param.toJson()));
+    V2TimMessageGetHistoryMessageListParam param =
+        V2TimMessageGetHistoryMessageListParam(
+            count: count,
+            getType: HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_OLDER_MSG,
+            lastMessage: lastMsg);
+    Pointer<Char> pParam =
+        Tools.string2PointerChar(json.encode(param.toJson()));
     Pointer<Char> pUserID = Tools.string2PointerChar(userID);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartGetHistoryMessageList(pUserID, TIMConvType.kTIMConv_C2C, pParam, pUserData);
+    int result = NativeLibraryManager.bindings.DartGetHistoryMessageList(
+        pUserID, TIMConvType.kTIMConv_C2C, pParam, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pParam, pUserID, pUserData]);
-      return V2TimValueCallback<List<V2TimMessage>>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<List<V2TimMessage>>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -984,15 +1125,18 @@ class TIMMessageManager {
 
     if (groupID.isEmpty) {
       return V2TimValueCallback<List<V2TimMessage>>(
-          code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "groupID is empty");
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "groupID is empty");
     }
 
     if (lastMsg == null) {
       if (lastMsgID != null) {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [lastMsgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [lastMsgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("getGroupHistoryMessageList, find last message failed");
-          return V2TimValueCallback<List<V2TimMessage>>(code: findResult.code, desc: findResult.desc);
+          return V2TimValueCallback<List<V2TimMessage>>(
+              code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
@@ -1004,18 +1148,26 @@ class TIMMessageManager {
 
     String userData = Tools.generateUserData('getGroupHistoryMessageList');
     Completer<V2TimValueCallback<List<V2TimMessage>>> completer = Completer();
-    NativeLibraryManager.addTimValueCallback2Map<List<V2TimMessage>>(userData, completer);
+    NativeLibraryManager.addTimValueCallback2Map<List<V2TimMessage>>(
+        userData, completer);
 
-    V2TimMessageGetHistoryMessageListParam param = V2TimMessageGetHistoryMessageListParam(
-        count: count, getType: HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_OLDER_MSG, lastMessage: lastMsg);
-    Pointer<Char> pParam = Tools.string2PointerChar(json.encode(param.toJson()));
+    V2TimMessageGetHistoryMessageListParam param =
+        V2TimMessageGetHistoryMessageListParam(
+            count: count,
+            getType: HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_OLDER_MSG,
+            lastMessage: lastMsg);
+    Pointer<Char> pParam =
+        Tools.string2PointerChar(json.encode(param.toJson()));
     Pointer<Char> pGroupID = Tools.string2PointerChar(groupID);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartGetHistoryMessageList(pGroupID, TIMConvType.kTIMConv_Group, pParam, pUserData);
+    int result = NativeLibraryManager.bindings.DartGetHistoryMessageList(
+        pGroupID, TIMConvType.kTIMConv_Group, pParam, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pParam, pGroupID, pUserData]);
-      return V2TimValueCallback<List<V2TimMessage>>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<List<V2TimMessage>>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1043,18 +1195,22 @@ class TIMMessageManager {
           code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
-    if ((userID == null || userID.isEmpty) && (groupID == null || groupID.isEmpty)) {
+    if ((userID == null || userID.isEmpty) &&
+        (groupID == null || groupID.isEmpty)) {
       return V2TimValueCallback<List<V2TimMessage>>(
-          code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid userID and groupID");
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid userID and groupID");
     }
 
     // lastMsg 和 lastMsgID 都可以传空
     if (lastMsg == null) {
       if (lastMsgID != null) {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [lastMsgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [lastMsgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("getHistoryMessageList, find last message failed");
-          return V2TimValueCallback<List<V2TimMessage>>(code: findResult.code, desc: findResult.desc);
+          return V2TimValueCallback<List<V2TimMessage>>(
+              code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
@@ -1066,7 +1222,8 @@ class TIMMessageManager {
 
     String userData = Tools.generateUserData('getHistoryMessageList');
     Completer<V2TimValueCallback<List<V2TimMessage>>> completer = Completer();
-    NativeLibraryManager.addTimValueCallback2Map<List<V2TimMessage>>(userData, completer);
+    NativeLibraryManager.addTimValueCallback2Map<List<V2TimMessage>>(
+        userData, completer);
 
     String convID = '';
     TIMConvType convType = TIMConvType.kTIMConv_Group;
@@ -1078,23 +1235,28 @@ class TIMMessageManager {
       convType = TIMConvType.kTIMConv_C2C;
     }
 
-    V2TimMessageGetHistoryMessageListParam param = V2TimMessageGetHistoryMessageListParam(
-        count: count,
-        getType: getType,
-        lastMessage: lastMsg,
-        lastMessageSeq: lastMsgSeq,
-        timeBegin: timeBegin,
-        timePeriod: timePeriod,
-        messageTypeList: messageTypeList,
-        messageSeqList: messageSeqList);
-    Pointer<Char> pParam = Tools.string2PointerChar(json.encode(param.toJson()));
+    V2TimMessageGetHistoryMessageListParam param =
+        V2TimMessageGetHistoryMessageListParam(
+            count: count,
+            getType: getType,
+            lastMessage: lastMsg,
+            lastMessageSeq: lastMsgSeq,
+            timeBegin: timeBegin,
+            timePeriod: timePeriod,
+            messageTypeList: messageTypeList,
+            messageSeqList: messageSeqList);
+    Pointer<Char> pParam =
+        Tools.string2PointerChar(json.encode(param.toJson()));
     Pointer<Char> pConvID = Tools.string2PointerChar(convID);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartGetHistoryMessageList(pConvID, convType, pParam, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartGetHistoryMessageList(pConvID, convType, pParam, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pParam, pConvID, pUserData]);
-      return V2TimValueCallback<List<V2TimMessage>>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<List<V2TimMessage>>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1122,17 +1284,21 @@ class TIMMessageManager {
           code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
-    if ((userID == null || userID.isEmpty) && (groupID == null || groupID.isEmpty)) {
+    if ((userID == null || userID.isEmpty) &&
+        (groupID == null || groupID.isEmpty)) {
       return V2TimValueCallback<V2TimMessageListResult>(
-          code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid userID and groupID");
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid userID and groupID");
     }
 
     if (lastMsg == null) {
       if (lastMsgID != null) {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [lastMsgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [lastMsgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("getHistoryMessageListV2, find last message failed");
-          return V2TimValueCallback<V2TimMessageListResult>(code: findResult.code, desc: findResult.desc);
+          return V2TimValueCallback<V2TimMessageListResult>(
+              code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
@@ -1143,17 +1309,20 @@ class TIMMessageManager {
     }
 
     String userData = Tools.generateUserData('getHistoryMessageListV2');
-    Completer<V2TimValueCallback<V2TimMessageListResult>> completer = Completer();
+    Completer<V2TimValueCallback<V2TimMessageListResult>> completer =
+        Completer();
     void handleApiCallback(Map jsonResult) {
-      V2TimValueCallback<List<V2TimMessage>> result = V2TimValueCallback<List<V2TimMessage>>.fromJson(jsonResult);
+      V2TimValueCallback<List<V2TimMessage>> result =
+          V2TimValueCallback<List<V2TimMessage>>.fromJson(jsonResult);
       List<V2TimMessage> messageList = result.data ?? [];
-      V2TimMessageListResult adjustResult =
-          V2TimMessageListResult(isFinished: messageList.length < count, messageList: messageList);
-      completer.complete(
-          V2TimValueCallback<V2TimMessageListResult>(code: result.code, desc: result.desc, data: adjustResult));
+      V2TimMessageListResult adjustResult = V2TimMessageListResult(
+          isFinished: messageList.length < count, messageList: messageList);
+      completer.complete(V2TimValueCallback<V2TimMessageListResult>(
+          code: result.code, desc: result.desc, data: adjustResult));
     }
 
-    NativeLibraryManager.addTimApiValueCallback2Map(userData, handleApiCallback);
+    NativeLibraryManager.addTimApiValueCallback2Map(
+        userData, handleApiCallback);
 
     String convID = '';
     TIMConvType convType = TIMConvType.kTIMConv_Group;
@@ -1165,23 +1334,28 @@ class TIMMessageManager {
       convType = TIMConvType.kTIMConv_C2C;
     }
 
-    V2TimMessageGetHistoryMessageListParam param = V2TimMessageGetHistoryMessageListParam(
-        count: count,
-        getType: getType,
-        lastMessage: lastMsg,
-        lastMessageSeq: lastMsgSeq,
-        timeBegin: timeBegin,
-        timePeriod: timePeriod,
-        messageTypeList: messageTypeList,
-        messageSeqList: messageSeqList);
-    Pointer<Char> pParam = Tools.string2PointerChar(json.encode(param.toJson()));
+    V2TimMessageGetHistoryMessageListParam param =
+        V2TimMessageGetHistoryMessageListParam(
+            count: count,
+            getType: getType,
+            lastMessage: lastMsg,
+            lastMessageSeq: lastMsgSeq,
+            timeBegin: timeBegin,
+            timePeriod: timePeriod,
+            messageTypeList: messageTypeList,
+            messageSeqList: messageSeqList);
+    Pointer<Char> pParam =
+        Tools.string2PointerChar(json.encode(param.toJson()));
     Pointer<Char> pConvID = Tools.string2PointerChar(convID);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartGetHistoryMessageList(pConvID, convType, pParam, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartGetHistoryMessageList(pConvID, convType, pParam, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pParam, pConvID, pUserData]);
-      return V2TimValueCallback<V2TimMessageListResult>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<V2TimMessageListResult>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1191,16 +1365,21 @@ class TIMMessageManager {
     });
   }
 
-  Future<V2TimCallback> revokeMessage({V2TimMessage? message, String? msgID}) async {
+  Future<V2TimCallback> revokeMessage(
+      {V2TimMessage? message, String? msgID}) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     if (message == null) {
       if (msgID == null) {
-        return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+        return V2TimCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message not found");
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("revokeMessage, find message failed");
           return V2TimCallback(code: findResult.code, desc: findResult.desc);
@@ -1209,7 +1388,9 @@ class TIMMessageManager {
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
           print("revokeMessage, message not found");
-          return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+          return V2TimCallback(
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: "message not found");
         }
 
         message = msgList[0];
@@ -1220,15 +1401,21 @@ class TIMMessageManager {
     Completer<V2TimCallback> completer = Completer();
     NativeLibraryManager.addTimCallback2Map(userData, completer);
 
-    Pointer<Char> pConvID = Tools.string2PointerChar('conv_id'); // 此参数在内部无实际作用，非空即可
-    TIMConvType convType = TIMConvType.kTIMConv_Group; // 此参数在内部无实际作用，设置 kTIMConv_C2C 和 kTIMConv_Group 都可以
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pConvID =
+        Tools.string2PointerChar('conv_id'); // 此参数在内部无实际作用，非空即可
+    TIMConvType convType = TIMConvType
+        .kTIMConv_Group; // 此参数在内部无实际作用，设置 kTIMConv_C2C 和 kTIMConv_Group 都可以
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartRevokeMessage(pConvID, convType, pMessage, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartRevokeMessage(pConvID, convType, pMessage, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pConvID, pMessage, pUserData]);
-      return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid message parameter");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid message parameter");
     }
 
     return completer.future.then((value) {
@@ -1242,7 +1429,8 @@ class TIMMessageManager {
     required String userID,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     String userData = Tools.generateUserData('markC2CMessageAsRead');
@@ -1251,7 +1439,8 @@ class TIMMessageManager {
 
     Pointer<Char> pUserID = Tools.string2PointerChar(userID);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    NativeLibraryManager.bindings.DartMarkMessageAsRead(pUserID, TIMConvType.kTIMConv_C2C, pUserData);
+    NativeLibraryManager.bindings
+        .DartMarkMessageAsRead(pUserID, TIMConvType.kTIMConv_C2C, pUserData);
 
     return completer.future.then((value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
@@ -1264,7 +1453,8 @@ class TIMMessageManager {
     required String groupID,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     String userData = Tools.generateUserData('markGroupMessageAsRead');
@@ -1273,7 +1463,8 @@ class TIMMessageManager {
 
     Pointer<Char> pGroupID = Tools.string2PointerChar(groupID);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    NativeLibraryManager.bindings.DartMarkMessageAsRead(pGroupID, TIMConvType.kTIMConv_Group, pUserData);
+    NativeLibraryManager.bindings
+        .DartMarkMessageAsRead(pGroupID, TIMConvType.kTIMConv_Group, pUserData);
 
     return completer.future.then((value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
@@ -1284,7 +1475,8 @@ class TIMMessageManager {
 
   Future<V2TimCallback> markAllMessageAsRead() async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     String userData = Tools.generateUserData('markAllMessageAsRead');
@@ -1306,15 +1498,19 @@ class TIMMessageManager {
     String? msgID,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     if (message == null) {
       if (msgID == null || msgID.isEmpty) {
-        return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "msgID is empty");
+        return V2TimCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "msgID is empty");
       }
 
-      V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+      V2TimValueCallback<List<V2TimMessage>> findResult =
+          await findMessages(messageIDList: [msgID]);
       if (findResult.code != TIMErrCode.ERR_SUCC.value) {
         print("deleteMessageFromLocalStorage, find message failed");
         return V2TimCallback(code: findResult.code, desc: findResult.desc);
@@ -1323,13 +1519,17 @@ class TIMMessageManager {
       List<V2TimMessage> msgList = findResult.data!;
       if (msgList.isEmpty) {
         print("deleteMessageFromLocalStorage, message not found");
-        return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+        return V2TimCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message not found");
       }
 
       message = msgList[0];
       if ((message.userID == null || message.userID!.isEmpty) &&
           (message.groupID == null || message.groupID!.isEmpty)) {
-        return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'invalid message');
+        return V2TimCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: 'invalid message');
       }
     }
 
@@ -1350,7 +1550,8 @@ class TIMMessageManager {
       completer.complete(result);
     }
 
-    NativeLibraryManager.addTimApiValueCallback2Map(userData, handleApiCallback);
+    NativeLibraryManager.addTimApiValueCallback2Map(
+        userData, handleApiCallback);
 
     Map<String, dynamic> jsonParam = {};
     jsonParam['msg_delete_param_msg'] = message.toJson();
@@ -1359,11 +1560,15 @@ class TIMMessageManager {
     Pointer<Char> pJsonParam = Tools.string2PointerChar(json.encode(jsonParam));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
 
-    int result = NativeLibraryManager.bindings.DartDeleteMessageFromLocalStorage(pConvID, timConvType, pJsonParam, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartDeleteMessageFromLocalStorage(
+            pConvID, timConvType, pJsonParam, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pConvID, pJsonParam, pUserData]);
-      return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1373,13 +1578,16 @@ class TIMMessageManager {
     });
   }
 
-  Future<V2TimCallback> deleteMessages({List<V2TimMessage>? msgList, List<String>? msgIDs}) async {
+  Future<V2TimCallback> deleteMessages(
+      {List<V2TimMessage>? msgList, List<String>? msgIDs}) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     if (msgList == null || msgList.isEmpty) {
-      V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: msgIDs ?? []);
+      V2TimValueCallback<List<V2TimMessage>> findResult =
+          await findMessages(messageIDList: msgIDs ?? []);
       if (findResult.code != TIMErrCode.ERR_SUCC.value) {
         print("deleteMessages, find messages failed");
         return V2TimCallback(code: findResult.code, desc: findResult.desc);
@@ -1388,13 +1596,18 @@ class TIMMessageManager {
       msgList = findResult.data!;
       if (msgList.isEmpty) {
         print("deleteMessages, messages not found");
-        return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "messages not found");
+        return V2TimCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "messages not found");
       }
     }
 
     V2TimMessage message = msgList[0];
-    if ((message.userID == null || message.userID!.isEmpty) && (message.groupID == null || message.groupID!.isEmpty)) {
-      return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'invalid messages');
+    if ((message.userID == null || message.userID!.isEmpty) &&
+        (message.groupID == null || message.groupID!.isEmpty)) {
+      return V2TimCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: 'invalid messages');
     }
 
     String convID = "";
@@ -1411,9 +1624,11 @@ class TIMMessageManager {
     NativeLibraryManager.addTimCallback2Map(userData, completer);
 
     Pointer<Char> pConvID = Tools.string2PointerChar(convID);
-    Pointer<Char> pMessageList = Tools.string2PointerChar(json.encode(msgList.map((msg) => msg.toJson()).toList()));
+    Pointer<Char> pMessageList = Tools.string2PointerChar(
+        json.encode(msgList.map((msg) => msg.toJson()).toList()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    NativeLibraryManager.bindings.DartDeleteMessages(pConvID, timConvType, pMessageList, pUserData);
+    NativeLibraryManager.bindings
+        .DartDeleteMessages(pConvID, timConvType, pMessageList, pUserData);
 
     return completer.future.then((value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
@@ -1428,25 +1643,32 @@ class TIMMessageManager {
     required String sender,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimValueCallback<V2TimMessage>(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimValueCallback<V2TimMessage>(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
-    String userData = Tools.generateUserData('insertGroupMessageToLocalStorage');
+    String userData =
+        Tools.generateUserData('insertGroupMessageToLocalStorage');
     Completer<V2TimValueCallback<V2TimMessage>> completer = Completer();
-    NativeLibraryManager.addTimValueCallback2Map<V2TimMessage>(userData, completer);
+    NativeLibraryManager.addTimValueCallback2Map<V2TimMessage>(
+        userData, completer);
 
     V2TimMessage message = createCustomMessage(data: data).messageInfo!;
     message.groupID = groupID;
     message.sender = sender;
 
     Pointer<Char> pGroupID = Tools.string2PointerChar(groupID);
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartSaveMessage(pGroupID, TIMConvType.kTIMConv_Group, pMessage, pUserData);
+    int result = NativeLibraryManager.bindings.DartSaveMessage(
+        pGroupID, TIMConvType.kTIMConv_Group, pMessage, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pGroupID, pMessage, pUserData]);
-      return V2TimValueCallback<V2TimMessage>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<V2TimMessage>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1462,25 +1684,31 @@ class TIMMessageManager {
     required String sender,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimValueCallback<V2TimMessage>(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimValueCallback<V2TimMessage>(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     String userData = Tools.generateUserData('insertC2CMessageToLocalStorage');
     Completer<V2TimValueCallback<V2TimMessage>> completer = Completer();
-    NativeLibraryManager.addTimValueCallback2Map<V2TimMessage>(userData, completer);
+    NativeLibraryManager.addTimValueCallback2Map<V2TimMessage>(
+        userData, completer);
 
     V2TimMessage message = createCustomMessage(data: data).messageInfo!;
     message.userID = userID;
     message.sender = sender;
 
     Pointer<Char> pUserID = Tools.string2PointerChar(userID);
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartSaveMessage(pUserID, TIMConvType.kTIMConv_C2C, pMessage, pUserData);
+    int result = NativeLibraryManager.bindings.DartSaveMessage(
+        pUserID, TIMConvType.kTIMConv_C2C, pMessage, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pUserID, pMessage, pUserData]);
-      return V2TimValueCallback<V2TimMessage>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<V2TimMessage>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1497,17 +1725,20 @@ class TIMMessageManager {
     String? createdMsgID,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimValueCallback<V2TimMessage>(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimValueCallback<V2TimMessage>(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     if (message == null) {
       if (createdMsgID == null) {
-        return V2TimValueCallback<V2TimMessage>.fromBool(false, 'createdMsgID is empty');
+        return V2TimValueCallback<V2TimMessage>.fromBool(
+            false, 'createdMsgID is empty');
       } else {
         V2TimMessage? v2timMessage = messageIDMap[createdMsgID];
         if (v2timMessage == null) {
           print("insertGroupMessageToLocalStorageV2, message not found");
-          return V2TimValueCallback<V2TimMessage>.fromBool(false, 'message not found');
+          return V2TimValueCallback<V2TimMessage>.fromBool(
+              false, 'message not found');
         }
 
         message = v2timMessage;
@@ -1517,18 +1748,24 @@ class TIMMessageManager {
     message.groupID = groupID;
     message.sender = senderID;
 
-    String userData = Tools.generateUserData('insertGroupMessageToLocalStorageV2');
+    String userData =
+        Tools.generateUserData('insertGroupMessageToLocalStorageV2');
     Completer<V2TimValueCallback<V2TimMessage>> completer = Completer();
-    NativeLibraryManager.addTimValueCallback2Map<V2TimMessage>(userData, completer);
+    NativeLibraryManager.addTimValueCallback2Map<V2TimMessage>(
+        userData, completer);
 
     Pointer<Char> pGroupID = Tools.string2PointerChar(groupID);
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartSaveMessage(pGroupID, TIMConvType.kTIMConv_Group, pMessage, pUserData);
+    int result = NativeLibraryManager.bindings.DartSaveMessage(
+        pGroupID, TIMConvType.kTIMConv_Group, pMessage, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pGroupID, pMessage, pUserData]);
-      return V2TimValueCallback<V2TimMessage>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<V2TimMessage>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1545,17 +1782,20 @@ class TIMMessageManager {
     String? createdMsgID,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimValueCallback<V2TimMessage>(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimValueCallback<V2TimMessage>(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     if (message == null) {
       if (createdMsgID == null) {
-        return V2TimValueCallback<V2TimMessage>.fromBool(false, 'createdMsgID is empty');
+        return V2TimValueCallback<V2TimMessage>.fromBool(
+            false, 'createdMsgID is empty');
       } else {
         V2TimMessage? v2timMessage = messageIDMap[createdMsgID];
         if (v2timMessage == null) {
           print("insertGroupMessageToLocalStorageV2, message not found");
-          return V2TimValueCallback<V2TimMessage>.fromBool(false, 'message not found');
+          return V2TimValueCallback<V2TimMessage>.fromBool(
+              false, 'message not found');
         }
 
         message = v2timMessage;
@@ -1565,18 +1805,24 @@ class TIMMessageManager {
     message.userID = userID;
     message.sender = senderID;
 
-    String userData = Tools.generateUserData('insertC2CMessageToLocalStorageV2');
+    String userData =
+        Tools.generateUserData('insertC2CMessageToLocalStorageV2');
     Completer<V2TimValueCallback<V2TimMessage>> completer = Completer();
-    NativeLibraryManager.addTimValueCallback2Map<V2TimMessage>(userData, completer);
+    NativeLibraryManager.addTimValueCallback2Map<V2TimMessage>(
+        userData, completer);
 
     Pointer<Char> pUserID = Tools.string2PointerChar(userID);
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartSaveMessage(pUserID, TIMConvType.kTIMConv_C2C, pMessage, pUserData);
+    int result = NativeLibraryManager.bindings.DartSaveMessage(
+        pUserID, TIMConvType.kTIMConv_C2C, pMessage, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pUserID, pMessage, pUserData]);
-      return V2TimValueCallback<V2TimMessage>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<V2TimMessage>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1590,7 +1836,8 @@ class TIMMessageManager {
     required String userID,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     String userData = Tools.generateUserData('clearC2CHistoryMessage');
@@ -1599,7 +1846,8 @@ class TIMMessageManager {
 
     Pointer<Char> pUserID = Tools.string2PointerChar(userID);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    NativeLibraryManager.bindings.DartClearHistoryMessage(pUserID, TIMConvType.kTIMConv_C2C, pUserData);
+    NativeLibraryManager.bindings
+        .DartClearHistoryMessage(pUserID, TIMConvType.kTIMConv_C2C, pUserData);
 
     return completer.future.then((value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
@@ -1612,7 +1860,8 @@ class TIMMessageManager {
     required String groupID,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     String userData = Tools.generateUserData('clearGroupHistoryMessage');
@@ -1621,7 +1870,8 @@ class TIMMessageManager {
 
     Pointer<Char> pGroupID = Tools.string2PointerChar(groupID);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    NativeLibraryManager.bindings.DartClearHistoryMessage(pGroupID, TIMConvType.kTIMConv_Group, pUserData);
+    NativeLibraryManager.bindings.DartClearHistoryMessage(
+        pGroupID, TIMConvType.kTIMConv_Group, pUserData);
 
     return completer.future.then((value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
@@ -1639,16 +1889,22 @@ class TIMMessageManager {
     }
 
     String userData = Tools.generateUserData('searchLocalMessages');
-    Completer<V2TimValueCallback<V2TimMessageSearchResult>> completer = Completer();
-    NativeLibraryManager.addTimValueCallback2Map<V2TimMessageSearchResult>(userData, completer);
+    Completer<V2TimValueCallback<V2TimMessageSearchResult>> completer =
+        Completer();
+    NativeLibraryManager.addTimValueCallback2Map<V2TimMessageSearchResult>(
+        userData, completer);
 
-    Pointer<Char> pSearchParam = Tools.string2PointerChar(json.encode(searchParam.toJson()));
+    Pointer<Char> pSearchParam =
+        Tools.string2PointerChar(json.encode(searchParam.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartSearchLocalMessages(pSearchParam, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartSearchLocalMessages(pSearchParam, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pSearchParam, pUserData]);
-      return V2TimValueCallback<V2TimMessageSearchResult>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<V2TimMessageSearchResult>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1667,16 +1923,22 @@ class TIMMessageManager {
     }
 
     String userData = Tools.generateUserData('searchCloudMessages');
-    Completer<V2TimValueCallback<V2TimMessageSearchResult>> completer = Completer();
-    NativeLibraryManager.addTimValueCallback2Map<V2TimMessageSearchResult>(userData, completer);
+    Completer<V2TimValueCallback<V2TimMessageSearchResult>> completer =
+        Completer();
+    NativeLibraryManager.addTimValueCallback2Map<V2TimMessageSearchResult>(
+        userData, completer);
 
-    Pointer<Char> pSearchParam = Tools.string2PointerChar(json.encode(searchParam.toJson()));
+    Pointer<Char> pSearchParam =
+        Tools.string2PointerChar(json.encode(searchParam.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartSearchCloudMessages(pSearchParam, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartSearchCloudMessages(pSearchParam, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pSearchParam, pUserData]);
-      return V2TimValueCallback<V2TimMessageSearchResult>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<V2TimMessageSearchResult>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1691,11 +1953,13 @@ class TIMMessageManager {
     List<String>? messageIDList,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     if (messageList == null || messageList.isEmpty) {
-      V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: messageIDList ?? []);
+      V2TimValueCallback<List<V2TimMessage>> findResult =
+          await findMessages(messageIDList: messageIDList ?? []);
       if (findResult.code != TIMErrCode.ERR_SUCC.value) {
         print("sendMessageReadReceipts, find messages failed");
         return V2TimCallback(code: findResult.code, desc: findResult.desc);
@@ -1704,7 +1968,9 @@ class TIMMessageManager {
       messageList = findResult.data!;
       if (messageList.isEmpty) {
         print("sendMessageReadReceipts, messages not found");
-        return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "messages not found");
+        return V2TimCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "messages not found");
       }
     }
 
@@ -1712,13 +1978,17 @@ class TIMMessageManager {
     Completer<V2TimCallback> completer = Completer();
     NativeLibraryManager.addTimCallback2Map(userData, completer);
 
-    Pointer<Char> pJsonParam = Tools.string2PointerChar(json.encode(messageList.map((e) => e.toJson()).toList()));
+    Pointer<Char> pJsonParam = Tools.string2PointerChar(
+        json.encode(messageList.map((e) => e.toJson()).toList()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartSendMessageReadReceipts(pJsonParam, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartSendMessageReadReceipts(pJsonParam, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pJsonParam, pUserData]);
-      return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1738,32 +2008,39 @@ class TIMMessageManager {
     }
 
     if (messageList == null || messageList.isEmpty) {
-      V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: messageIDList ?? []);
+      V2TimValueCallback<List<V2TimMessage>> findResult =
+          await findMessages(messageIDList: messageIDList ?? []);
       if (findResult.code != TIMErrCode.ERR_SUCC.value) {
         print("getMessageReadReceipts, find messages failed");
-        return V2TimValueCallback<List<V2TimMessageReceipt>>(code: findResult.code, desc: findResult.desc);
+        return V2TimValueCallback<List<V2TimMessageReceipt>>(
+            code: findResult.code, desc: findResult.desc);
       }
 
       messageList = findResult.data!;
       if (messageList.isEmpty) {
         print("getMessageReadReceipts, messages not found");
         return V2TimValueCallback<List<V2TimMessageReceipt>>(
-            code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "messages not found");
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "messages not found");
       }
     }
 
     String userData = Tools.generateUserData('getMessageReadReceipts');
-    Completer<V2TimValueCallback<List<V2TimMessageReceipt>>> completer = Completer();
+    Completer<V2TimValueCallback<List<V2TimMessageReceipt>>> completer =
+        Completer();
     NativeLibraryManager.addTimValueCallback2Map(userData, completer);
 
-    Pointer<Char> pJsonParam = Tools.string2PointerChar(json.encode(messageList.map((e) => e.toJson()).toList()));
+    Pointer<Char> pJsonParam = Tools.string2PointerChar(
+        json.encode(messageList.map((e) => e.toJson()).toList()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartGetMessageReadReceipts(pJsonParam, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartGetMessageReadReceipts(pJsonParam, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pJsonParam, pUserData]);
       return V2TimValueCallback<List<V2TimMessageReceipt>>(
-          code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid messageList");
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid messageList");
     }
 
     return completer.future.then((value) {
@@ -1773,7 +2050,8 @@ class TIMMessageManager {
     });
   }
 
-  Future<V2TimValueCallback<V2TimGroupMessageReadMemberList>> getGroupMessageReadMemberList({
+  Future<V2TimValueCallback<V2TimGroupMessageReadMemberList>>
+      getGroupMessageReadMemberList({
     V2TimMessage? message,
     String? messageID,
     required GetGroupMessageReadMemberListFilter filter,
@@ -1788,19 +2066,23 @@ class TIMMessageManager {
     if (message == null) {
       if (messageID == null) {
         return V2TimValueCallback<V2TimGroupMessageReadMemberList>(
-            code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message and messageID are both empty");
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message and messageID are both empty");
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [messageID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [messageID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("getGroupMessageReadMemberList, find message failed");
-          return V2TimValueCallback<V2TimGroupMessageReadMemberList>(code: findResult.code, desc: findResult.desc);
+          return V2TimValueCallback<V2TimGroupMessageReadMemberList>(
+              code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
           print("getGroupMessageReadMemberList, message not found");
           return V2TimValueCallback<V2TimGroupMessageReadMemberList>(
-              code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: "message not found");
         }
 
         message = msgList[0];
@@ -1808,22 +2090,31 @@ class TIMMessageManager {
     }
 
     String userData = Tools.generateUserData('getGroupMessageReadMemberList');
-    Completer<V2TimValueCallback<V2TimGroupMessageReadMemberList>> completer = Completer();
+    Completer<V2TimValueCallback<V2TimGroupMessageReadMemberList>> completer =
+        Completer();
     NativeLibraryManager.addTimValueCallback2Map(userData, completer);
 
-    TIMGroupMessageReadMembersFilter cFilter =
-        TIMGroupMessageReadMembersFilter.TIM_GROUP_MESSAGE_READ_MEMBERS_FILTER_READ;
-    if (filter == GetGroupMessageReadMemberListFilter.V2TIM_GROUP_MESSAGE_READ_MEMBERS_FILTER_UNREAD) {
-      cFilter = TIMGroupMessageReadMembersFilter.TIM_GROUP_MESSAGE_READ_MEMBERS_FILTER_UNREAD;
+    TIMGroupMessageReadMembersFilter cFilter = TIMGroupMessageReadMembersFilter
+        .TIM_GROUP_MESSAGE_READ_MEMBERS_FILTER_READ;
+    if (filter ==
+        GetGroupMessageReadMemberListFilter
+            .V2TIM_GROUP_MESSAGE_READ_MEMBERS_FILTER_UNREAD) {
+      cFilter = TIMGroupMessageReadMembersFilter
+          .TIM_GROUP_MESSAGE_READ_MEMBERS_FILTER_UNREAD;
     }
 
-    Pointer<Char> pJsonParam = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pJsonParam =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartGetGroupMessageReadMemberList(pJsonParam, cFilter, nextSeq, count, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartGetGroupMessageReadMemberList(
+            pJsonParam, cFilter, nextSeq, count, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pJsonParam, pUserData]);
-      return V2TimValueCallback<V2TimGroupMessageReadMemberList>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<V2TimGroupMessageReadMemberList>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1852,17 +2143,22 @@ class TIMMessageManager {
     }
 
     if (isFindAll) {
-      return V2TimValueCallback<List<V2TimMessage>>(code: TIMErrCode.ERR_SUCC.value, desc: "OK", data: messageResult);
+      return V2TimValueCallback<List<V2TimMessage>>(
+          code: TIMErrCode.ERR_SUCC.value, desc: "OK", data: messageResult);
     }
 
     String userData = Tools.generateUserData('findMessages');
     Completer<V2TimValueCallback<List<V2TimMessage>>> completer = Completer();
     void handleApiCallback(Map jsonResult) {
-      V2TimValueCallback<List<V2TimMessage>> result = V2TimValueCallback<List<V2TimMessage>>.fromJson(jsonResult);
+      V2TimValueCallback<List<V2TimMessage>> result =
+          V2TimValueCallback<List<V2TimMessage>>.fromJson(jsonResult);
       if (result.code != TIMErrCode.ERR_SUCC.value) {
         List<V2TimMessage> messageList = result.data ?? [];
-        Set<String> foundMessageIds = messageList.map((message) => message.msgID!).toSet();
-        List<String> missingMessageIDs = messageIDList.where((msg) => !foundMessageIds.contains(msg)).toList();
+        Set<String> foundMessageIds =
+            messageList.map((message) => message.msgID!).toSet();
+        List<String> missingMessageIDs = messageIDList
+            .where((msg) => !foundMessageIds.contains(msg))
+            .toList();
 
         for (String messageID in missingMessageIDs) {
           if (_mergerMessageMap.containsKey(messageID)) {
@@ -1870,16 +2166,18 @@ class TIMMessageManager {
           }
         }
 
-        completer
-            .complete(V2TimValueCallback<List<V2TimMessage>>(code: result.code, desc: result.desc, data: messageList));
+        completer.complete(V2TimValueCallback<List<V2TimMessage>>(
+            code: result.code, desc: result.desc, data: messageList));
       } else {
         completer.complete(result);
       }
     }
 
-    NativeLibraryManager.addTimApiValueCallback2Map(userData, handleApiCallback);
+    NativeLibraryManager.addTimApiValueCallback2Map(
+        userData, handleApiCallback);
 
-    Pointer<Char> pJsonParam = Tools.string2PointerChar(json.encode(messageIDList));
+    Pointer<Char> pJsonParam =
+        Tools.string2PointerChar(json.encode(messageIDList));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
     NativeLibraryManager.bindings.DartFindMessages(pJsonParam, pUserData);
 
@@ -1890,7 +2188,8 @@ class TIMMessageManager {
     });
   }
 
-  Future<V2TimValueCallback<List<V2TimMessageExtensionResult>>> setMessageExtensions({
+  Future<V2TimValueCallback<List<V2TimMessageExtensionResult>>>
+      setMessageExtensions({
     V2TimMessage? message,
     String? msgID,
     required List<V2TimMessageExtension> extensions,
@@ -1903,19 +2202,23 @@ class TIMMessageManager {
     if (message == null) {
       if (msgID == null) {
         return V2TimValueCallback<List<V2TimMessageExtensionResult>>(
-            code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message and msgID are both empty");
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message and msgID are both empty");
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("setMessageExtensions, find message failed");
-          return V2TimValueCallback<List<V2TimMessageExtensionResult>>(code: findResult.code, desc: findResult.desc);
+          return V2TimValueCallback<List<V2TimMessageExtensionResult>>(
+              code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
           print("setMessageExtensions, message not found");
           return V2TimValueCallback<List<V2TimMessageExtensionResult>>(
-              code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: "message not found");
         }
 
         message = msgList[0];
@@ -1923,18 +2226,25 @@ class TIMMessageManager {
     }
 
     String userData = Tools.generateUserData('setMessageExtensions');
-    Completer<V2TimValueCallback<List<V2TimMessageExtensionResult>>> completer = Completer();
-    NativeLibraryManager.addTimValueCallback2Map<List<V2TimMessageExtensionResult>>(userData, completer);
+    Completer<V2TimValueCallback<List<V2TimMessageExtensionResult>>> completer =
+        Completer();
+    NativeLibraryManager.addTimValueCallback2Map<
+        List<V2TimMessageExtensionResult>>(userData, completer);
 
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
-    Pointer<Char> pExtensions = Tools.string2PointerChar(json.encode(extensions.map((e) => e.toJson()).toList()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pExtensions = Tools.string2PointerChar(
+        json.encode(extensions.map((e) => e.toJson()).toList()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
 
-    int result = NativeLibraryManager.bindings.DartSetMessageExtensions(pMessage, pExtensions, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartSetMessageExtensions(pMessage, pExtensions, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pMessage, pExtensions, pUserData]);
-      return V2TimValueCallback<List<V2TimMessageExtensionResult>>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<List<V2TimMessageExtensionResult>>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1956,19 +2266,23 @@ class TIMMessageManager {
     if (message == null) {
       if (msgID == null) {
         return V2TimValueCallback<List<V2TimMessageExtension>>(
-            code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message and msgID are both empty");
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message and msgID are both empty");
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("getMessageExtensions, find message failed");
-          return V2TimValueCallback<List<V2TimMessageExtension>>(code: findResult.code, desc: findResult.desc);
+          return V2TimValueCallback<List<V2TimMessageExtension>>(
+              code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
           print("getMessageExtensions, message not found");
           return V2TimValueCallback<List<V2TimMessageExtension>>(
-              code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: "message not found");
         }
 
         message = msgList[0];
@@ -1976,17 +2290,23 @@ class TIMMessageManager {
     }
 
     String userData = Tools.generateUserData('getMessageExtensions');
-    Completer<V2TimValueCallback<List<V2TimMessageExtension>>> completer = Completer();
-    NativeLibraryManager.addTimValueCallback2Map<List<V2TimMessageExtension>>(userData, completer);
+    Completer<V2TimValueCallback<List<V2TimMessageExtension>>> completer =
+        Completer();
+    NativeLibraryManager.addTimValueCallback2Map<List<V2TimMessageExtension>>(
+        userData, completer);
 
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
 
-    int result = NativeLibraryManager.bindings.DartGetMessageExtensions(pMessage, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartGetMessageExtensions(pMessage, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pMessage, pUserData]);
-      return V2TimValueCallback<List<V2TimMessageExtension>>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<List<V2TimMessageExtension>>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -1996,7 +2316,8 @@ class TIMMessageManager {
     });
   }
 
-  Future<V2TimValueCallback<List<V2TimMessageExtensionResult>>> deleteMessageExtensions({
+  Future<V2TimValueCallback<List<V2TimMessageExtensionResult>>>
+      deleteMessageExtensions({
     V2TimMessage? message,
     String? msgID,
     required List<String> keys,
@@ -2009,19 +2330,23 @@ class TIMMessageManager {
     if (message == null) {
       if (msgID == null) {
         return V2TimValueCallback<List<V2TimMessageExtensionResult>>(
-            code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message and msgID are both empty");
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message and msgID are both empty");
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("deleteMessageExtensions, find message failed");
-          return V2TimValueCallback<List<V2TimMessageExtensionResult>>(code: findResult.code, desc: findResult.desc);
+          return V2TimValueCallback<List<V2TimMessageExtensionResult>>(
+              code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
           print("deleteMessageExtensions, message not found");
           return V2TimValueCallback<List<V2TimMessageExtensionResult>>(
-              code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: "message not found");
         }
 
         message = msgList[0];
@@ -2029,18 +2354,24 @@ class TIMMessageManager {
     }
 
     String userData = Tools.generateUserData('deleteMessageExtensions');
-    Completer<V2TimValueCallback<List<V2TimMessageExtensionResult>>> completer = Completer();
-    NativeLibraryManager.addTimValueCallback2Map<List<V2TimMessageExtensionResult>>(userData, completer);
+    Completer<V2TimValueCallback<List<V2TimMessageExtensionResult>>> completer =
+        Completer();
+    NativeLibraryManager.addTimValueCallback2Map<
+        List<V2TimMessageExtensionResult>>(userData, completer);
 
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Char> pKeys = Tools.string2PointerChar(json.encode(keys));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
 
-    int result = NativeLibraryManager.bindings.DartDeleteMessageExtensions(pMessage, pKeys, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartDeleteMessageExtensions(pMessage, pKeys, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pMessage, pKeys, pUserData]);
-      return V2TimValueCallback<List<V2TimMessageExtensionResult>>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<List<V2TimMessageExtensionResult>>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -2059,24 +2390,32 @@ class TIMMessageManager {
     }
 
     String userData = Tools.generateUserData('modifyMessage');
-    Completer<V2TimValueCallback<V2TimMessageChangeInfo>> completer = Completer();
+    Completer<V2TimValueCallback<V2TimMessageChangeInfo>> completer =
+        Completer();
     void handleApiCallback(Map jsonResult) {
-      V2TimValueCallback<V2TimMessage> result = V2TimValueCallback<V2TimMessage>.fromJson(jsonResult);
-      V2TimMessageChangeInfo changeInfo =
-          V2TimMessageChangeInfo(code: result.code, desc: result.desc, message: result.data);
+      V2TimValueCallback<V2TimMessage> result =
+          V2TimValueCallback<V2TimMessage>.fromJson(jsonResult);
+      V2TimMessageChangeInfo changeInfo = V2TimMessageChangeInfo(
+          code: result.code, desc: result.desc, message: result.data);
 
-      completer.complete(V2TimValueCallback<V2TimMessageChangeInfo>.fromObject(changeInfo));
+      completer.complete(
+          V2TimValueCallback<V2TimMessageChangeInfo>.fromObject(changeInfo));
     }
 
-    NativeLibraryManager.addTimApiValueCallback2Map(userData, handleApiCallback);
+    NativeLibraryManager.addTimApiValueCallback2Map(
+        userData, handleApiCallback);
 
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartModifyMessage(pMessage, pUserData);
+    int result =
+        NativeLibraryManager.bindings.DartModifyMessage(pMessage, pUserData);
     if (result != TIMErrCode.ERR_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pMessage, pUserData]);
-      return V2TimValueCallback<V2TimMessageChangeInfo>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<V2TimMessageChangeInfo>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -2098,19 +2437,23 @@ class TIMMessageManager {
     if (message == null) {
       if (msgID == null) {
         return V2TimValueCallback<V2TimMessageOnlineUrl>(
-            code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message and msgID are both empty");
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message and msgID are both empty");
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("deleteMessageExtensions, find message failed");
-          return V2TimValueCallback<V2TimMessageOnlineUrl>(code: findResult.code, desc: findResult.desc);
+          return V2TimValueCallback<V2TimMessageOnlineUrl>(
+              code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
           print("deleteMessageExtensions, message not found");
           return V2TimValueCallback<V2TimMessageOnlineUrl>(
-              code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: "message not found");
         }
 
         message = msgList[0];
@@ -2157,7 +2500,9 @@ class TIMMessageManager {
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_VIDEO:
           var videoInstance = downloadParam.downloadElement as V2TimVideoElem?;
-          filePath = isSnapshot ? 'video_${videoInstance?.snapshotUUID}' : 'video_${videoInstance?.UUID}';
+          filePath = isSnapshot
+              ? 'video_${videoInstance?.snapshotUUID}'
+              : 'video_${videoInstance?.UUID}';
 
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_SOUND:
@@ -2176,7 +2521,8 @@ class TIMMessageManager {
           break;
       }
     } else if (Platform.isIOS) {
-      String filePathPrefix = '${TIMManager.instance.getSDKAppID()}/${TIMManager.instance.getLoginUser()}';
+      String filePathPrefix =
+          '${TIMManager.instance.getSDKAppID()}/${TIMManager.instance.getLoginUser()}';
       switch (message.elemType) {
         case MessageElemType.V2TIM_ELEM_TYPE_IMAGE:
           var imageInstance = downloadParam.downloadElement as V2TimImage?;
@@ -2186,7 +2532,8 @@ class TIMMessageManager {
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_VIDEO:
           var videoInstance = downloadParam.downloadElement as V2TimVideoElem?;
-          filePath = '$filePathPrefix/video_${isSnapshot ? videoInstance?.snapshotUUID : videoInstance?.UUID}';
+          filePath =
+              '$filePathPrefix/video_${isSnapshot ? videoInstance?.snapshotUUID : videoInstance?.UUID}';
 
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_SOUND:
@@ -2196,14 +2543,16 @@ class TIMMessageManager {
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_FILE:
           var fileInstance = downloadParam.downloadElement as V2TimFileElem?;
-          filePath = '$filePathPrefix/${fileInstance?.UUID}/${fileInstance?.fileName ?? ""}';
+          filePath =
+              '$filePathPrefix/${fileInstance?.UUID}/${fileInstance?.fileName ?? ""}';
 
           break;
         default:
           break;
       }
     } else if (Platform.isMacOS) {
-      String filePathPrefix = '${TIMManager.instance.getSDKAppID()}/${TIMManager.instance.getLoginUser()}';
+      String filePathPrefix =
+          '${TIMManager.instance.getSDKAppID()}/${TIMManager.instance.getLoginUser()}';
       switch (message.elemType) {
         case MessageElemType.V2TIM_ELEM_TYPE_IMAGE:
           var imageInstance = downloadParam.downloadElement as V2TimImage?;
@@ -2213,7 +2562,8 @@ class TIMMessageManager {
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_VIDEO:
           var videoInstance = downloadParam.downloadElement as V2TimVideoElem?;
-          filePath = '$filePathPrefix/video_${isSnapshot ? videoInstance?.snapshotUUID : videoInstance?.UUID}';
+          filePath =
+              '$filePathPrefix/video_${isSnapshot ? videoInstance?.snapshotUUID : videoInstance?.UUID}';
 
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_SOUND:
@@ -2223,7 +2573,8 @@ class TIMMessageManager {
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_FILE:
           var fileInstance = downloadParam.downloadElement as V2TimFileElem?;
-          filePath = '$filePathPrefix/${fileInstance?.UUID}/${fileInstance?.fileName ?? ""}';
+          filePath =
+              '$filePathPrefix/${fileInstance?.UUID}/${fileInstance?.fileName ?? ""}';
 
           break;
         default:
@@ -2241,7 +2592,8 @@ class TIMMessageManager {
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_VIDEO:
           var videoInstance = downloadParam.downloadElement as V2TimVideoElem?;
-          filePath = '$filePathPrefix/video_${isSnapshot ? videoInstance?.snapshotUUID : videoInstance?.UUID}';
+          filePath =
+              '$filePathPrefix/video_${isSnapshot ? videoInstance?.snapshotUUID : videoInstance?.UUID}';
 
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_SOUND:
@@ -2251,7 +2603,8 @@ class TIMMessageManager {
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_FILE:
           var fileInstance = downloadParam.downloadElement as V2TimFileElem?;
-          filePath = '$filePathPrefix/${fileInstance?.UUID}/${fileInstance?.fileName}';
+          filePath =
+              '$filePathPrefix/${fileInstance?.UUID}/${fileInstance?.fileName}';
 
           break;
         default:
@@ -2266,7 +2619,9 @@ class TIMMessageManager {
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_VIDEO:
           var videoInstance = downloadParam.downloadElement as V2TimVideoElem?;
-          filePath = isSnapshot ? 'video_${videoInstance?.snapshotUUID}' : 'video_${videoInstance?.UUID}';
+          filePath = isSnapshot
+              ? 'video_${videoInstance?.snapshotUUID}'
+              : 'video_${videoInstance?.UUID}';
 
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_SOUND:
@@ -2276,7 +2631,8 @@ class TIMMessageManager {
           break;
         case MessageElemType.V2TIM_ELEM_TYPE_FILE:
           var fileInstance = downloadParam.downloadElement as V2TimFileElem?;
-          filePath = 'file_${Uri.encodeComponent(fileInstance?.fileName ?? "")}';
+          filePath =
+              'file_${Uri.encodeComponent(fileInstance?.fileName ?? "")}';
 
           break;
         default:
@@ -2296,20 +2652,27 @@ class TIMMessageManager {
     void Function(V2TimMessage message)? onDownloadFinished,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     final downloadKey = '$msgID-$imageType-$isSnapshot';
     if (_downloadingMessageSet.contains(downloadKey)) {
-      print("message ID: $msgID, imageType: $imageType, isSnapshot: $isSnapshot is downloading");
-      return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'message is downloading');
+      print(
+          "message ID: $msgID, imageType: $imageType, isSnapshot: $isSnapshot is downloading");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: 'message is downloading');
     }
 
     if (message == null) {
       if (msgID == null) {
-        return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: 'message and msgID are both empty');
+        return V2TimCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: 'message and msgID are both empty');
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("downloadMessage, find message failed");
           return V2TimCallback(code: findResult.code, desc: findResult.desc);
@@ -2318,7 +2681,9 @@ class TIMMessageManager {
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
           print("downloadMessage, message not found");
-          return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+          return V2TimCallback(
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: "message not found");
         }
 
         message = msgList[0];
@@ -2334,35 +2699,54 @@ class TIMMessageManager {
       MessageElemType.V2TIM_ELEM_TYPE_FILE
     }.contains(message.elemType)) {
       print("downloadMessage, message does not support downloading");
-      return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message does not support downloading");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "message does not support downloading");
     }
 
-    V2TimMessageDownloadElemParam downloadParam =
-        V2TimMessageDownloadElemParam(message: message, imageType: imageType, isSnapshot: isSnapshot);
+    V2TimMessageDownloadElemParam downloadParam = V2TimMessageDownloadElemParam(
+        message: message, imageType: imageType, isSnapshot: isSnapshot);
     if (downloadParam.downloadUrl.isEmpty || downloadParam.fileUUID.isEmpty) {
       print("downloadMessage, message missing necessary download info");
       return V2TimCallback(
-          code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message missing necessary download info");
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "message missing necessary download info");
     }
 
     String adjustDownloadPath = downloadPath ??
         _getDefaultCachePath(
-            message: message, imageType: imageType, isSnapshot: isSnapshot, downloadParam: downloadParam);
+            message: message,
+            imageType: imageType,
+            isSnapshot: isSnapshot,
+            downloadParam: downloadParam);
     if (File(adjustDownloadPath).existsSync()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SUCC.value, desc: "file: $adjustDownloadPath already exists!");
+      _applyDownloadedLocalPath(
+        message: message,
+        imageType: imageType,
+        isSnapshot: isSnapshot,
+        path: adjustDownloadPath,
+      );
+      onDownloadFinished?.call(message);
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SUCC.value,
+          desc: "file: $adjustDownloadPath already exists!");
     }
 
     String userData = Tools.generateUserData('downloadMessage');
     Completer<V2TimCallback> completer = Completer();
     void handleApiCallback(Map jsonResult) {
-      V2TimValueCallback<dynamic> result = V2TimValueCallback<dynamic>.fromJson(jsonResult);
+      V2TimValueCallback<dynamic> result =
+          V2TimValueCallback<dynamic>.fromJson(jsonResult);
       if (result.desc == 'downloading') {
         Map<String, dynamic> processInfo = result.data ?? {};
         if (processInfo.isNotEmpty) {
-          int currentSize = processInfo['msg_download_elem_result_current_size'] ?? 0;
-          int totalSize = processInfo['msg_download_elem_result_total_size'] ?? 0;
+          int currentSize =
+              processInfo['msg_download_elem_result_current_size'] ?? 0;
+          int totalSize =
+              processInfo['msg_download_elem_result_total_size'] ?? 0;
 
-          V2TimMessageDownloadProgress downloadProgress = V2TimMessageDownloadProgress(
+          V2TimMessageDownloadProgress downloadProgress =
+              V2TimMessageDownloadProgress(
             isFinish: currentSize > 0 && currentSize == totalSize,
             isError: false,
             msgID: msgID!,
@@ -2376,42 +2760,19 @@ class TIMMessageManager {
           );
 
           // 下载进度回调
-          _advancedMessageListener.onMessageDownloadProgressCallback(downloadProgress);
+          _advancedMessageListener
+              .onMessageDownloadProgressCallback(downloadProgress);
         }
       } else {
-        // 下载完成回调，更新本地路径，方便调用者直接使用 message 对象刷新界面
-        if (onDownloadFinished != null) {
-          if (message!.elemType == MessageElemType.V2TIM_ELEM_TYPE_IMAGE) {
-            for (V2TimImage? image in message.imageElem?.imageList ?? []) {
-              if (image == null) {
-                continue;
-              }
-
-              if (imageType == V2TIM_IMAGE_TYPE.V2TIM_IMAGE_TYPE_ORIGIN ||
-                  imageType == V2TIM_IMAGE_TYPE.V2TIM_IMAGE_TYPE_THUMB ||
-                  imageType == V2TIM_IMAGE_TYPE.V2TIM_IMAGE_TYPE_LARGE) {
-                image.localUrl = adjustDownloadPath;
-                break;
-              } else {
-                print("downloadMessage, imageType: $imageType error");
-                break;
-              }
-            }
-          } else if (message.elemType == MessageElemType.V2TIM_ELEM_TYPE_VIDEO) {
-            if (isSnapshot) {
-              message.videoElem?.localSnapshotUrl = adjustDownloadPath;
-            } else {
-              message.videoElem?.localVideoUrl = adjustDownloadPath;
-            }
-          } else if (message.elemType == MessageElemType.V2TIM_ELEM_TYPE_SOUND) {
-            message.soundElem?.localUrl = adjustDownloadPath;
-          } else if (message.elemType == MessageElemType.V2TIM_ELEM_TYPE_FILE) {
-            message.fileElem?.localUrl = adjustDownloadPath;
-          } else {
-            print("downloadMessage, message.elemType: ${message.elemType} error");
-          }
-
-          onDownloadFinished(message);
+        // 只在成功时按资源类型精确回写，避免 THUMB 路径污染原图条目。
+        if (result.code == TIMErrCode.ERR_SUCC.value) {
+          _applyDownloadedLocalPath(
+            message: message!,
+            imageType: imageType,
+            isSnapshot: isSnapshot,
+            path: adjustDownloadPath,
+          );
+          onDownloadFinished?.call(message);
         }
 
         // 下载完成回调
@@ -2421,18 +2782,24 @@ class TIMMessageManager {
       }
     }
 
-    NativeLibraryManager.addTimApiValueCallback2Map(userData, handleApiCallback);
+    NativeLibraryManager.addTimApiValueCallback2Map(
+        userData, handleApiCallback);
 
     _downloadingMessageSet.add(downloadKey);
 
-    Pointer<Char> pDownloadParam = Tools.string2PointerChar(json.encode(downloadParam.toJson()));
+    Pointer<Char> pDownloadParam =
+        Tools.string2PointerChar(json.encode(downloadParam.toJson()));
     Pointer<Char> pDownloadPath = Tools.string2PointerChar(adjustDownloadPath);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartDownloadElemToPath(pDownloadParam, pDownloadPath, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartDownloadElemToPath(pDownloadParam, pDownloadPath, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
+      _downloadingMessageSet.remove(downloadKey);
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pDownloadParam, pDownloadPath, pUserData]);
-      return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -2440,6 +2807,34 @@ class TIMMessageManager {
       Tools.freePointers([pDownloadParam, pDownloadPath, pUserData]);
       return value;
     });
+  }
+
+  void _applyDownloadedLocalPath({
+    required V2TimMessage message,
+    required int imageType,
+    required bool isSnapshot,
+    required String path,
+  }) {
+    if (message.elemType == MessageElemType.V2TIM_ELEM_TYPE_IMAGE) {
+      for (final image in message.imageElem?.imageList ?? <V2TimImage?>[]) {
+        if (image?.type == imageType) {
+          image!.localUrl = path;
+          return;
+        }
+      }
+      return;
+    }
+    if (message.elemType == MessageElemType.V2TIM_ELEM_TYPE_VIDEO) {
+      if (isSnapshot) {
+        message.videoElem?.localSnapshotUrl = path;
+      } else {
+        message.videoElem?.localVideoUrl = path;
+      }
+    } else if (message.elemType == MessageElemType.V2TIM_ELEM_TYPE_SOUND) {
+      message.soundElem?.localUrl = path;
+    } else if (message.elemType == MessageElemType.V2TIM_ELEM_TYPE_FILE) {
+      message.fileElem?.localUrl = path;
+    }
   }
 
   Future<V2TimValueCallback<Map<String, String>>> translateText({
@@ -2455,26 +2850,33 @@ class TIMMessageManager {
     String userData = Tools.generateUserData('translateText');
     Completer<V2TimValueCallback<Map<String, String>>> completer = Completer();
     void handleApiCallback(Map jsonResult) {
-      V2TimValueCallback<List<dynamic>> callbackResult = V2TimValueCallback<List<dynamic>>.fromJson(jsonResult);
-      List<Map<String, dynamic>> resultList = callbackResult.data?.whereType<Map<String, dynamic>>().toList() ?? [];
-      Map<String, String> result =
-          Tools.jsonList2Map<String>(resultList, 'msg_translate_text_source_text', 'msg_translate_text_target_text');
+      V2TimValueCallback<List<dynamic>> callbackResult =
+          V2TimValueCallback<List<dynamic>>.fromJson(jsonResult);
+      List<Map<String, dynamic>> resultList =
+          callbackResult.data?.whereType<Map<String, dynamic>>().toList() ?? [];
+      Map<String, String> result = Tools.jsonList2Map<String>(resultList,
+          'msg_translate_text_source_text', 'msg_translate_text_target_text');
 
-      completer.complete(
-          V2TimValueCallback<Map<String, String>>(code: callbackResult.code, desc: callbackResult.desc, data: result));
+      completer.complete(V2TimValueCallback<Map<String, String>>(
+          code: callbackResult.code, desc: callbackResult.desc, data: result));
     }
 
-    NativeLibraryManager.addTimApiValueCallback2Map(userData, handleApiCallback);
+    NativeLibraryManager.addTimApiValueCallback2Map(
+        userData, handleApiCallback);
 
     Pointer<Char> pTexts = Tools.string2PointerChar(json.encode(texts));
-    Pointer<Char> pSourceLanguage = Tools.string2PointerChar(sourceLanguage ?? '');
+    Pointer<Char> pSourceLanguage =
+        Tools.string2PointerChar(sourceLanguage ?? '');
     Pointer<Char> pTargetLanguage = Tools.string2PointerChar(targetLanguage);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartTranslateText(pTexts, pSourceLanguage, pTargetLanguage, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartTranslateText(pTexts, pSourceLanguage, pTargetLanguage, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pTexts, pSourceLanguage, pTargetLanguage, pUserData]);
-      return V2TimValueCallback<Map<String, String>>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<Map<String, String>>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -2492,7 +2894,8 @@ class TIMMessageManager {
     required int duration,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     String userData = Tools.generateUserData('setAllReceiveMessageOpt');
@@ -2501,7 +2904,12 @@ class TIMMessageManager {
 
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
     NativeLibraryManager.bindings.DartSetAllReceiveMessageOpt(
-        TIMReceiveMessageOpt.fromValue(opt), startHour, startMinute, startSecond, duration, pUserData);
+        TIMReceiveMessageOpt.fromValue(opt),
+        startHour,
+        startMinute,
+        startSecond,
+        duration,
+        pUserData);
 
     return completer.future.then((value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
@@ -2516,16 +2924,21 @@ class TIMMessageManager {
     required int duration,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
-    String userData = Tools.generateUserData('setAllReceiveMessageOptWithTimestamp');
+    String userData =
+        Tools.generateUserData('setAllReceiveMessageOptWithTimestamp');
     Completer<V2TimCallback> completer = Completer();
     NativeLibraryManager.addTimCallback2Map(userData, completer);
 
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    NativeLibraryManager.bindings
-        .DartSetAllReceiveMessageOpt2(TIMReceiveMessageOpt.fromValue(opt), startTimeStamp, duration, pUserData);
+    NativeLibraryManager.bindings.DartSetAllReceiveMessageOpt2(
+        TIMReceiveMessageOpt.fromValue(opt),
+        startTimeStamp,
+        duration,
+        pUserData);
 
     return completer.future.then((value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
@@ -2534,14 +2947,16 @@ class TIMMessageManager {
     });
   }
 
-  Future<V2TimValueCallback<V2TimReceiveMessageOptInfo>> getAllReceiveMessageOpt() async {
+  Future<V2TimValueCallback<V2TimReceiveMessageOptInfo>>
+      getAllReceiveMessageOpt() async {
     if (!TIMManager.instance.isInitSDK()) {
       return V2TimValueCallback<V2TimReceiveMessageOptInfo>(
           code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     String userData = Tools.generateUserData('getAllReceiveMessageOpt');
-    Completer<V2TimValueCallback<V2TimReceiveMessageOptInfo>> completer = Completer();
+    Completer<V2TimValueCallback<V2TimReceiveMessageOptInfo>> completer =
+        Completer();
     NativeLibraryManager.addTimValueCallback2Map(userData, completer);
 
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
@@ -2560,14 +2975,18 @@ class TIMMessageManager {
     required String reactionID,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     if (message == null) {
       if (msgID == null) {
-        return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message and msgID are both empty");
+        return V2TimCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message and msgID are both empty");
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("addMessageReaction, find message failed");
           return V2TimCallback(code: findResult.code, desc: findResult.desc);
@@ -2576,7 +2995,9 @@ class TIMMessageManager {
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
           print("addMessageReaction, message not found");
-          return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+          return V2TimCallback(
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: "message not found");
         }
 
         message = msgList[0];
@@ -2587,14 +3008,18 @@ class TIMMessageManager {
     Completer<V2TimCallback> completer = Completer();
     NativeLibraryManager.addTimCallback2Map(userData, completer);
 
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Char> pReactionID = Tools.string2PointerChar(reactionID);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartAddMessageReaction(pMessage, pReactionID, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartAddMessageReaction(pMessage, pReactionID, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pMessage, pReactionID, pUserData]);
-      return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -2610,14 +3035,18 @@ class TIMMessageManager {
     required String reactionID,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     if (message == null) {
       if (msgID == null) {
-        return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message and msgID are both empty");
+        return V2TimCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message and msgID are both empty");
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("removeMessageReaction, find message failed");
           return V2TimCallback(code: findResult.code, desc: findResult.desc);
@@ -2626,7 +3055,9 @@ class TIMMessageManager {
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
           print("removeMessageReaction, message not found");
-          return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+          return V2TimCallback(
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: "message not found");
         }
 
         message = msgList[0];
@@ -2637,14 +3068,18 @@ class TIMMessageManager {
     Completer<V2TimCallback> completer = Completer();
     NativeLibraryManager.addTimCallback2Map(userData, completer);
 
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Char> pReactionID = Tools.string2PointerChar(reactionID);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartRemoveMessageReaction(pMessage, pReactionID, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartRemoveMessageReaction(pMessage, pReactionID, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pMessage, pReactionID, pUserData]);
-      return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -2654,7 +3089,8 @@ class TIMMessageManager {
     });
   }
 
-  Future<V2TimValueCallback<List<V2TimMessageReactionResult>>> getMessageReactions({
+  Future<V2TimValueCallback<List<V2TimMessageReactionResult>>>
+      getMessageReactions({
     List<V2TimMessage>? messageList,
     List<String>? msgIDList,
     required int maxUserCountPerReaction,
@@ -2665,31 +3101,39 @@ class TIMMessageManager {
     }
 
     if (messageList == null || messageList.isEmpty) {
-      V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: msgIDList ?? []);
+      V2TimValueCallback<List<V2TimMessage>> findResult =
+          await findMessages(messageIDList: msgIDList ?? []);
       if (findResult.code != TIMErrCode.ERR_SUCC.value) {
         print("getMessageReactions, find message failed");
-        return V2TimValueCallback<List<V2TimMessageReactionResult>>(code: findResult.code, desc: findResult.desc);
+        return V2TimValueCallback<List<V2TimMessageReactionResult>>(
+            code: findResult.code, desc: findResult.desc);
       }
 
       messageList = findResult.data!;
       if (messageList.isEmpty) {
         print("getMessageReactions, message not found");
         return V2TimValueCallback<List<V2TimMessageReactionResult>>(
-            code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message not found");
       }
     }
 
     String userData = Tools.generateUserData('getMessageReactions');
-    Completer<V2TimValueCallback<List<V2TimMessageReactionResult>>> completer = Completer();
+    Completer<V2TimValueCallback<List<V2TimMessageReactionResult>>> completer =
+        Completer();
     NativeLibraryManager.addTimValueCallback2Map(userData, completer);
 
-    Pointer<Char> pMessageList = Tools.string2PointerChar(json.encode(messageList.map((msg) => msg.toJson()).toList()));
+    Pointer<Char> pMessageList = Tools.string2PointerChar(
+        json.encode(messageList.map((msg) => msg.toJson()).toList()));
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartGetMessageReactions(pMessageList, maxUserCountPerReaction, pUserData);
+    int result = NativeLibraryManager.bindings.DartGetMessageReactions(
+        pMessageList, maxUserCountPerReaction, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pMessageList, pUserData]);
-      return V2TimValueCallback<List<V2TimMessageReactionResult>>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<List<V2TimMessageReactionResult>>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -2699,7 +3143,8 @@ class TIMMessageManager {
     });
   }
 
-  Future<V2TimValueCallback<V2TimMessageReactionUserResult>> getAllUserListOfMessageReaction({
+  Future<V2TimValueCallback<V2TimMessageReactionUserResult>>
+      getAllUserListOfMessageReaction({
     V2TimMessage? message,
     String? msgID,
     required String reactionID,
@@ -2714,19 +3159,23 @@ class TIMMessageManager {
     if (message == null) {
       if (msgID == null) {
         return V2TimValueCallback<V2TimMessageReactionUserResult>(
-            code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message and msgID are both empty");
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message and msgID are both empty");
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("getAllUserListOfMessageReaction, find message failed");
-          return V2TimValueCallback<V2TimMessageReactionUserResult>(code: findResult.code, desc: findResult.desc);
+          return V2TimValueCallback<V2TimMessageReactionUserResult>(
+              code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
           print("getAllUserListOfMessageReaction, message not found");
           return V2TimValueCallback<V2TimMessageReactionUserResult>(
-              code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: "message not found");
         }
 
         message = msgList[0];
@@ -2734,17 +3183,23 @@ class TIMMessageManager {
     }
 
     String userData = Tools.generateUserData('getAllUserListOfMessageReaction');
-    Completer<V2TimValueCallback<V2TimMessageReactionUserResult>> completer = Completer();
+    Completer<V2TimValueCallback<V2TimMessageReactionUserResult>> completer =
+        Completer();
     NativeLibraryManager.addTimValueCallback2Map(userData, completer);
 
-    Pointer<Char> pMessage = Tools.string2PointerChar(json.encode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(json.encode(message.toJson()));
     Pointer<Char> pReactionID = Tools.string2PointerChar(reactionID);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartGetAllUserListOfMessageReaction(pMessage, pReactionID, nextSeq, count, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartGetAllUserListOfMessageReaction(
+            pMessage, pReactionID, nextSeq, count, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pMessage, pReactionID, pUserData]);
-      return V2TimValueCallback<V2TimMessageReactionUserResult>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimValueCallback<V2TimMessageReactionUserResult>(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -2760,32 +3215,40 @@ class TIMMessageManager {
     required String language,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimValueCallback<String>(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimValueCallback<String>(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     String soundUrl = "";
     if (message == null) {
       if (msgID == null) {
         return V2TimValueCallback<String>(
-            code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message and msgID are both empty");
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message and msgID are both empty");
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("convertVoiceToText, find message failed");
-          return V2TimValueCallback<String>(code: findResult.code, desc: findResult.desc);
+          return V2TimValueCallback<String>(
+              code: findResult.code, desc: findResult.desc);
         }
 
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
           print("convertVoiceToText, message not found");
-          return V2TimValueCallback<String>(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+          return V2TimValueCallback<String>(
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: "message not found");
         }
 
         message = msgList[0];
         if (message.elemType != MessageElemType.V2TIM_ELEM_TYPE_SOUND) {
-          print("convertVoiceToText, message elemType should be V2TIM_ELEM_TYPE_SOUND");
+          print(
+              "convertVoiceToText, message elemType should be V2TIM_ELEM_TYPE_SOUND");
           return V2TimValueCallback<String>(
-              code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message elemType should be V2TIM_ELEM_TYPE_SOUND");
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: "message elemType should be V2TIM_ELEM_TYPE_SOUND");
         }
       }
     }
@@ -2794,7 +3257,8 @@ class TIMMessageManager {
     if (soundUrl.isEmpty) {
       print("convertVoiceToText, message soundElem url is empty");
       return V2TimValueCallback<String>(
-          code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message soundElem url is empty");
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "message soundElem url is empty");
     }
 
     String userData = Tools.generateUserData('convertVoiceToText');
@@ -2804,7 +3268,8 @@ class TIMMessageManager {
     Pointer<Char> pSoundUrl = Tools.string2PointerChar(soundUrl);
     Pointer<Char> pLanguage = Tools.string2PointerChar(language);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    NativeLibraryManager.bindings.DartConvertVoiceToText(pSoundUrl, pLanguage, pUserData);
+    NativeLibraryManager.bindings
+        .DartConvertVoiceToText(pSoundUrl, pLanguage, pUserData);
 
     return completer.future.then((value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
@@ -2820,14 +3285,18 @@ class TIMMessageManager {
     required bool isPinned,
   }) async {
     if (!TIMManager.instance.isInitSDK()) {
-      return V2TimCallback(code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_SDK_NOT_INITIALIZED.value, desc: "sdk not init");
     }
 
     if (message == null) {
       if (msgID == null) {
-        return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message and msgID are both empty");
+        return V2TimCallback(
+            code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+            desc: "message and msgID are both empty");
       } else {
-        V2TimValueCallback<List<V2TimMessage>> findResult = await findMessages(messageIDList: [msgID]);
+        V2TimValueCallback<List<V2TimMessage>> findResult =
+            await findMessages(messageIDList: [msgID]);
         if (findResult.code != TIMErrCode.ERR_SUCC.value) {
           print("pinGroupMessage, find message failed");
           return V2TimCallback(code: findResult.code, desc: findResult.desc);
@@ -2836,7 +3305,9 @@ class TIMMessageManager {
         List<V2TimMessage> msgList = findResult.data!;
         if (msgList.isEmpty) {
           print("pinGroupMessage, message not found");
-          return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "message not found");
+          return V2TimCallback(
+              code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+              desc: "message not found");
         }
 
         message = msgList[0];
@@ -2847,14 +3318,18 @@ class TIMMessageManager {
     Completer<V2TimCallback> completer = Completer();
     NativeLibraryManager.addTimCallback2Map(userData, completer);
 
-    Pointer<Char> pMessage = Tools.string2PointerChar(jsonEncode(message.toJson()));
+    Pointer<Char> pMessage =
+        Tools.string2PointerChar(jsonEncode(message.toJson()));
     Pointer<Char> pGroupID = Tools.string2PointerChar(groupID);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    int result = NativeLibraryManager.bindings.DartPinGroupMessage(pGroupID, pMessage, isPinned, pUserData);
+    int result = NativeLibraryManager.bindings
+        .DartPinGroupMessage(pGroupID, pMessage, isPinned, pUserData);
     if (result != TIMResult.TIM_SUCC.value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
       Tools.freePointers([pMessage, pGroupID, pUserData]);
-      return V2TimCallback(code: TIMErrCode.ERR_INVALID_PARAMETERS.value, desc: "invalid parameter");
+      return V2TimCallback(
+          code: TIMErrCode.ERR_INVALID_PARAMETERS.value,
+          desc: "invalid parameter");
     }
 
     return completer.future.then((value) {
@@ -2874,11 +3349,13 @@ class TIMMessageManager {
 
     String userData = Tools.generateUserData('getPinnedGroupMessageList');
     Completer<V2TimValueCallback<List<V2TimMessage>>> completer = Completer();
-    NativeLibraryManager.addTimValueCallback2Map<List<V2TimMessage>>(userData, completer);
+    NativeLibraryManager.addTimValueCallback2Map<List<V2TimMessage>>(
+        userData, completer);
 
     Pointer<Char> pGroupID = Tools.string2PointerChar(groupID);
     Pointer<Void> pUserData = Tools.string2PointerVoid(userData);
-    NativeLibraryManager.bindings.DartGetPinnedGroupMessageList(pGroupID, pUserData);
+    NativeLibraryManager.bindings
+        .DartGetPinnedGroupMessageList(pGroupID, pUserData);
 
     return completer.future.then((value) {
       NativeLibraryManager.removeTimCallbackFromMap(userData);
@@ -2904,7 +3381,8 @@ class TIMMessageManager {
           listener.onSendMessageProgress(msg, progress);
         }
       },
-      onMessageDownloadProgressCallback: (V2TimMessageDownloadProgress progress) {
+      onMessageDownloadProgressCallback:
+          (V2TimMessageDownloadProgress progress) {
         for (var listener in v2TimAdvancedMsgListenerList) {
           listener.onMessageDownloadProgressCallback(progress);
         }
@@ -2924,27 +3402,32 @@ class TIMMessageManager {
           listener.onRecvMessageRevoked(msgID);
         }
       },
-      onRecvMessageRevokedWithInfo: (String msgID, V2TimUserFullInfo operateUser, String reason) {
+      onRecvMessageRevokedWithInfo:
+          (String msgID, V2TimUserFullInfo operateUser, String reason) {
         for (var listener in v2TimAdvancedMsgListenerList) {
           listener.onRecvMessageRevokedWithInfo(msgID, operateUser, reason);
         }
       },
-      onRecvMessageExtensionsChanged: (String msgID, List<V2TimMessageExtension> extensions) {
+      onRecvMessageExtensionsChanged:
+          (String msgID, List<V2TimMessageExtension> extensions) {
         for (var listener in v2TimAdvancedMsgListenerList) {
           listener.onRecvMessageExtensionsChanged(msgID, extensions);
         }
       },
-      onRecvMessageExtensionsDeleted: (String msgID, List<String> extensionIDs) {
+      onRecvMessageExtensionsDeleted:
+          (String msgID, List<String> extensionIDs) {
         for (var listener in v2TimAdvancedMsgListenerList) {
           listener.onRecvMessageExtensionsDeleted(msgID, extensionIDs);
         }
       },
-      onRecvMessageReactionsChanged: (List<V2TIMMessageReactionChangeInfo> reactionChangeInfos) {
+      onRecvMessageReactionsChanged:
+          (List<V2TIMMessageReactionChangeInfo> reactionChangeInfos) {
         for (var listener in v2TimAdvancedMsgListenerList) {
           listener.onRecvMessageReactionsChanged(reactionChangeInfos);
         }
       },
-      onGroupMessagePinned: (String groupID, V2TimMessage message, bool isPinned, V2TimGroupMemberInfo opUserInfo) {
+      onGroupMessagePinned: (String groupID, V2TimMessage message,
+          bool isPinned, V2TimGroupMemberInfo opUserInfo) {
         for (var listener in v2TimAdvancedMsgListenerList) {
           listener.onGroupMessagePinned(groupID, message, isPinned, opUserInfo);
         }

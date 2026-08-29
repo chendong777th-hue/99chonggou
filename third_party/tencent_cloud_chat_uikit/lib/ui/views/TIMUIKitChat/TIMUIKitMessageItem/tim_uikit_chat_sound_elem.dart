@@ -1216,6 +1216,7 @@ class _TIMUIKitSoundElemState extends TIMUIKitState<TIMUIKitSoundElem> {
   }) {
     final voiceToText = TencentUtils.checkString(localCustomData.voiceToText);
     final isLoading = localCustomData.voiceToTextStatus == 'loading';
+    final isExpanded = localCustomData.isVoiceToTextExpanded;
     if (!isLoading && voiceToText == null) {
       return const SizedBox.shrink();
     }
@@ -1267,36 +1268,45 @@ class _TIMUIKitSoundElemState extends TIMUIKitState<TIMUIKitSoundElem> {
                 ),
               ],
             )
-          else
-            Text(
-              voiceToText!,
-              softWrap: true,
-              style: bodyTextStyle,
-            ),
-          if (!isLoading) ...[
-            const SizedBox(height: 6),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Icon(
-                  Icons.text_fields_rounded,
-                  color: bodyTextStyle.color?.withValues(alpha: 0.45) ??
-                      const Color(0x72282c34),
-                  size: 12,
-                ),
-                const SizedBox(width: 4),
-                Text(
-                  '转文字完成',
-                  style: TextStyle(
-                    color: bodyTextStyle.color?.withValues(alpha: 0.45) ??
-                        const Color(0x72282c34),
-                    fontSize: 10,
+          else ...[
+            InkWell(
+              onTap: () {
+                _safeSetState(() {});
+                unawaited(widget.chatModel.setVoiceToTextExpanded(
+                  widget.message,
+                  expanded: !isExpanded,
+                ));
+              },
+              borderRadius: BorderRadius.circular(4),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    isExpanded
+                        ? Icons.keyboard_arrow_up_rounded
+                        : Icons.keyboard_arrow_down_rounded,
+                    color: bodyTextStyle.color?.withValues(alpha: 0.62),
+                    size: 16,
                   ),
-                ),
-              ],
+                  const SizedBox(width: 2),
+                  Text(
+                    isExpanded ? '收起文字' : '展开文字',
+                    style: bodyTextStyle.copyWith(
+                      fontSize: (bodyTextStyle.fontSize ?? bodyFontSize) - 1,
+                      color: bodyTextStyle.color?.withValues(alpha: 0.72),
+                    ),
+                  ),
+                ],
+              ),
             ),
+            if (isExpanded) ...[
+              const SizedBox(height: 6),
+              Text(
+                voiceToText!,
+                softWrap: true,
+                style: bodyTextStyle,
+              ),
+            ],
           ],
         ],
       ),
@@ -1397,8 +1407,8 @@ class _TIMUIKitSoundElemState extends TIMUIKitState<TIMUIKitSoundElem> {
     final contentHeight =
         _voiceContentHeight(labelTextStyle, compactTextHeight);
     final playButtonSize = contentHeight;
-    final voicePadding = widget.textPadding ??
-        MessageBubbleTextColor.messageBubblePadding;
+    final voicePadding =
+        widget.textPadding ?? MessageBubbleTextColor.messageBubblePadding;
     final minContentWidth = _resolveMinContentWidth(
       labelTextStyle: labelTextStyle,
       durationSec: durationSec,

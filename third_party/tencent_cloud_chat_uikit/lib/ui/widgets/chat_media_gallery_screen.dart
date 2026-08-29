@@ -697,7 +697,7 @@ class _ChatMediaGalleryScreenState extends TIMUIKitState<ChatMediaGalleryScreen>
       context: context,
       centerIndex: index,
       itemCount: _items.length,
-      radius: 2,
+      radius: 3,
       resolveProvider: (adjacent) {
         final item = _items[adjacent];
         if (item.type != ChatMediaPreviewType.image) {

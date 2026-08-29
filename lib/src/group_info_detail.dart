@@ -9,9 +9,11 @@ import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:tencent_chat_i18n_tool/tencent_chat_i18n_tool.dart';
 import 'package:tencent_cloud_chat_demo/src/api/upload_api.dart';
+import 'package:tencent_cloud_chat_demo/src/api/me_group_api.dart';
 import 'package:tencent_cloud_chat_demo/src/pages/profile_nickname_edit_page.dart';
 import 'package:tencent_cloud_chat_demo/src/provider/theme.dart';
 import 'package:tencent_cloud_chat_demo/src/services/app_gallery_picker.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_local/group_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_membership_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_tip_custom_sender.dart';
 import 'package:tencent_cloud_chat_demo/src/tencent_page.dart';
@@ -43,6 +45,8 @@ class _GroupInfoDetailPageState extends State<GroupInfoDetailPage> {
   String _groupName = "";
   String _faceUrl = "";
   bool _uploading = false;
+  String _avatarPreviewUrl = '';
+  Future<String?>? _avatarPreviewRequest;
 
   @override
   void initState() {
@@ -86,6 +90,8 @@ class _GroupInfoDetailPageState extends State<GroupInfoDetailPage> {
       await GroupMembershipSyncService.instance.upsertGroupAvatar(
         groupId: widget.groupInfo.groupID,
         avatarUrl: thumbUrl,
+        avatarPreviewUrl: result.previewUrl,
+        avatarVersion: result.avatarVersion > 0 ? result.avatarVersion : null,
       );
       unawaited(
         GroupTipCustomSender.instance.send(
@@ -93,12 +99,18 @@ class _GroupInfoDetailPageState extends State<GroupInfoDetailPage> {
           action: 'group_avatar_changed',
           detail: <String, dynamic>{
             'avatarUrl': thumbUrl,
+            if (result.previewUrl.trim().isNotEmpty)
+              'avatarPreviewUrl': result.previewUrl.trim(),
+            if (result.avatarVersion > 0) 'avatarVersion': result.avatarVersion,
           },
         ),
       );
       if (!mounted) return;
       debugPrint("group avatar thumbUrl: $thumbUrl");
-      setState(() => _faceUrl = thumbUrl);
+      setState(() {
+        _faceUrl = thumbUrl;
+        _avatarPreviewUrl = result.previewUrl.trim();
+      });
       widget.groupInfo.faceUrl = thumbUrl;
       final model = _getModel(context);
       if (model != null) {
@@ -113,6 +125,26 @@ class _GroupInfoDetailPageState extends State<GroupInfoDetailPage> {
     } finally {
       if (mounted) setState(() => _uploading = false);
     }
+  }
+
+  Future<String?> _resolveGroupPreviewUrl() async {
+    final cached = _avatarPreviewUrl.trim();
+    if (cached.isNotEmpty) return cached;
+    final inFlight = _avatarPreviewRequest;
+    if (inFlight != null) return inFlight;
+    final request = MeGroupApi.instance
+        .fetchGroupAvatarPreview(widget.groupInfo.groupID)
+        .then((result) {
+      final url = result.previewUrl.trim();
+      if (url.isNotEmpty) _avatarPreviewUrl = url;
+      return url.isEmpty ? null : url;
+    }).catchError((_) => null);
+    _avatarPreviewRequest = request;
+    return request.whenComplete(() {
+      if (identical(_avatarPreviewRequest, request)) {
+        _avatarPreviewRequest = null;
+      }
+    });
   }
 
   Future<void> _pickAvatarFromGallery() async {
@@ -183,6 +215,10 @@ class _GroupInfoDetailPageState extends State<GroupInfoDetailPage> {
     required Color valueTextColor,
   }) {
     final canManage = _canManage();
+    final avatarVersion = GroupLocalStore.instance
+            .readCached(groupId: widget.groupInfo.groupID)
+            ?.avatarVersion ??
+        0;
     return Container(
       color: backgroundColor,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
@@ -218,6 +254,11 @@ class _GroupInfoDetailPageState extends State<GroupInfoDetailPage> {
                 showName: groupName,
                 type: 2,
                 isShowBigWhenClick: true,
+                previewUrlResolver: _resolveGroupPreviewUrl,
+                previewCacheKey:
+                    'avatar|group|${widget.groupInfo.groupID}|$avatarVersion|preview',
+                avatarCacheKey:
+                    'avatar|group|${widget.groupInfo.groupID}|$avatarVersion|thumb',
                 borderRadius: BorderRadius.circular(28),
               ),
             ),

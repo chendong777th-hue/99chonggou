@@ -207,13 +207,16 @@ class TransferController extends ChangeNotifier {
     final members =
         await WalletStore.instance.getMembers(conversationId, repo: _repo);
     final named = members.map((member) {
-      final nick = TransferPartyNameResolver.nicknameOf(
+      final publicName = TransferPartyNameResolver.nicknameOf(
         userId: member.userId,
-        nickHint: member.name,
+        nickHint: member.publicNameOrFallback,
       );
+      final displayName = member.name.trim();
       return RedPacketMember(
         userId: member.userId,
-        name: nick.isNotEmpty ? nick : member.userId,
+        name: displayName.isNotEmpty ? displayName : member.userId,
+        publicName:
+            publicName.isNotEmpty ? publicName : member.publicNameOrFallback,
         avatar: member.avatar,
         qq: member.qq,
       );

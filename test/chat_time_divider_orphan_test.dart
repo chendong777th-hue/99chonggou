@@ -73,8 +73,10 @@ void main() {
       intervalSeconds: 300,
     );
 
-    final dividers =
-        attached.where((m) => m.elemType == 11).map((m) => m.timestamp).toList();
+    final dividers = attached
+        .where((m) => m.elemType == 11)
+        .map((m) => m.timestamp)
+        .toList();
     expect(dividers, [msgTs]);
     expect(attached.where((m) => m.elemType != 11).map((m) => m.msgID), [
       'm1',
@@ -106,7 +108,8 @@ void main() {
     );
   });
 
-  test('gap over interval still inserts a divider between visible messages', () {
+  test('gap over interval still inserts a divider between visible messages',
+      () {
     final attached = TUIChatGlobalModel.attachTimeDividersForTesting(
       [
         _msg(
@@ -132,5 +135,27 @@ void main() {
         MessageElemType.V2TIM_ELEM_TYPE_TEXT,
       ],
     );
+  });
+
+  test('crossing midnight inserts a divider even within the interval', () {
+    final beforeMidnight =
+        DateTime(2026, 7, 20, 23, 59).millisecondsSinceEpoch ~/ 1000;
+    final afterMidnight =
+        DateTime(2026, 7, 21, 0, 1).millisecondsSinceEpoch ~/ 1000;
+    final attached = TUIChatGlobalModel.attachTimeDividersForTesting(
+      [
+        _msg(
+            msgID: 'before',
+            ts: beforeMidnight,
+            elemType: MessageElemType.V2TIM_ELEM_TYPE_TEXT),
+        _msg(
+            msgID: 'after',
+            ts: afterMidnight,
+            elemType: MessageElemType.V2TIM_ELEM_TYPE_TEXT),
+      ],
+      intervalSeconds: 300,
+    );
+
+    expect(attached.where((m) => m.elemType == 11).length, 2);
   });
 }

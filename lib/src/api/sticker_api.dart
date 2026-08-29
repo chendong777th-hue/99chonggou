@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:developer' as developer;
 
 import 'package:dio/dio.dart';
 import 'package:tencent_cloud_chat_demo/src/api/api_client.dart';
@@ -201,10 +200,7 @@ class StickerApi {
       }
       buffer.write(' ${entry.key}=${_compactLogValue(text)}');
     }
-    final line = buffer.toString();
-    developer.log(line, name: 'StickerUpload');
-    // ignore: avoid_print
-    print(line);
+    buffer.toString();
   }
 
   String _compactLogValue(String value) {

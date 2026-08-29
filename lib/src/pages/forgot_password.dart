@@ -10,7 +10,6 @@ import 'package:tencent_cloud_chat_demo/country_list_pick-1.0.1+5/lib/country_li
 import 'package:tencent_cloud_chat_demo/country_list_pick-1.0.1+5/lib/country_selection_theme.dart';
 import 'package:tencent_cloud_chat_demo/country_list_pick-1.0.1+5/lib/support/code_country.dart';
 import 'package:tencent_cloud_chat_demo/src/i18n/auth_localizations.dart';
-import 'package:tencent_cloud_chat_demo/src/api/api_client.dart';
 import 'package:tencent_cloud_chat_demo/src/api/auth_api.dart';
 import 'package:tencent_cloud_chat_demo/src/env.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/immersive_app_system_ui.dart';
@@ -18,13 +17,13 @@ import 'package:tencent_cloud_chat_demo/src/ui/app_tokens.dart';
 import 'package:tencent_cloud_chat_demo/src/ui/auth_widgets.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/app_version.dart';
 import 'package:tencent_cloud_chat_demo/src/services/auth_bootstrap_service.dart';
-import 'package:tencent_cloud_chat_demo/src/services/im_session_cache.dart';
+import 'package:tencent_cloud_chat_demo/src/services/auth_session_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/services/login_credential_store.dart';
 import 'package:tencent_cloud_chat_demo/utils/init_step.dart';
 import 'package:tencent_cloud_chat_demo/utils/dio_error_message.dart';
 import 'package:tencent_cloud_chat_demo/utils/phone_format.dart';
 import 'package:tencent_cloud_chat_demo/utils/toast.dart';
-import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 import 'package:tencent_cloud_chat_demo/src/security/slider_captcha.dart';
 
 class ForgotPasswordPage extends StatefulWidget {
@@ -35,8 +34,6 @@ class ForgotPasswordPage extends StatefulWidget {
 }
 
 class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
-  final CoreServicesImpl coreInstance = TIMUIKitCore.getInstance();
-
   String _countryCode = AppEnv.defaultCountryCode;
   String _phoneCountryIso = AppEnv.defaultPhoneCountry;
   final _phoneCtrl = TextEditingController();
@@ -106,11 +103,13 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
         nationalNumber: _phoneCtrl.text.trim(),
       );
 
-  String get _phoneInvalidText => PhoneFormat.nationalNumberError(
+  String get _phoneInvalidText =>
+      PhoneFormat.nationalNumberError(
         countryCode: _countryCode,
         countryIso: _phoneCountryIso,
         nationalNumber: _phoneCtrl.text.trim(),
-      ) ?? '请输入正确的手机号';
+      ) ??
+      '请输入正确的手机号';
 
   Future<void> _sendCode() async {
     final strings = _strings;
@@ -163,16 +162,22 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
         password: _passwordCtrl.text,
         phoneCountry: _phoneCountryIso,
       );
-      await ApiClient.instance.saveToken(tr.token);
+      // Reset-password returns a new authenticated session. Cross the same
+      // account boundary as the normal login flow before installing it, so a
+      // previous UIKit/native session cannot leak into the new account.
+      await AuthSessionService.instance.beginLogin();
+      await AuthSessionService.instance.applyTokenResult(tr);
       await LoginCredentialStore.instance.updateSavedPasswordIfRemembered(
         _passwordCtrl.text,
       );
 
-      final sig = await AuthApi.instance.fetchUserSig();
-      await ImSessionCache.instance.save(sig);
+      final sig =
+          await AuthSessionService.instance.bootstrapAuthenticatedSession();
+      final generation = SessionIdentityService.instance.generation;
       final imCode = await AuthBootstrapService.instance.loginImStack(
         sig,
         forceLogin: true,
+        expectedSessionGeneration: generation,
       );
       if (imCode != 0) {
         ToastUtils.toast(strings.resetPasswordButImFailed);

@@ -25,33 +25,33 @@ class CallBubbleInsertService {
 
   static const int _rehydrateMaxRecords = 12;
 
-  /// Insert (or skip if terminal bubble already exists) for one ended call.
+  /// Insert an ended call or converge existing rows for the same callId.
   bool insertTerminalBubble(CallResultRecord record, {String reason = ''}) {
     final conversationId = record.conversationId.trim();
     final callId = record.callId.trim();
     if (conversationId.isEmpty || callId.isEmpty) {
       return false;
     }
-    final bubble = buildTerminalBubbleMessage(record);
+    final canonicalRecord = CallResultRepository.instance.get(callId) ?? record;
+    final bubble = buildTerminalBubbleMessage(canonicalRecord);
     if (bubble == null) {
       return false;
     }
 
     final globalModel = serviceLocator<TUIChatGlobalModel>();
-    var inserted = false;
+    var changed = false;
     for (final key in _messageListKeys(conversationId)) {
       final existing = globalModel.messageListMap[key];
-      if (existing != null &&
-          hasTerminalBubbleForCallId(existing, callId: callId)) {
-        continue;
-      }
       if (existing == null || existing.isEmpty) {
         continue;
       }
-      final merged = TUIChatGlobalModel.mergeHistoricalWithInMemory(
-        existing: List<V2TimMessage>.from(existing),
-        fetched: <V2TimMessage>[bubble],
-      );
+      final hasTerminal = hasTerminalBubbleForCallId(existing, callId: callId);
+      final merged = hasTerminal
+          ? List<V2TimMessage>.from(existing)
+          : TUIChatGlobalModel.mergeHistoricalWithInMemory(
+              existing: List<V2TimMessage>.from(existing),
+              fetched: <V2TimMessage>[bubble],
+            );
       // 本地终态和云端 lk_call/hangup 可能在同一帧分别到达。先按
       // callId/inviteId 做通话专用归一化，再写回列表，避免两条气泡先后
       // 闪现，等待异步 dedupe 才收敛。
@@ -59,28 +59,84 @@ class CallBubbleInsertService {
         merged,
         preserveTipIdentity: true,
       );
+      if (listEquals(existing, normalized)) {
+        continue;
+      }
       globalModel.setMessageList(
         key,
         normalized,
         needResetNewMessageCount: false,
       );
-      inserted = true;
+      changed = true;
       if (kDebugMode) {
         debugPrint(
-          '[CallBubble] insert local bubble callId=$callId conv=$key '
+          '[CallBubble] terminal converge callId=$callId conv=$key '
+          'hadTerminal=$hasTerminal before=${existing.length} '
+          'after=${normalized.length} '
           'reason=${reason.isEmpty ? 'call_end' : reason}',
         );
       }
     }
 
-    if (inserted) {
+    if (changed) {
       CallBubbleDedupe.scheduleDedupeConversation(
         conversationId,
         reason: reason.isEmpty ? 'local_bubble_insert' : reason,
         delay: Duration.zero,
       );
     }
-    return inserted;
+    return changed;
+  }
+
+  /// Insert or update the single lifecycle row for a callId. Used for
+  /// RINGING/ANSWERED optimistic bubbles as well as terminal projection.
+  bool upsertLifecycleBubble(CallResultRecord record, {String reason = ''}) {
+    final conversationId = record.conversationId.trim();
+    final callId = record.callId.trim();
+    if (conversationId.isEmpty || callId.isEmpty) return false;
+    // CallResultRepository.save() enforces monotonic lifecycle rank. Project
+    // that record so a delayed invite/accept cannot replace an ended row.
+    final canonicalRecord = CallResultRepository.instance.get(callId) ?? record;
+    final bubble = buildTerminalBubbleMessage(canonicalRecord);
+    if (bubble == null) return false;
+    final globalModel = serviceLocator<TUIChatGlobalModel>();
+    var changed = false;
+    for (final key in _messageListKeys(conversationId)) {
+      final existing = globalModel.messageListMap[key];
+      if (existing == null || existing.isEmpty) continue;
+      // Add the canonical projection as another observation, then retain one
+      // strongest row by callId. A real IM terminal row wins over the local
+      // projection, and every older duplicate is removed in the same commit.
+      final normalized = CallBubbleDedupe.normalizeCallHistoryMessages(
+        <V2TimMessage>[...existing, bubble],
+        preserveTipIdentity: true,
+      );
+      if (listEquals(existing, normalized)) {
+        continue;
+      }
+      globalModel.setMessageList(
+        key,
+        normalized,
+        needResetNewMessageCount: false,
+      );
+      changed = true;
+      if (kDebugMode) {
+        debugPrint(
+          '[CallBubble] lifecycle converge callId=$callId conv=$key '
+          'status=${canonicalRecord.effectiveStatus.wireName} '
+          'before=${existing.length} after=${normalized.length} '
+          'reason=${reason.isEmpty ? 'call_lifecycle_upsert' : reason}',
+        );
+      }
+    }
+    if (changed) {
+      CallBubbleDedupe.scheduleDedupeConversation(
+        conversationId,
+        reason: reason.isEmpty ? 'call_lifecycle_upsert' : reason,
+        delay: Duration.zero,
+      );
+    }
+    return changed;
   }
 
   /// Backfill recent terminal bubbles when opening a chat (memory cache / restart).
@@ -129,7 +185,10 @@ class CallBubbleInsertService {
       }
       try {
         final provider = CallingMessageDataProvider(message);
-        if (provider.isCallingSignal && provider.shouldDisplayInHistory) {
+        if (provider.isCallingSignal &&
+            provider.shouldDisplayInHistory &&
+            provider.protocolType != CallProtocolType.send &&
+            provider.protocolType != CallProtocolType.accept) {
           return true;
         }
       } catch (_) {}
@@ -151,7 +210,8 @@ class CallBubbleInsertService {
     final self = _selfUserId();
     final peer = CallUserId.normalizeCallUserId(record.peerUserId);
     final caller = CallUserId.normalizeCallUserId(record.callerUserId);
-    final callee = _resolveCalleeId(record, self: self, peer: peer, caller: caller);
+    final callee =
+        _resolveCalleeId(record, self: self, peer: peer, caller: caller);
     final isOutgoing = record.isOutgoing ??
         (caller.isNotEmpty &&
             self.isNotEmpty &&
@@ -261,6 +321,10 @@ class CallBubbleInsertService {
 
   static String _actionForProtocol(CallProtocolType protocol) {
     switch (protocol) {
+      case CallProtocolType.send:
+        return 'invite';
+      case CallProtocolType.accept:
+        return 'accept';
       case CallProtocolType.hangup:
         return 'hangup';
       case CallProtocolType.cancel:

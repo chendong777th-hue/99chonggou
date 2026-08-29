@@ -2,9 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
-import 'package:tencent_cloud_chat_uikit/data_services/core/core_services_implements.dart';
-import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 
 const String _groupNoticeEntryPinnedKey = 'groupNoticeEntryPinned';
 const String _groupNoticeEntryMutedKey = 'groupNoticeEntryMuted';
@@ -22,7 +21,8 @@ class GroupNoticeEntrySettingsService extends ChangeNotifier {
   bool _isMuted = false;
   int _dismissWatermarkMs = 0;
   bool _loaded = false;
-  Future<void>? _loading;
+  String _loadedOwner = '';
+  final Map<String, Future<void>> _loadingByOwner = <String, Future<void>>{};
 
   bool get isPinned => _isPinned;
   bool get isMuted => _isMuted;
@@ -30,49 +30,79 @@ class GroupNoticeEntrySettingsService extends ChangeNotifier {
   bool get isLoaded => _loaded;
 
   Future<void> ensureLoaded() {
-    return _loading ??= _load();
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) {
+      return Future<void>.value();
+    }
+    if (_loaded && _loadedOwner == identity.ownerUserId) {
+      return Future<void>.value();
+    }
+    return _loadingByOwner[identity.ownerUserId] ??= _load(identity);
   }
 
-  Future<void> _load() async {
+  Future<void> _load(SessionIdentity identity) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      _isPinned = prefs.getBool(_scopedKey(_groupNoticeEntryPinnedKey)) ?? false;
-      _isMuted = prefs.getBool(_scopedKey(_groupNoticeEntryMutedKey)) ?? false;
-      _dismissWatermarkMs =
-          prefs.getInt(_scopedKey(_groupNoticeEntryDismissWatermarkKey)) ?? 0;
+      if (!SessionIdentityService.instance.isCurrent(identity)) return;
+      _isPinned = prefs.getBool(_scopedKeyForOwner(
+              _groupNoticeEntryPinnedKey, identity.ownerUserId)) ??
+          false;
+      _isMuted = prefs.getBool(_scopedKeyForOwner(
+              _groupNoticeEntryMutedKey, identity.ownerUserId)) ??
+          false;
+      _dismissWatermarkMs = prefs.getInt(_scopedKeyForOwner(
+            _groupNoticeEntryDismissWatermarkKey,
+            identity.ownerUserId,
+          )) ??
+          0;
       _loaded = true;
+      _loadedOwner = identity.ownerUserId;
       notifyListeners();
     } finally {
-      _loading = null;
+      _loadingByOwner.remove(identity.ownerUserId);
     }
   }
 
   Future<void> setPinned(bool value) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
     await ensureLoaded();
+    if (!SessionIdentityService.instance.isCurrent(identity) ||
+        _loadedOwner != identity.ownerUserId) return;
     if (_isPinned == value) {
       return;
     }
     _isPinned = value;
-    await _persist();
+    await _persist(identity);
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     notifyListeners();
   }
 
   Future<void> togglePinned() => setPinned(!_isPinned);
 
   Future<void> setMuted(bool value) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
     await ensureLoaded();
+    if (!SessionIdentityService.instance.isCurrent(identity) ||
+        _loadedOwner != identity.ownerUserId) return;
     if (_isMuted == value) {
       return;
     }
     _isMuted = value;
-    await _persist();
+    await _persist(identity);
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     notifyListeners();
   }
 
   Future<void> toggleMuted() => setMuted(!_isMuted);
 
   Future<void> dismissEntry({required int latestNoticeMs}) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
     await ensureLoaded();
+    if (!SessionIdentityService.instance.isCurrent(identity) ||
+        _loadedOwner != identity.ownerUserId) return;
     final watermark = latestNoticeMs > 0
         ? latestNoticeMs
         : DateTime.now().millisecondsSinceEpoch;
@@ -80,7 +110,8 @@ class GroupNoticeEntrySettingsService extends ChangeNotifier {
       return;
     }
     _dismissWatermarkMs = watermark;
-    await _persist();
+    await _persist(identity);
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     notifyListeners();
   }
 
@@ -89,26 +120,49 @@ class GroupNoticeEntrySettingsService extends ChangeNotifier {
     _isMuted = false;
     _dismissWatermarkMs = 0;
     _loaded = false;
-    _loading = null;
+    _loadedOwner = '';
+    _loadingByOwner.clear();
     notifyListeners();
   }
 
-  String _scopedKey(String base) {
-    final userId = ChatIdFormat.rawUserUid(
-      serviceLocator<CoreServicesImpl>().loginUserInfo?.userID ?? '',
+  Future<void> clearForOwner(String? ownerUserId) async {
+    final owner = ChatIdFormat.rawUserUid(ownerUserId);
+    clearSession();
+    if (owner.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_scopedKeyForOwner(_groupNoticeEntryPinnedKey, owner));
+    await prefs.remove(_scopedKeyForOwner(_groupNoticeEntryMutedKey, owner));
+    await prefs.remove(
+      _scopedKeyForOwner(_groupNoticeEntryDismissWatermarkKey, owner),
     );
-    if (userId.isEmpty) {
-      return base;
-    }
-    return '${base}_$userId';
   }
 
-  Future<void> _persist() async {
+  String _scopedKeyForOwner(String base, String userId) {
+    final owner = ChatIdFormat.rawUserUid(userId);
+    if (owner.isEmpty) {
+      return base;
+    }
+    return '${base}_$owner';
+  }
+
+  Future<void> _persist(SessionIdentity identity) async {
+    if (!SessionIdentityService.instance.isCurrent(identity) ||
+        _loadedOwner != identity.ownerUserId) return;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(_scopedKey(_groupNoticeEntryPinnedKey), _isPinned);
-    await prefs.setBool(_scopedKey(_groupNoticeEntryMutedKey), _isMuted);
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
+    await prefs.setBool(
+      _scopedKeyForOwner(_groupNoticeEntryPinnedKey, identity.ownerUserId),
+      _isPinned,
+    );
+    await prefs.setBool(
+      _scopedKeyForOwner(_groupNoticeEntryMutedKey, identity.ownerUserId),
+      _isMuted,
+    );
     await prefs.setInt(
-      _scopedKey(_groupNoticeEntryDismissWatermarkKey),
+      _scopedKeyForOwner(
+        _groupNoticeEntryDismissWatermarkKey,
+        identity.ownerUserId,
+      ),
       _dismissWatermarkMs,
     );
   }

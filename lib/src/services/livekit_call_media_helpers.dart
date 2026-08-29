@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:tencent_cloud_chat_demo/src/api/livekit_call_api.dart';
 import 'package:tencent_cloud_chat_demo/src/models/livekit_call_credentials.dart';
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_types.dart';
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_ui_log.dart';
+import 'package:tencent_cloud_chat_demo/src/services/call_result_enrichment_service.dart';
 
 /// Thrown when local mic/camera publish fails after [Room.connect].
 class LiveKitPublishException implements Exception {
@@ -13,8 +16,9 @@ class LiveKitPublishException implements Exception {
   final String detail;
 
   @override
-  String toString() =>
-      detail.isNotEmpty ? 'LiveKitPublishException($kind: $detail)' : 'LiveKitPublishException($kind)';
+  String toString() => detail.isNotEmpty
+      ? 'LiveKitPublishException($kind: $detail)'
+      : 'LiveKitPublishException($kind)';
 }
 
 /// User-visible message when mic/camera publish fails after join.
@@ -92,6 +96,11 @@ Future<LiveKitCallCredentials> resolveAcceptCredentials({
       debugPrint(
         'LiveKitCallMediaHelpers: accept returned ${e.code}, '
         'fetching token callId=$callId',
+      );
+    }
+    if (e.code == 'CALL_ALREADY_ANSWERED' && api == null) {
+      unawaited(
+        CallResultEnrichmentService.instance.reconcileStatus(callId),
       );
     }
     return client.fetchToken(callId: callId);

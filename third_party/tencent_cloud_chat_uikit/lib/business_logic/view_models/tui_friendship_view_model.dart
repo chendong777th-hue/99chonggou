@@ -48,6 +48,7 @@ class TUIFriendShipViewModel extends ChangeNotifier {
   bool _hasLoadedContactList = false;
   Future<void>? _loadingContactListFuture;
   int _contactListLoadGeneration = 0;
+  int _sessionGeneration = 0;
   NewContactLifeCycle? _newContactLifeCycle;
   FriendListLifeCycle? _contactListLifeCycle;
   BlockListLifeCycle? _blockListLifeCycle;
@@ -259,6 +260,9 @@ class TUIFriendShipViewModel extends ChangeNotifier {
   }
 
   clearData() {
+    _sessionGeneration++;
+    _contactListLoadGeneration++;
+    _loadingContactListFuture = null;
     _friendApplicationList = [];
     _friendApplicationAmount = 0;
     _friendList = [];
@@ -271,6 +275,7 @@ class TUIFriendShipViewModel extends ChangeNotifier {
   }
 
   loadUserStatus() async {
+    final generation = _sessionGeneration;
     if (selfInfoViewModel.globalConfig?.isShowOnlineStatus == false ||
         friendList == null ||
         friendList!.isEmpty) {
@@ -295,6 +300,9 @@ class TUIFriendShipViewModel extends ChangeNotifier {
         return await _friendshipServices.getUserStatus(userIDList: userIDList);
       })
     ]);
+    if (generation != _sessionGeneration) {
+      return;
+    }
 
     final List<V2TimUserStatus> flatUserStatus = [];
     for (var e in userStatus) {
@@ -304,7 +312,11 @@ class TUIFriendShipViewModel extends ChangeNotifier {
   }
 
   loadContactApplicationData() async {
+    final generation = _sessionGeneration;
     final newContactRes = await _friendshipServices.getFriendApplicationList();
+    if (generation != _sessionGeneration) {
+      return;
+    }
     // Only Received Application
     _friendApplicationList = newContactRes?.friendApplicationList
         ?.where((item) =>
@@ -328,11 +340,14 @@ class TUIFriendShipViewModel extends ChangeNotifier {
     if (_loadingContactListFuture != null) {
       return _loadingContactListFuture!;
     }
-    _loadingContactListFuture = _loadContactListDataInternal();
+    final task = _loadContactListDataInternal();
+    _loadingContactListFuture = task;
     try {
-      await _loadingContactListFuture;
+      await task;
     } finally {
-      _loadingContactListFuture = null;
+      if (identical(_loadingContactListFuture, task)) {
+        _loadingContactListFuture = null;
+      }
     }
   }
 
@@ -413,7 +428,8 @@ class TUIFriendShipViewModel extends ChangeNotifier {
       _friendList = filterFriendListForPickers(memberList);
       _hasLoadedContactList = true;
       try {
-        serviceLocator<TUIConversationViewModel>().reapplyDisplayNameOverrides();
+        serviceLocator<TUIConversationViewModel>()
+            .reapplyDisplayNameOverrides();
       } catch (_) {}
     } finally {
       if (generation == _contactListLoadGeneration) {
@@ -440,14 +456,22 @@ class TUIFriendShipViewModel extends ChangeNotifier {
   }
 
   Future<void> loadBlockListData() async {
+    final generation = _sessionGeneration;
     final blockListRes = await _friendshipServices.getBlackList();
+    if (generation != _sessionGeneration) {
+      return;
+    }
     _blockList = blockListRes ?? [];
     notifyListeners();
     return;
   }
 
   loadGroupListData() async {
+    final generation = _sessionGeneration;
     final groupListRes = await _groupServices.getJoinedGroupList();
+    if (generation != _sessionGeneration) {
+      return;
+    }
     _groupList = groupListRes ?? [];
     _applyGroupNameOverrides();
     if (_groupList != null && _groupList!.isNotEmpty) {

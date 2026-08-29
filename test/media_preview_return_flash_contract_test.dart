@@ -12,7 +12,9 @@ void main() {
   test('activate gates media overlay before route_reactivated recover', () {
     final activateAt = chatSource.indexOf('void activate()');
     expect(activateAt, greaterThanOrEqualTo(0));
-    final activateBody = chatSource.substring(activateAt, activateAt + 900);
+    // Window is larger than 900 chars now that a pagination-in-flight guard
+    // (plan 8B) sits between the media gate and the recover call.
+    final activateBody = chatSource.substring(activateAt, activateAt + 1600);
 
     expect(activateBody.contains('isMediaPreviewOverlayOpen'), isTrue);
     expect(

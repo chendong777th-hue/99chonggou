@@ -9,15 +9,15 @@ void main() {
     debugDefaultTargetPlatformOverride = originalTargetPlatform;
   });
 
-  test('allows scroll-time virtual hydration on iOS', () {
+  test('hydrates during scroll on iOS', () {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
 
     expect(ConversationPerfFlags.virtualHydrateOnlyOnScrollSettle, isFalse);
   });
 
-  test('keeps settle-only virtual hydrate on all Android tiers', () {
+  test('hydrates during scroll on Android', () {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
 
-    expect(ConversationPerfFlags.virtualHydrateOnlyOnScrollSettle, isTrue);
+    expect(ConversationPerfFlags.virtualHydrateOnlyOnScrollSettle, isFalse);
   });
 }

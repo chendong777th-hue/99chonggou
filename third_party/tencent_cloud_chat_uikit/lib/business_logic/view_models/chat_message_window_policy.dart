@@ -13,6 +13,10 @@ class ChatMessageWindowPolicy {
   /// 超过才 trim（允许 120 + loadBatch 瞬时）。
   static const int softMax = 160;
 
+  /// 连续阅读历史时允许保留的诊断高水位。历史模式内不主动裁剪；真正
+  /// 收束发生在回到最新端或页面退出，避免可见窗口边读边移动。
+  static const int historyReadSoftMax = 320;
+
   /// 文档/断言参考；不强制填充。
   static const int softMin = 80;
 

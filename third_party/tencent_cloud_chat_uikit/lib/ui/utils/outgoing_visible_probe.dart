@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 
@@ -66,33 +65,7 @@ class OutgoingVisibleProbe {
     String? conversationID,
     V2TimMessage? message,
     Map<String, Object?> extras = const <String, Object?>{},
-  }) {
-    // This probe is strictly for local diagnosis; never emit message metadata
-    // (including text and conversation identifiers) from release builds.
-    if (kReleaseMode) {
-      return;
-    }
-    final conv = conversationID?.trim() ?? lastConvID ?? '';
-    if (!matches(conv) &&
-        !matchesMessage(message) &&
-        !matchesAny(extras.values.map((e) => e?.toString()))) {
-      return;
-    }
-    final buffer = StringBuffer('$tag event=$event');
-    if (conv.isNotEmpty) {
-      buffer.write(' conv=$conv');
-    }
-    if (message != null) {
-      buffer.write(' ${brief(message)}');
-    }
-    extras.forEach((key, value) {
-      if (value == null) {
-        return;
-      }
-      buffer.write(' $key=$value');
-    });
-    debugPrint(buffer.toString());
-  }
+  }) {}
 
   /// 打印 SDK 本页原顺序、原字段。合并 / 过滤 / 排序之前调用。
   static void dumpSdkRawPage({
@@ -103,23 +76,7 @@ class OutgoingVisibleProbe {
     required int askCount,
     required List<V2TimMessage> messages,
     bool? isFinished,
-  }) {
-    if (kReleaseMode) {
-      return;
-    }
-    final conv = (userID ?? groupID ?? '').trim();
-    if (!matches(conv) && !messages.any(matchesMessage)) {
-      return;
-    }
-    debugPrint(
-      '$sdkRawTag source=$source conv=$conv lastMsgID=${lastMsgID ?? ''} '
-      'ask=$askCount got=${messages.length} isFinished=$isFinished '
-      'order=sdk_as_returned',
-    );
-    for (var i = 0; i < messages.length; i++) {
-      debugPrint('$sdkRawTag ${rawRow(i, messages[i])}');
-    }
-  }
+  }) {}
 
   static String rawRow(int index, V2TimMessage message) {
     final ts = message.timestamp ?? 0;

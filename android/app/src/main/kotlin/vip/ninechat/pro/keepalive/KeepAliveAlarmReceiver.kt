@@ -3,7 +3,7 @@ package vip.ninechat.pro.keepalive
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.util.Log
+import vip.ninechat.pro.logging.SilentLog as Log
 
 class KeepAliveAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {

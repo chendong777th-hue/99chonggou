@@ -1101,11 +1101,9 @@ class _TIMUIKitTextFieldLayoutWideState
     final debounceFunc = _debounce((value) {
       final composing = widget.textEditingController.value.composing;
       if (widget.textEditingController.text != value) {
-        print('[ChatInputDiag] wide=on_changed_skip_stale');
         return;
       }
       if (composing.isValid && composing.start < composing.end) {
-        print('[ChatInputDiag] wide=on_changed_skip_composing');
         return;
       }
       if (widget.onChanged != null) {

@@ -20,6 +20,13 @@ class MeFriendApi {
   MeFriendApi._();
   static final MeFriendApi instance = MeFriendApi._();
 
+  static const Duration _relationCacheTtl = Duration(seconds: 8);
+
+  final Map<String, Future<FriendRelation?>> _relationRequests =
+      <String, Future<FriendRelation?>>{};
+  final Map<String, _CachedFriendRelation> _relationCache =
+      <String, _CachedFriendRelation>{};
+
   Dio get _dio => ApiClient.instance.dio;
 
   String? _currentSelfUserId() {
@@ -70,7 +77,8 @@ class MeFriendApi {
         },
       );
       final payload = unwrapApiPayload(res.data);
-      final list = extractApiList(res.data, listKeys: const ['items', 'friends']);
+      final list =
+          extractApiList(res.data, listKeys: const ['items', 'friends']);
       for (final item in list.whereType<Map>()) {
         final record = MeFriendRecord.fromJson(Map<String, dynamic>.from(item));
         if (record.friendUserId.isNotEmpty) {
@@ -83,12 +91,10 @@ class MeFriendApi {
         if (pageSeq > syncSeq) {
           syncSeq = pageSeq;
         }
-        final next = (map['nextCursor'] ??
-                map['next_cursor'] ??
-                map['cursor'] ??
-                '')
-            .toString()
-            .trim();
+        final next =
+            (map['nextCursor'] ?? map['next_cursor'] ?? map['cursor'] ?? '')
+                .toString()
+                .trim();
         final hasMore = _readBool(map['hasMore'] ?? map['has_more']);
         if (!hasMore || next.isEmpty || next == cursor) {
           break;
@@ -183,7 +189,8 @@ class MeFriendApi {
     final friends = await fetchV2TimFriends(allowLegacySdkFallback: false);
     return friends
         .where(
-          (item) => !PlatformOfficialAccountService.shouldHideFromContactAndPickers(
+          (item) =>
+              !PlatformOfficialAccountService.shouldHideFromContactAndPickers(
             item.userID,
           ),
         )
@@ -239,6 +246,7 @@ class MeFriendApi {
     final id = friendUserId.trim();
     if (id.isEmpty) return;
     await _dio.delete('/me/friends/$id');
+    _relationCache.remove(ChatIdFormat.rawUserUid(id));
     await FriendSyncService.instance.applyOptimisticDelete(id);
   }
 
@@ -249,7 +257,8 @@ class MeFriendApi {
       throw ArgumentError.value(peerUserId, 'peerUserId', 'empty peerUserId');
     }
     if (_isSelfPeer(id)) {
-      throw ArgumentError.value(peerUserId, 'peerUserId', 'cannot query self relation');
+      throw ArgumentError.value(
+          peerUserId, 'peerUserId', 'cannot query self relation');
     }
     final res = await _dio.get(
       '/me/friends/${Uri.encodeComponent(id)}/relation',
@@ -328,6 +337,47 @@ class MeFriendApi {
     if (_isSelfPeer(id)) {
       return null;
     }
+    final cached = _relationCache[id];
+    if (cached != null && !cached.isExpired) {
+      return cached.relation;
+    }
+
+    final running = _relationRequests[id];
+    if (running != null) {
+      return running;
+    }
+
+    late final Future<FriendRelation?> task;
+    task = _fetchRelationSafely(id).then((relation) {
+      if (relation != null) {
+        _relationCache[id] = _CachedFriendRelation(
+          relation: relation,
+          expiresAt: DateTime.now().add(_relationCacheTtl),
+        );
+      }
+      return relation;
+    }).whenComplete(() {
+      if (identical(_relationRequests[id], task)) {
+        _relationRequests.remove(id);
+      }
+    });
+    _relationRequests[id] = task;
+    return task;
+  }
+
+  Future<MeFriendRecord?> cachedByUserId(String friendUserId) async {
+    final id = ChatIdFormat.rawUserUid(friendUserId);
+    if (id.isEmpty) return null;
+    final matches = await FriendLocalStore.instance.readByIds(
+      friendUserIds: <String>[id],
+    );
+    if (matches.isNotEmpty) {
+      return matches.first;
+    }
+    return null;
+  }
+
+  Future<FriendRelation?> _fetchRelationSafely(String id) async {
     try {
       return await fetchRelation(id);
     } on DioError catch (_) {
@@ -336,23 +386,18 @@ class MeFriendApi {
       return null;
     }
   }
+}
 
-  Future<MeFriendRecord?> cachedByUserId(String friendUserId) async {
-    final id = ChatIdFormat.rawUserUid(friendUserId);
-    if (id.isEmpty) return null;
-    final all = await FriendLocalStore.instance.readAll();
-    for (final item in all) {
-      if (ChatIdFormat.rawUserUid(item.friendUserId) == id) return item;
-    }
-    final idLower = id.toLowerCase();
-    for (final item in all) {
-      if (ChatIdFormat.rawUserUid(item.friendUserId).toLowerCase() ==
-          idLower) {
-        return item;
-      }
-    }
-    return null;
-  }
+class _CachedFriendRelation {
+  const _CachedFriendRelation({
+    required this.relation,
+    required this.expiresAt,
+  });
+
+  final FriendRelation relation;
+  final DateTime expiresAt;
+
+  bool get isExpired => !DateTime.now().isBefore(expiresAt);
 }
 
 class MeFriendsNetworkSnapshot {
@@ -388,8 +433,7 @@ class FriendRelation {
       peerUserId: _asString(json['peerUserId'] ?? json['peer_user_id']),
       isFriend: isFriend,
       inMyFriendList: inMyFriendList,
-      peerDeletedMe:
-          _asBool(json['peerDeletedMe'] ?? json['peer_deleted_me']),
+      peerDeletedMe: _asBool(json['peerDeletedMe'] ?? json['peer_deleted_me']),
       canMessage: _asBool(
         json['canMessage'] ?? json['can_message'],
         fallback: isFriend || inMyFriendList,
@@ -466,9 +510,9 @@ Future<int> _imSdkFriendResultType(String userId) async {
     final res = await TencentImSDKPlugin.v2TIMManager
         .getFriendshipManager()
         .checkFriend(
-          userIDList: [userId],
-          checkType: FriendTypeEnum.V2TIM_FRIEND_TYPE_BOTH,
-        );
+      userIDList: [userId],
+      checkType: FriendTypeEnum.V2TIM_FRIEND_TYPE_BOTH,
+    );
     if (res.code != 0 || res.data == null) {
       return 0;
     }
@@ -493,6 +537,7 @@ class MeFriendRecord {
     required this.remark,
     required this.friendNickname,
     required this.friendAvatarUrl,
+    this.friendAvatarVersion,
     required this.addedAt,
     required this.peerDeletedMe,
     required this.canMessage,
@@ -506,6 +551,7 @@ class MeFriendRecord {
   final String remark;
   final String friendNickname;
   final String friendAvatarUrl;
+  final int? friendAvatarVersion;
   final int addedAt;
   final bool peerDeletedMe;
   final bool canMessage;
@@ -547,16 +593,21 @@ class MeFriendRecord {
             json['avatarUrl'] ??
             json['faceUrl'],
       ),
+      friendAvatarVersion: _readNullableInt(
+        json['friendAvatarVersion'] ?? json['friend_avatar_version'],
+      ),
       addedAt: _parseTimestamp(json['addedAt'] ?? json['added_at']),
       peerDeletedMe: _asBool(json['peerDeletedMe'] ?? json['peer_deleted_me']),
-      canMessage: _asBool(json['canMessage'] ?? json['can_message'], fallback: true),
+      canMessage:
+          _asBool(json['canMessage'] ?? json['can_message'], fallback: true),
       inMyFriendList: _asBool(
         json['inMyFriendList'] ?? json['in_my_friend_list'],
         fallback: true,
       ),
       isFriend: _asBool(
         json['isFriend'] ?? json['is_friend'],
-        fallback: _asBool(json['canMessage'] ?? json['can_message'], fallback: true),
+        fallback:
+            _asBool(json['canMessage'] ?? json['can_message'], fallback: true),
       ),
       lastActiveAt: _parseOptionalTimestamp(
         json['lastActiveAt'] ?? json['last_active_at'],
@@ -573,6 +624,7 @@ class MeFriendRecord {
       remark: event.remark?.trim() ?? '',
       friendNickname: event.peerNickname?.trim() ?? '',
       friendAvatarUrl: event.peerAvatarUrl?.trim() ?? '',
+      friendAvatarVersion: null,
       addedAt: _parseTimestamp(event.addedAt),
       peerDeletedMe: event.peerDeletedMe ?? false,
       canMessage: event.canMessage ?? true,
@@ -588,6 +640,7 @@ class MeFriendRecord {
     String? remark,
     String? friendNickname,
     String? friendAvatarUrl,
+    int? friendAvatarVersion,
     int? addedAt,
     bool? peerDeletedMe,
     bool? canMessage,
@@ -601,6 +654,7 @@ class MeFriendRecord {
       remark: remark ?? this.remark,
       friendNickname: friendNickname ?? this.friendNickname,
       friendAvatarUrl: friendAvatarUrl ?? this.friendAvatarUrl,
+      friendAvatarVersion: friendAvatarVersion ?? this.friendAvatarVersion,
       addedAt: addedAt ?? this.addedAt,
       peerDeletedMe: peerDeletedMe ?? this.peerDeletedMe,
       canMessage: canMessage ?? this.canMessage,
@@ -621,6 +675,8 @@ class MeFriendRecord {
         'isFriend': isFriend ? '1' : '0',
         'inMyFriendList': inMyFriendList ? '1' : '0',
         if (addedAt > 0) 'addedAt': addedAt.toString(),
+        if (friendAvatarVersion != null)
+          'friendAvatarVersion': friendAvatarVersion.toString(),
       },
       userProfile: V2TimUserFullInfo(
         userID: friendUserId,
@@ -632,6 +688,12 @@ class MeFriendRecord {
 }
 
 String _asString(Object? value) => value?.toString().trim() ?? '';
+
+int? _readNullableInt(Object? value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString().trim() ?? '');
+}
 
 bool _asBool(Object? value, {bool fallback = false}) {
   if (value == null) return fallback;
@@ -652,7 +714,8 @@ int _parseTimestamp(Object? value) {
   final text = value.toString().trim();
   if (text.isEmpty) return 0;
   final numeric = int.tryParse(text);
-  if (numeric != null) return numeric < 1000000000000 ? numeric * 1000 : numeric;
+  if (numeric != null)
+    return numeric < 1000000000000 ? numeric * 1000 : numeric;
   final dt = DateTime.tryParse(text);
   return dt?.toUtc().millisecondsSinceEpoch ?? 0;
 }

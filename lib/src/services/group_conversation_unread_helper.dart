@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_unread_aggregate.dart';
@@ -31,15 +30,11 @@ class GroupConversationUnreadHelper {
       if (unread <= 0) {
         return;
       }
-      existing.unreadCount = unread - 1;
-      final merged = await ConversationLocalStore.instance.upsertBatch(
-        conversations: [existing],
+      await ConversationSyncService.instance.applyConversationUnreadLocally(
+        conversationID: id,
+        unreadCount: unread - 1,
+        snapshot: existing,
       );
-      if (merged.isNotEmpty) {
-        await ConversationListNotifier.instance.applyConversationsFromStore(
-          upserted: merged,
-        );
-      }
       ConversationUnreadAggregate.instance.scheduleRefresh(
         reason: 'absorb_tip_unread',
       );

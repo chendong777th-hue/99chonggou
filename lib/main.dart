@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_easyloading/flutter_easyloading.dart';
 import 'package:image_picker_android/image_picker_android.dart';
 import 'package:image_picker_platform_interface/image_picker_platform_interface.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 import 'package:tencent_chat_i18n_tool/language_json/strings.g.dart';
@@ -50,7 +51,6 @@ import 'package:tencent_cloud_chat_demo/src/platform/uikit_media_url_bridge.dart
 import 'package:tencent_cloud_chat_demo/src/platform/uikit_voice_to_text_bridge.dart';
 import 'package:tencent_cloud_chat_demo/src/services/login_coordinator.dart';
 import 'package:tencent_cloud_chat_demo/src/services/in_app_notification_sound.dart';
-import 'package:tencent_cloud_chat_demo/src/services/group_live/group_live_tencent_licence.dart';
 import 'package:tencent_cloud_chat_demo/src/services/ios_apns_push_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/push_registration_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/session_expiry_service.dart';
@@ -99,16 +99,11 @@ Future<void> _warmWebBundledFonts() async {
 }
 
 void _startApp(List<String> args) {
-  if (kDebugMode) {
-    debugPrint('args: $args');
-  }
   if (runWebViewTitleBarWidget(args)) {
     return;
   }
   WidgetsFlutterBinding.ensureInitialized();
-  if (!kIsWeb && (Platform.isIOS || Platform.isAndroid)) {
-    unawaited(GroupLiveTencentLicence.ensureConfigured());
-  }
+  MediaKit.ensureInitialized();
   if (!kIsWeb && Platform.isAndroid) {
     final picker = ImagePickerPlatform.instance;
     if (picker is ImagePickerAndroid) {
@@ -133,16 +128,6 @@ void _startApp(List<String> args) {
   }
 
   configureImageCache();
-  if (kDebugMode) {
-    final cache = PaintingBinding.instance.imageCache;
-    // ignore: avoid_print
-    print(
-      '[CHAT_JITTER] event=image_cache_init '
-      'platform=${kIsWeb ? 'web' : Platform.operatingSystem} '
-      'maxCount=${cache.maximumSize} '
-      'maxBytes=${cache.maximumSizeBytes}',
-    );
-  }
   _installWebErrorGuard();
   // 冷启动与原生闪屏对齐：沉浸式透明系统栏
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);

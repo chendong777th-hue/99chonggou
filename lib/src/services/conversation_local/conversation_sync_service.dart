@@ -11,6 +11,10 @@ import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversa
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_flags.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_gate_log.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_mutation_event.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_mutation_coordinator.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_mutation_shadow_bridge.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_pending_sdk_sync.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_pin_hydrate_policy.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/c2c_history_backfill.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_unread_aggregate.dart';
@@ -22,6 +26,7 @@ import 'package:tencent_cloud_chat_demo/src/services/friend_local/friend_local_s
 import 'package:tencent_cloud_chat_demo/src/services/foreground_chat_guard.dart';
 import 'package:tencent_cloud_chat_demo/src/services/active_chat_registry.dart';
 import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/models/me_group_record.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_membership_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_history_warm_scheduler.dart';
@@ -30,9 +35,11 @@ import 'package:tencent_cloud_chat_demo/src/services/im_snapshot_bootstrap_servi
 import 'package:tencent_cloud_chat_demo/src/services/resume_foreground_policy.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/group_conversation_visibility.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/message_conversation_id.dart';
+import 'package:tencent_cloud_chat_demo/src/utils/typing_status_message.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_demo/utils/group_display_resolver.dart';
 import 'package:tencent_cloud_chat_demo/utils/group_tips_message_helper.dart';
+import 'package:tencent_cloud_chat_demo/utils/chat_image_message_prefetch.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/services/display_name_store.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/revoked_message_preview.dart';
 import 'package:tencent_cloud_chat_sdk/enum/conversation_type.dart';
@@ -56,6 +63,39 @@ import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_conversation_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_friendship_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/mobile_async_commit_guard.dart';
+
+class _PendingConversationEvent {
+  const _PendingConversationEvent({
+    required this.ownerUserId,
+    required this.ownerGeneration,
+    required this.canonicalConversationId,
+    required this.sequence,
+    required this.source,
+    required this.allowRecreate,
+    required this.reason,
+    required this.snapshot,
+    required this.fingerprint,
+  });
+
+  final String ownerUserId;
+  final int ownerGeneration;
+  final String canonicalConversationId;
+  final int sequence;
+  final ConversationMutationSource source;
+  final bool allowRecreate;
+  final String reason;
+  final V2TimConversation snapshot;
+  final String fingerprint;
+}
+
+enum _TypedPagePullResult {
+  loaded,
+  empty,
+  failed,
+  stale,
+  noMore,
+}
 
 /// SDK 会话变更统一写入 [ConversationLocalStore]，UI 通过 [ConversationListNotifier] 读库渲染。
 class ConversationSyncService {
@@ -67,13 +107,24 @@ class ConversationSyncService {
 
   bool _installed = false;
   bool _pageSyncInFlight = false;
+  String _pageSyncOwner = '';
+  int _pageSyncOwnerGeneration = -1;
   int _syncGeneration = 0;
+  final MobileAsyncCommitGuard _lifecycleGuard = MobileAsyncCommitGuard();
   V2TimConversationListener? _listener;
   V2TimAdvancedMsgListener? _messageListener;
+  bool _messageListenerAttached = false;
+  Future<void>? _messageListenerAttachInFlight;
+  Future<void>? _conversationListenerAttachInFlight;
+  SessionIdentity? _realtimeIdentity;
   DateTime? _lastSyncServerFinishAt;
   Timer? _syncServerFinishTimer;
   static const Duration _syncServerFinishDebounce = Duration(seconds: 45);
   static const Duration _syncServerFinishDelay = Duration(milliseconds: 350);
+
+  void invalidateLifecycle() {
+    _lifecycleGuard.advancePage();
+  }
 
   /// 冷启动 bootstrap 可能在 SDK 离线消息入库前完成；需等 [onSyncServerFinish] 后再拉一次。
   bool _awaitingPostServerSync = false;
@@ -85,7 +136,7 @@ class ConversationSyncService {
 
   /// 本登录已做过（或尝试过）好友/置顶补壳扫描。
   bool _c2cFriendScanDone = false;
-  _PendingSdkSync? _pendingSdkSync;
+  ConversationPendingSdkSync? _pendingSdkSync;
   bool _backgroundDrainInFlight = false;
   Timer? _idleDrainTimer;
 
@@ -122,12 +173,17 @@ class ConversationSyncService {
   bool _reloadUiDirty = false;
   bool _reloadUiDirtyForceFull = false;
 
-  final Map<String, V2TimConversation> _persistDedupBuffer =
-      <String, V2TimConversation>{};
+  final List<_PendingConversationEvent> _pendingPersistEvents =
+      <_PendingConversationEvent>[];
+  static const int _pendingPersistEventCap = 512;
+  String _pendingPersistOwner = '';
+  int _pendingPersistOwnerGeneration = 0;
+  Future<void> _persistFlushTail = Future<void>.value();
   final Map<String, String> _viewModelPersistFingerprints = <String, String>{};
   final Map<String, String> _persistInFlightFingerprints = <String, String>{};
   Timer? _persistDedupTimer;
-  String _persistPendingReason = 'changed';
+  int _persistCommitSequence = 0;
+  final Map<String, int> _latestPersistSequenceById = <String, int>{};
   String? _recentlyLeftConversationId;
 
   /// 群成员库尚未含本人时到达的群会话：先挂起，入群后再落库上屏（避免杀进程才看见）。
@@ -159,6 +215,9 @@ class ConversationSyncService {
   @visibleForTesting
   Future<List<V2TimConversation>> Function(List<V2TimConversation>)?
       upsertBatchOverride;
+
+  @visibleForTesting
+  String? debugOwnerUserId;
 
   /// 单测注入 ByFilter 拉页。
   @visibleForTesting
@@ -227,17 +286,22 @@ class ConversationSyncService {
     reloadUiImplOverride = null;
     markReadStoreOverride = null;
     upsertBatchOverride = null;
+    debugOwnerUserId = null;
     _reloadUiInFlight = null;
     _reloadUiDirty = false;
     _reloadUiDirtyForceFull = false;
     _pendingCoalesceForceFull = false;
     _persistDedupTimer?.cancel();
     _persistDedupTimer = null;
-    _persistDedupBuffer.clear();
+    _persistCommitSequence = 0;
+    _latestPersistSequenceById.clear();
+    _pendingPersistEvents.clear();
+    _pendingPersistOwner = '';
+    _pendingPersistOwnerGeneration++;
+    _persistFlushTail = Future<void>.value();
     _viewModelPersistFingerprints.clear();
     _persistInFlightFingerprints.clear();
     persistFlushInvocationCount = 0;
-    _persistPendingReason = 'changed';
     _recentlyLeftConversationId = null;
     _pendingSdkSync = null;
     _backgroundDrainInFlight = false;
@@ -440,11 +504,11 @@ class ConversationSyncService {
     final byToken = <String, String>{};
     final avatarByToken = <String, String>{};
     for (final record in records) {
-      final name = record.groupName.trim();
       final groupId = record.groupId.trim();
       if (groupId.isEmpty) {
         continue;
       }
+      final name = record.groupName.trim();
       final token = ChatIdFormat.groupEquivalenceToken(groupId) ?? groupId;
       if (name.isNotEmpty &&
           !GroupDisplayResolver.looksLikeGroupIdLabel(name, groupId: groupId)) {
@@ -464,7 +528,7 @@ class ConversationSyncService {
       return;
     }
 
-    final toPersist = <V2TimConversation>[];
+    final committed = <V2TimConversation>[];
     for (final conversation
         in ConversationListNotifier.instance.conversations) {
       final groupId = conversation.groupID?.trim() ?? '';
@@ -474,48 +538,44 @@ class ConversationSyncService {
       final token = ChatIdFormat.groupEquivalenceToken(groupId) ?? groupId;
       final name = byToken[token];
       final avatar = avatarByToken[token];
-      var touched = false;
+      String? patchedName;
+      String? patchedAvatar;
       if (name != null && name.isNotEmpty) {
         final current = conversation.showName?.trim() ?? '';
         if (current != name) {
-          ConversationListNotifier.instance.applyShowNameLocally(
-            conversationID: conversation.conversationID,
-            showName: name,
-          );
-          conversation.showName = name;
-          touched = true;
+          patchedName = name;
         }
       }
       if (avatar != null && avatar.isNotEmpty) {
         final currentFace = conversation.faceUrl?.trim() ?? '';
         if (currentFace != avatar) {
-          ConversationListNotifier.instance.applyFaceUrlLocally(
-            conversationID: conversation.conversationID,
-            faceUrl: avatar,
-          );
-          conversation.faceUrl = avatar;
-          touched = true;
+          patchedAvatar = avatar;
         }
       }
-      if (touched) {
-        toPersist.add(conversation);
+      if (patchedName != null || patchedAvatar != null) {
+        final updated = await applyConversationMetadataPatch(
+          conversationID: conversation.conversationID,
+          showName: patchedName,
+          faceUrl: patchedAvatar,
+          snapshot: conversation,
+          remoteAuthority: true,
+        );
+        if (updated != null) {
+          committed.add(updated);
+        }
       }
     }
-    if (toPersist.isEmpty) {
-      return;
+    if (committed.isNotEmpty) {
+      await _notifyUiAfterLocalWrite(upserted: committed);
     }
-    await ConversationLocalStore.instance.upsertBatch(
-      conversations: toPersist,
-    );
   }
 
   /// 会话同步明细日志。默认关闭：冷启/删除风暴时 print 极密，debug/release 均会刷屏。
   static const bool _logEnabled = false;
 
-  // ignore: avoid_print
   static void _log(String message) {
     if (!_logEnabled) return;
-    print('ConversationSync: $message');
+    debugPrint('ConversationSync: $message');
   }
 
   void install() {
@@ -523,48 +583,201 @@ class ConversationSyncService {
       return;
     }
     _installed = true;
+  }
+
+  V2TimConversationListener _createConversationListener(
+    SessionIdentity identity,
+  ) {
     _listener = V2TimConversationListener(
       onConversationChanged: (list) {
-        unawaited(_persistChanged(list, reason: 'changed'));
+        if (!_isCurrentRealtimeIdentity(identity)) return;
+        unawaited(
+          _persistChanged(
+            list,
+            reason: 'changed',
+            source: ConversationMutationSource.sdkRealtime,
+            allowRecreate: false,
+            identity: identity,
+          ),
+        );
       },
       onNewConversation: (list) {
-        unawaited(_persistChanged(list, reason: 'new'));
+        if (!_isCurrentRealtimeIdentity(identity)) return;
+        unawaited(
+          _persistChanged(
+            list,
+            reason: 'new',
+            source: ConversationMutationSource.sdkRealtime,
+            allowRecreate: true,
+            identity: identity,
+          ),
+        );
       },
       onConversationDeleted: (ids) {
-        // 与用户删除/清空一致：真删本地行，不因清空水位回钉空壳。
-        unawaited(_persistDeleted(ids, force: true));
+        if (!_isCurrentRealtimeIdentity(identity)) return;
+        unawaited(_persistSdkDeleted(ids, identity: identity));
       },
       onSyncServerFinish: () {
-        _scheduleSyncServerFinish();
+        if (!_isCurrentRealtimeIdentity(identity)) return;
+        _scheduleSyncServerFinish(identity);
       },
     );
-    unawaited(
-      TencentImSDKPlugin.v2TIMManager
-          .getConversationManager()
-          .addConversationListener(listener: _listener!),
-    );
+    return _listener!;
+  }
+
+  V2TimAdvancedMsgListener _createMessageListener(SessionIdentity identity) {
     _messageListener = V2TimAdvancedMsgListener(
       onRecvMessageRevoked: (msgID) {
-        unawaited(markConversationLastMessageRevoked(msgID: msgID));
+        if (!_isCurrentRealtimeIdentity(identity)) return;
+        unawaited(
+          markConversationLastMessageRevoked(
+            msgID: msgID,
+            identity: identity,
+          ),
+        );
       },
       onRecvMessageRevokedWithInfo: (msgID, operateUser, reason) {
+        if (!_isCurrentRealtimeIdentity(identity)) return;
         unawaited(
           markConversationLastMessageRevoked(
             msgID: msgID,
             isAdmin: _isAdminRevokeReason(reason),
             revoker: operateUser,
+            identity: identity,
           ),
         );
       },
       onRecvNewMessage: (message) {
-        _onRecvNewMessageForMembershipBridge(message);
+        if (!_isCurrentRealtimeIdentity(identity)) return;
+        _patchInboundConversationPreview(message, identity: identity);
+        _onRecvNewMessageForMembershipBridge(message, identity: identity);
+        if ((message.groupID?.trim() ?? '').isEmpty) {
+          ChatImageMessagePrefetch.prefetchThumbnailForMessage(message);
+        }
       },
     );
-    unawaited(
-      TencentImSDKPlugin.v2TIMManager
-          .getMessageManager()
-          .addAdvancedMsgListener(listener: _messageListener!),
-    );
+    return _messageListener!;
+  }
+
+  /// Binds realtime callbacks to the account that has just completed IM login.
+  Future<void> activateRealtimeSession() async {
+    await detachRealtimeListeners();
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) {
+      return;
+    }
+    _realtimeIdentity = identity;
+    final conversationListener = _createConversationListener(identity);
+    _createMessageListener(identity);
+    try {
+      final task = TencentImSDKPlugin.v2TIMManager
+          .getConversationManager()
+          .addConversationListener(listener: conversationListener);
+      _conversationListenerAttachInFlight = task;
+      try {
+        await task;
+      } finally {
+        if (identical(_conversationListenerAttachInFlight, task)) {
+          _conversationListenerAttachInFlight = null;
+        }
+      }
+      if (!_isCurrentRealtimeIdentity(identity)) {
+        await detachRealtimeListeners();
+        return;
+      }
+    } catch (_) {}
+    await ensureRealtimeMessageListenerAttached();
+  }
+
+  bool _isCurrentRealtimeIdentity(SessionIdentity? identity) {
+    return identity != null &&
+        SessionIdentityService.instance.isCurrent(identity);
+  }
+
+  Future<void> detachRealtimeListeners() async {
+    _realtimeIdentity = null;
+    final conversationListener = _listener;
+    _listener = null;
+    final conversationAttach = _conversationListenerAttachInFlight;
+    if (conversationAttach != null) {
+      try {
+        await conversationAttach;
+      } catch (_) {}
+    }
+    if (conversationListener != null) {
+      try {
+        await TencentImSDKPlugin.v2TIMManager
+            .getConversationManager()
+            .removeConversationListener(listener: conversationListener);
+      } catch (_) {}
+    }
+    final pending = _messageListenerAttachInFlight;
+    if (pending != null) {
+      try {
+        await pending;
+      } catch (_) {}
+    }
+    final messageListener = _messageListener;
+    _messageListener = null;
+    if (messageListener != null) {
+      try {
+        await TencentImSDKPlugin.v2TIMManager
+            .getMessageManager()
+            .removeAdvancedMsgListener(listener: messageListener);
+      } catch (_) {}
+    }
+    _messageListenerAttached = false;
+  }
+
+  /// The service is installed before login, while the SDK may still be
+  /// initializing. Recheck the advanced listener after login/reconnect so the
+  /// inbound preview fallback is not lost because its first registration was
+  /// attempted too early.
+  Future<void> ensureRealtimeMessageListenerAttached(
+      {bool force = false}) async {
+    final listener = _messageListener;
+    final identity = _realtimeIdentity;
+    if (listener == null || !_isCurrentRealtimeIdentity(identity)) {
+      return;
+    }
+    final pending = _messageListenerAttachInFlight;
+    if (pending != null) {
+      await pending;
+    }
+    if (force && _messageListenerAttached) {
+      try {
+        await TencentImSDKPlugin.v2TIMManager
+            .getMessageManager()
+            .removeAdvancedMsgListener(listener: listener);
+      } catch (_) {}
+      _messageListenerAttached = false;
+    }
+    if (_messageListenerAttached) {
+      return;
+    }
+    late final Future<void> task;
+    task = () async {
+      if (!_isCurrentRealtimeIdentity(identity)) {
+        return;
+      }
+      try {
+        await TencentImSDKPlugin.v2TIMManager
+            .getMessageManager()
+            .addAdvancedMsgListener(listener: listener);
+        _messageListenerAttached = identical(_messageListener, listener) &&
+            _isCurrentRealtimeIdentity(identity);
+      } catch (e) {
+        _log('message listener attach failed: $e');
+      }
+    }();
+    _messageListenerAttachInFlight = task;
+    try {
+      await task;
+    } finally {
+      if (identical(_messageListenerAttachInFlight, task)) {
+        _messageListenerAttachInFlight = null;
+      }
+    }
   }
 
   /// 将本地会话预览中的最后一条消息标记为已撤回。
@@ -573,7 +786,11 @@ class ConversationSyncService {
     String? conversationID,
     bool isAdmin = false,
     V2TimUserFullInfo? revoker,
+    SessionIdentity? identity,
   }) async {
+    if (identity != null && !_isCurrentRealtimeIdentity(identity)) {
+      return;
+    }
     final targetMsgID = msgID.trim();
     if (targetMsgID.isEmpty) {
       return;
@@ -583,11 +800,17 @@ class ConversationSyncService {
     if (normalizedConversationID.isNotEmpty) {
       conversation = await ConversationLocalStore.instance
           .conversationById(normalizedConversationID);
+      if (identity != null && !_isCurrentRealtimeIdentity(identity)) {
+        return;
+      }
     }
     conversation ??= ConversationListNotifier.instance
         .findConversationByLastMessageId(targetMsgID);
     conversation ??=
         await ConversationLocalStore.instance.findByLastMsgId(targetMsgID);
+    if (identity != null && !_isCurrentRealtimeIdentity(identity)) {
+      return;
+    }
 
     final source = conversation?.lastMessage;
     if (conversation == null ||
@@ -605,14 +828,20 @@ class ConversationSyncService {
     );
     conversation.lastMessage = lastMessage;
 
-    ConversationListNotifier.instance.applyLastMessageLocally(
-      conversationID: conversation.conversationID,
-      message: lastMessage,
+    ConversationSdkCommittedBatch? committedBatch;
+    final merged = await _commitSdkConversationBatch(
+      ownerUserId: identity?.ownerUserId ?? _ownerUserId(),
+      conversations: <V2TimConversation>[conversation],
+      source: ConversationMutationSource.sdkRealtime,
+      onCommittedBatch: (result) => committedBatch = result,
     );
-    final merged = await ConversationLocalStore.instance.upsertBatch(
-      conversations: [conversation],
+    if (identity != null && !_isCurrentRealtimeIdentity(identity)) {
+      return;
+    }
+    await _notifyUiAfterLocalWrite(
+      upserted: merged,
+      committedBatch: committedBatch,
     );
-    await _notifyUiAfterLocalWrite(upserted: merged);
   }
 
   static bool _isAdminRevokeReason(String reason) {
@@ -623,8 +852,26 @@ class ConversationSyncService {
     return normalized.contains('admin') || normalized.contains('groupowner');
   }
 
-  String _ownerUserId() =>
-      ChatIdFormat.rawUserUid(ContactSocialCacheStore.safeLoginUserId());
+  String _ownerUserId() => ChatIdFormat.rawUserUid(
+        debugOwnerUserId ?? ContactSocialCacheStore.safeLoginUserId(),
+      );
+
+  Future<void> _restoreDurableMutationState({
+    required String ownerUserId,
+    required String conversationId,
+  }) async {
+    final durable =
+        await ConversationLocalStore.instance.coordinatorDurableState(
+      ownerUserId: ownerUserId,
+      conversationId: conversationId,
+    );
+    ConversationMutationShadowBridge.instance.restoreDurableConversationState(
+      ownerUserId: ownerUserId,
+      conversationId: conversationId,
+      generation: durable.generation,
+      tombstoned: durable.tombstoned,
+    );
+  }
 
   void _notifyChatRoamingSyncFinished() {
     try {
@@ -632,16 +879,22 @@ class ConversationSyncService {
     } catch (_) {}
   }
 
-  void _scheduleSyncServerFinish() {
+  void _scheduleSyncServerFinish(SessionIdentity identity) {
     _syncServerFinishTimer?.cancel();
     _syncServerFinishTimer = Timer(_syncServerFinishDelay, () {
       _syncServerFinishTimer = null;
+      if (!_isCurrentRealtimeIdentity(identity)) {
+        return;
+      }
       _notifyChatRoamingSyncFinished();
-      unawaited(_handleSyncServerFinish());
+      unawaited(_handleSyncServerFinish(identity));
     });
   }
 
-  Future<void> _handleSyncServerFinish() async {
+  Future<void> _handleSyncServerFinish(SessionIdentity identity) async {
+    if (!_isCurrentRealtimeIdentity(identity)) {
+      return;
+    }
     final last = _lastSyncServerFinishAt;
     final now = DateTime.now();
     if (last != null && now.difference(last) < _syncServerFinishDebounce) {
@@ -649,8 +902,18 @@ class ConversationSyncService {
       return;
     }
 
-    final meta = await ConversationLocalStore.instance.readSyncMeta();
-    final rowCount = await ConversationLocalStore.instance.countRows();
+    final meta = await ConversationLocalStore.instance.readSyncMeta(
+      ownerUserId: identity.ownerUserId,
+    );
+    if (!_isCurrentRealtimeIdentity(identity)) {
+      return;
+    }
+    final rowCount = await ConversationLocalStore.instance.countRows(
+      ownerUserId: identity.ownerUserId,
+    );
+    if (!_isCurrentRealtimeIdentity(identity)) {
+      return;
+    }
     final needsFullReset = shouldFullResetOnServerFinish(
       hasSyncedOnce: meta.hasSyncedOnce,
       rowCount: rowCount,
@@ -703,6 +966,7 @@ class ConversationSyncService {
         drainMode: ConversationSdkDrainMode.foregroundLimited,
         reloadUiEachPage: false,
       );
+      if (!_isCurrentRealtimeIdentity(identity)) return;
       _awaitingPostServerSync = false;
     } else if (_awaitingPostServerSync) {
       _log('sync_server_finish_catchup reset=false');
@@ -712,6 +976,7 @@ class ConversationSyncService {
         drainMode: ConversationSdkDrainMode.foregroundLimited,
         reloadUiEachPage: false,
       );
+      if (!_isCurrentRealtimeIdentity(identity)) return;
       _awaitingPostServerSync = false;
     } else {
       _log('sync_server_finish incremental first page');
@@ -721,6 +986,7 @@ class ConversationSyncService {
         drainMode: ConversationSdkDrainMode.singlePage,
         reloadUiEachPage: false,
       );
+      if (!_isCurrentRealtimeIdentity(identity)) return;
     }
     unawaited(
       GroupMembershipSyncService.instance.pruneStaleGroupConversations(
@@ -924,19 +1190,27 @@ class ConversationSyncService {
     List<String> deletedIds = const [],
     List<String> exactDeletedIds = const [],
     V2TimConversation? updated,
+    ConversationSdkCommittedBatch? committedBatch,
     bool fullReload = false,
     bool immediate = false,
   }) async {
     if (fullReload) {
       if (ConversationPerfFlags.conversationListSdkPrimary) {
         // Phase2：整窗刷新走 TabStore，不读自建库。
-        await ConversationListNotifier.instance.reloadFromLocal();
+        await ConversationListNotifier.instance.restoreStoreProjection(
+          reason: ConversationStoreProjectionReason.sdkCompatibilityRecovery,
+        );
         return;
       }
       await reloadUiFromLocal(immediate: immediate);
       return;
     }
-    if (!immediate && _shouldDeferPersistUiApply()) {
+    final hasAuthoritativeSdkBatch =
+        ConversationPerfFlags.conversationListSdkPrimary &&
+        committedBatch != null;
+    if (!immediate &&
+        _shouldDeferPersistUiApply() &&
+        !hasAuthoritativeSdkBatch) {
       final cause = _persistUiDeferCause() ?? 'unknown';
       final batch = <V2TimConversation>[
         if (updated != null) updated,
@@ -948,12 +1222,14 @@ class ConversationSyncService {
     // 兼容旧开关：仍允许「只排 soft reload」路径（当 persistUiApplyWhileFeedScrolling=true）。
     if (!immediate &&
         ConversationPerfFlags.deferUiNotifyWhileFeedScrolling &&
-        _isFeedScrollingNow) {
+        _isFeedScrollingNow &&
+        !hasAuthoritativeSdkBatch) {
       _scheduleCoalescedReloadUi(postPop: isInPostPopCoalesceWindow);
       return;
     }
     if (updated != null) {
-      await ConversationListNotifier.instance.applyConversationsFromStore(
+      await ConversationListNotifier.instance.applyCompatibilityStoreProjection(
+        reason: ConversationStoreProjectionReason.sdkCompatibilityRecovery,
         upserted: [updated],
       );
       return;
@@ -963,7 +1239,26 @@ class ConversationSyncService {
       ...exactDeletedIds.map((e) => e.trim()).where((e) => e.isNotEmpty),
     }.toList(growable: false);
     if (upserted.isNotEmpty || mergedDeleted.isNotEmpty) {
-      await ConversationListNotifier.instance.applyConversationsFromStore(
+      if (ConversationPerfFlags.conversationListSdkPrimary &&
+          committedBatch != null) {
+        await ConversationListNotifier.instance.applyCommittedBatch(
+          ConversationUiSnapshotBatch<V2TimConversation>(
+            upsertedSnapshots: committedBatch.upserted.isNotEmpty
+                ? committedBatch.upserted
+                : upserted,
+            deletedCanonicalIds: mergedDeleted,
+            structureChanged:
+                committedBatch.structureChanged || mergedDeleted.isNotEmpty,
+            changedFieldMasks: committedBatch.changedFieldMasks,
+            commitGeneration: 0,
+            unreadDeltas: committedBatch.unreadDeltas,
+            unreadProjectionComplete: committedBatch.unreadProjectionComplete,
+          ),
+        );
+        return;
+      }
+      await ConversationListNotifier.instance.applyCompatibilityStoreProjection(
+        reason: ConversationStoreProjectionReason.sdkCompatibilityRecovery,
         upserted: upserted,
         deletedIds: mergedDeleted,
       );
@@ -1203,7 +1498,10 @@ class ConversationSyncService {
       },
     );
     if (inWindow.isNotEmpty) {
-      await notifier.applyWindowPatchesIfNeeded(upserted: inWindow);
+      await notifier.applyCompatibilityStoreProjection(
+        reason: ConversationStoreProjectionReason.sdkCompatibilityRecovery,
+        upserted: inWindow,
+      );
     } else if (!ConversationPerfGateLog.skipUnreadAggregateScheduleForTest) {
       ConversationUnreadAggregate.instance.scheduleRefresh(
         reason: 'flush_${reason}_outside_only',
@@ -1235,10 +1533,18 @@ class ConversationSyncService {
       var groupAdded = 0;
       var c2cAdded = 0;
       if (needGroup) {
-        groupAdded = (await notifier.appendOlderFromLocal(convType: 2)).added;
+        groupAdded = (await notifier.appendOlderFromLocal(
+          convType: 2,
+          protectVirtualViewport: true,
+        ))
+            .added;
       }
       if (needC2c) {
-        c2cAdded = (await notifier.appendOlderFromLocal(convType: 1)).added;
+        c2cAdded = (await notifier.appendOlderFromLocal(
+          convType: 1,
+          protectVirtualViewport: true,
+        ))
+            .added;
       }
       ConversationPerfGateLog.log(
         'ui_apply_flush_append',
@@ -1359,8 +1665,12 @@ class ConversationSyncService {
         'count': batch.length,
       },
     );
-    final merged = await ConversationLocalStore.instance.upsertBatch(
+    ConversationSdkCommittedBatch? committedBatch;
+    final merged = await _commitSdkConversationBatch(
+      ownerUserId: _ownerUserId(),
       conversations: batch,
+      source: ConversationMutationSource.sdkPage,
+      onCommittedBatch: (result) => committedBatch = result,
     );
     if (merged.isEmpty) {
       return;
@@ -1369,11 +1679,18 @@ class ConversationSyncService {
       merged,
       reason: 'view_model_flush_$reason',
       allowDefer: false,
+      committedBatch: committedBatch,
     );
     // 写库后同样尝试 append，避免只 defer 不进窗。
     final notifier = ConversationListNotifier.instance;
-    await notifier.appendOlderFromLocal(convType: 2);
-    await notifier.appendOlderFromLocal(convType: 1);
+    await notifier.appendOlderFromLocal(
+      convType: 2,
+      protectVirtualViewport: true,
+    );
+    await notifier.appendOlderFromLocal(
+      convType: 1,
+      protectVirtualViewport: true,
+    );
   }
 
   Future<void> _reloadUiFromLocalImpl({bool forceFull = false}) async {
@@ -1414,7 +1731,9 @@ class ConversationSyncService {
           'forceFull': forceFull,
         },
       );
-      await ConversationListNotifier.instance.reloadFromLocal();
+      await ConversationListNotifier.instance.restoreStoreProjection(
+        reason: ConversationStoreProjectionReason.sdkCompatibilityRecovery,
+      );
       return;
     }
     if (!forceFull) {
@@ -1432,7 +1751,9 @@ class ConversationSyncService {
       await reloadUiImplOverride!();
       return;
     }
-    await ConversationListNotifier.instance.reloadFromLocal();
+    await ConversationListNotifier.instance.restoreStoreProjection(
+      reason: ConversationStoreProjectionReason.sdkCompatibilityRecovery,
+    );
     final meta = await ConversationLocalStore.instance.readSyncMeta();
     ConversationListSyncNotifier.instance.setHasSyncedOnce(meta.hasSyncedOnce);
   }
@@ -1476,7 +1797,8 @@ class ConversationSyncService {
           leftId,
         );
         if (local != null) {
-          await notifier.applyConversationsFromStore(
+          await notifier.applyCompatibilityStoreProjection(
+            reason: ConversationStoreProjectionReason.sdkCompatibilityRecovery,
             upserted: [local],
             forceAdmitIds: <String>{leftId},
           );
@@ -1517,7 +1839,8 @@ class ConversationSyncService {
       }
     }
     if (upserted.isNotEmpty) {
-      await notifier.applyConversationsFromStore(
+      await notifier.applyCompatibilityStoreProjection(
+        reason: ConversationStoreProjectionReason.sdkCompatibilityRecovery,
         upserted: upserted,
         forceAdmitIds: leftId.isEmpty ? const <String>{} : <String>{leftId},
       );
@@ -1532,6 +1855,7 @@ class ConversationSyncService {
     List<V2TimConversation> merged, {
     required String reason,
     bool allowDefer = true,
+    ConversationSdkCommittedBatch? committedBatch,
   }) async {
     if (merged.isEmpty) {
       return;
@@ -1571,9 +1895,27 @@ class ConversationSyncService {
       }
     }
     if (forUi.isNotEmpty) {
-      await notifier.applyWindowPatchesIfNeeded(upserted: forUi);
+      await notifier.applyCommittedBatch(
+        ConversationUiSnapshotBatch<V2TimConversation>(
+          upsertedSnapshots: forUi,
+          deletedCanonicalIds: const <String>[],
+          structureChanged: committedBatch?.structureChanged ?? false,
+          changedFieldMasks: committedBatch?.changedFieldMasks ??
+              const <String, Set<ConversationMutationField>>{},
+          commitGeneration: 0,
+          unreadDeltas: committedBatch?.unreadDeltas.map(
+                (delta) => ConversationUiUnreadDelta(
+                  isGroup: delta.isGroup,
+                  oldNotifiable: delta.oldNotifiable,
+                  newNotifiable: delta.newNotifiable,
+                ),
+              ) ??
+              const <ConversationUiUnreadDelta>[],
+          unreadProjectionComplete: committedBatch?.unreadProjectionComplete,
+        ),
+      );
     }
-    if (anyColdOutOfWindow) {
+    if (anyColdOutOfWindow && committedBatch == null) {
       ConversationUnreadAggregate.instance.scheduleRefresh(reason: reason);
     }
   }
@@ -1584,12 +1926,42 @@ class ConversationSyncService {
     V2TimConversation? snapshot,
     double? listScrollOffset,
   }) async {
-    final updated =
-        await ConversationLocalStore.instance.updateConversationPinnedLocally(
-      conversationID: conversationID,
-      isPinned: isPinned,
-      snapshot: snapshot,
+    final owner = _ownerUserId();
+    await _restoreDurableMutationState(
+      ownerUserId: owner,
+      conversationId: conversationID,
     );
+    final plan = await ConversationMutationShadowBridge.instance
+        .prepareLocalIntentCommit(
+      ownerUserId: owner,
+      conversationId: conversationID,
+      fieldPatch: <ConversationMutationField, Object?>{
+        ConversationMutationField.pin: isPinned,
+      },
+      fullSnapshot: snapshot,
+    );
+    final commit = plan == null
+        ? null
+        : await ConversationLocalStore.instance.commitCoordinatorPlan(
+            plan: plan,
+          );
+    var updated = commit == null || commit.upsertedSnapshots.isEmpty
+        ? null
+        : commit.upsertedSnapshots.first;
+    if (updated == null) {
+      // SDK realtime 可能先把 coordinator 的 pin 字段推进到目标值，随后本地
+      // confirmed intent 会变成 no-plan/noop。此时仍要修复 SQLite is_pinned，
+      // 否则虚拟列表重水合后会重新按时间序显示带图钉的会话。
+      await ConversationLocalStore.instance.replaceAllPinnedFlags(
+        pinnedConversationIds:
+            ConversationPinSyncService.instance.pinnedConversationIds,
+        ownerUserId: owner,
+      );
+      updated = await ConversationLocalStore.instance.conversationById(
+        conversationID,
+        ownerUserId: owner,
+      );
+    }
     ConversationPinFlickerLog.log(
       'sync_pin_local_write',
       conversationID: conversationID,
@@ -1604,12 +1976,40 @@ class ConversationSyncService {
       // 先就地改底色，短停顿后重排；视口保持，不主动滚顶。
       // 若乐观阶段已对齐 pin+序，notifier 内会短路跳过二次 deferred。
       final notifier = ConversationListNotifier.instance;
-      notifier.applyPinnedWithDeferredReorder(
-        conversationID: conversationID,
-        isPinned: isPinned,
-        snapshot: updated,
-        listScrollOffset: listScrollOffset,
-      );
+      if (commit != null && commit.shouldNotifyUi) {
+        await notifier.applyCommittedPinBatch(
+          commit.uiBatch,
+          conversationID: conversationID,
+          isPinned: isPinned,
+          listScrollOffset: listScrollOffset,
+        );
+      } else {
+        // The SDK callback may already have advanced the Coordinator, leaving
+        // this confirmed local intent with no plan. The repaired SQLite row is
+        // still a committed Store snapshot; publish it with the durable
+        // generation instead of bypassing the commit projection API.
+        final durable =
+            await ConversationLocalStore.instance.coordinatorDurableState(
+          ownerUserId: owner,
+          conversationId: conversationID,
+        );
+        await notifier.applyCommittedPinBatch(
+          ConversationUiSnapshotBatch<V2TimConversation>(
+            upsertedSnapshots: <V2TimConversation>[updated],
+            deletedCanonicalIds: const <String>[],
+            structureChanged: true,
+            changedFieldMasks: <String, Set<ConversationMutationField>>{
+              conversationID: const <ConversationMutationField>{
+                ConversationMutationField.pin,
+              },
+            },
+            commitGeneration: durable.generation,
+          ),
+          conversationID: conversationID,
+          isPinned: isPinned,
+          listScrollOffset: listScrollOffset,
+        );
+      }
       // 写库后按需校正类型窗：center 跟视口，勿跟掉队会话；窗外才 forceReload。
       final convType =
           (updated.type == 2 || (updated.groupID?.trim().isNotEmpty == true))
@@ -1659,6 +2059,179 @@ class ConversationSyncService {
     return updated;
   }
 
+  Future<void> reconcileConversationPinSetLocally({
+    required Set<String> previousPinnedConversationIds,
+    required Set<String> pinnedConversationIds,
+  }) async {
+    final changed = <String>{
+      ...previousPinnedConversationIds,
+      ...pinnedConversationIds,
+    }.where((id) {
+      final wasPinned = previousPinnedConversationIds.any(
+        (item) => MessageConversationId.sameConversation(item, id),
+      );
+      final isPinned = pinnedConversationIds.any(
+        (item) => MessageConversationId.sameConversation(item, id),
+      );
+      return wasPinned != isPinned;
+    });
+    final owner = _ownerUserId();
+    if (changed.isEmpty) {
+      // Coordinator 无字段变化不等于 SQLite 镜像一定一致。SDK callback
+      // 可能先把 shadow pin 更新为目标值，导致后续本地全量对账没有 plan；
+      // 仍需用已确认的完整置顶集合修复 is_pinned，供虚拟列表索引排序。
+      await ConversationLocalStore.instance.replaceAllPinnedFlags(
+        pinnedConversationIds: pinnedConversationIds,
+        ownerUserId: owner,
+      );
+      return;
+    }
+    final plans = <ConversationDatabaseCommitPlan<V2TimConversation>>[];
+    for (final id in changed) {
+      final pinned = pinnedConversationIds.any(
+        (item) => MessageConversationId.sameConversation(item, id),
+      );
+      await _restoreDurableMutationState(
+        ownerUserId: owner,
+        conversationId: id,
+      );
+      final plan = await ConversationMutationShadowBridge.instance
+          .prepareLocalIntentCommit(
+        ownerUserId: owner,
+        conversationId: id,
+        fieldPatch: <ConversationMutationField, Object?>{
+          ConversationMutationField.pin: pinned,
+        },
+      );
+      if (plan != null) {
+        plans.add(plan);
+      }
+    }
+    await ConversationLocalStore.instance.commitCoordinatorPinSetPlans(
+      plans: plans,
+      pinnedConversationIds: pinnedConversationIds,
+    );
+    // 即使某个 plan 因 shadow 已经是相同值而被忽略，也必须校准镜像列。
+    // 该方法只写实际变化行，正常路径不会造成重复更新。
+    await ConversationLocalStore.instance.replaceAllPinnedFlags(
+      pinnedConversationIds: pinnedConversationIds,
+      ownerUserId: owner,
+    );
+  }
+
+  Future<V2TimConversation?> applyConversationMuteLocally({
+    required String conversationID,
+    required int recvOpt,
+    V2TimConversation? snapshot,
+  }) async {
+    final owner = _ownerUserId();
+    await _restoreDurableMutationState(
+      ownerUserId: owner,
+      conversationId: conversationID,
+    );
+    final plan = await ConversationMutationShadowBridge.instance
+        .prepareLocalIntentCommit(
+      ownerUserId: owner,
+      conversationId: conversationID,
+      fieldPatch: <ConversationMutationField, Object?>{
+        ConversationMutationField.mute: recvOpt,
+      },
+      fullSnapshot: snapshot,
+    );
+    final commit = plan == null
+        ? null
+        : await ConversationLocalStore.instance.commitCoordinatorPlan(
+            plan: plan,
+          );
+    if (commit != null && commit.shouldNotifyUi) {
+      await ConversationListNotifier.instance.applyCommittedBatch(
+        commit.uiBatch,
+      );
+    }
+    return commit == null || commit.upsertedSnapshots.isEmpty
+        ? null
+        : commit.upsertedSnapshots.first;
+  }
+
+  Future<V2TimConversation?> applyConversationUnreadLocally({
+    required String conversationID,
+    required int unreadCount,
+    V2TimConversation? snapshot,
+  }) async {
+    final owner = _ownerUserId();
+    await _restoreDurableMutationState(
+      ownerUserId: owner,
+      conversationId: conversationID,
+    );
+    final plan = await ConversationMutationShadowBridge.instance
+        .prepareLocalIntentCommit(
+      ownerUserId: owner,
+      conversationId: conversationID,
+      fieldPatch: <ConversationMutationField, Object?>{
+        ConversationMutationField.unread: unreadCount,
+      },
+      fullSnapshot: snapshot,
+    );
+    final commit = plan == null
+        ? null
+        : await ConversationLocalStore.instance.commitCoordinatorPlan(
+            plan: plan,
+          );
+    final updated = commit == null || commit.upsertedSnapshots.isEmpty
+        ? null
+        : commit.upsertedSnapshots.first;
+    if (commit != null && commit.shouldNotifyUi) {
+      await ConversationListNotifier.instance.applyCommittedBatch(
+        commit.uiBatch,
+      );
+    }
+    return updated;
+  }
+
+  Future<V2TimConversation?> applyConversationMetadataPatch({
+    required String conversationID,
+    String? showName,
+    String? faceUrl,
+    V2TimConversation? snapshot,
+    bool remoteAuthority = false,
+    bool explicitAuthority = false,
+  }) async {
+    final patch = <ConversationMutationField, Object?>{
+      if (showName != null) ConversationMutationField.name: showName,
+      if (faceUrl != null) ConversationMutationField.avatar: faceUrl,
+    };
+    final owner = _ownerUserId();
+    await _restoreDurableMutationState(
+      ownerUserId: owner,
+      conversationId: conversationID,
+    );
+    final plan =
+        await ConversationMutationShadowBridge.instance.prepareFieldPatchCommit(
+      ownerUserId: owner,
+      conversationId: conversationID,
+      source: explicitAuthority
+          ? ConversationMutationSource.userExplicitMetadata
+          : remoteAuthority
+              ? ConversationMutationSource.remoteMetadata
+              : ConversationMutationSource.localCache,
+      fieldPatch: patch,
+      fullSnapshot: snapshot,
+    );
+    final commit = plan == null
+        ? null
+        : await ConversationLocalStore.instance.commitCoordinatorPlan(
+            plan: plan,
+          );
+    if (commit != null && commit.shouldNotifyUi) {
+      await ConversationListNotifier.instance.applyCommittedBatch(
+        commit.uiBatch,
+      );
+    }
+    return commit == null || commit.upsertedSnapshots.isEmpty
+        ? null
+        : commit.upsertedSnapshots.first;
+  }
+
   Future<bool> get haveMoreData async {
     final meta = await ConversationLocalStore.instance.readSyncMeta();
     return meta.c2cHaveMore || meta.groupHaveMore;
@@ -1682,14 +2255,17 @@ class ConversationSyncService {
     bool loadAllPages = false,
     bool reloadUiEachPage = true,
     ConversationSdkDrainMode? drainMode,
+    int? conversationType,
   }) {
-    final incoming = _PendingSdkSync(
+    final incoming = ConversationPendingSdkSync(
       reason: reason,
       reset: reset,
       force: force,
       loadAllPages: loadAllPages,
       reloadUiEachPage: reloadUiEachPage,
       drainMode: drainMode,
+      conversationTypes:
+          conversationType == null ? null : <int>{conversationType},
     );
     final existing = _pendingSdkSync;
     _pendingSdkSync =
@@ -1698,6 +2274,33 @@ class ConversationSyncService {
       'syncFromSdk queued reason=$reason reset=$reset '
       'loadAllPages=$loadAllPages drainMode=${drainMode?.name}',
     );
+  }
+
+  Future<void> _replayPendingSdkSync(
+    ConversationPendingSdkSync pending,
+  ) async {
+    final types = pending.conversationTypes;
+    if (types == null) {
+      await syncFromSdk(
+        reason: pending.reason,
+        reset: pending.reset,
+        force: pending.force,
+        loadAllPages: pending.loadAllPages,
+        reloadUiEachPage: pending.reloadUiEachPage,
+        drainMode: pending.drainMode,
+      );
+      return;
+    }
+    final orderedTypes = types.toList(growable: false)..sort();
+    for (final type in orderedTypes) {
+      await syncFromSdkByType(
+        convType: type,
+        reason: '${pending.reason}:pending:type=$type',
+        reset: pending.reset,
+        force: pending.force,
+        drainMode: pending.drainMode ?? ConversationSdkDrainMode.singlePage,
+      );
+    }
   }
 
   /// 解析写库节奏；供单测断言 `reset` 不再隐含全量。
@@ -1788,7 +2391,7 @@ class ConversationSyncService {
     );
     await syncFromSdkByType(
       convType: ConversationType.V2TIM_C2C,
-      reason: '$reason#type=${ConversationType.V2TIM_C2C}',
+      reason: reason,
       count: _typedPageCount(ConversationType.V2TIM_C2C),
       drainMode: ConversationSdkDrainMode.singlePage,
     );
@@ -2013,7 +2616,8 @@ class ConversationSyncService {
           _enqueuePendingSync(
             reason: '${reason}_drain',
             drainMode: ConversationSdkDrainMode.backgroundContinue,
-            reloadUiEachPage: false,
+            reloadUiEachPage:
+                ConversationPerfFlags.backgroundUiRefreshEveryPages > 0,
           );
           _log('idle_drain yielded to in-flight sync');
           return;
@@ -2026,6 +2630,14 @@ class ConversationSyncService {
           reloadUiEachPage: false,
         );
         _idleDrainSessionPages++;
+        final refreshEvery =
+            ConversationPerfFlags.backgroundUiRefreshEveryPages;
+        if (refreshEvery > 0 &&
+            _idleDrainSessionPages % refreshEvery == 0) {
+          await ConversationListNotifier.instance.restoreStoreProjection(
+            reason: ConversationStoreProjectionReason.backgroundDrain,
+          );
+        }
         final after = await ConversationLocalStore.instance.readSyncMeta();
         if (!after.c2cHaveMore && !after.groupHaveMore) {
           break;
@@ -2088,6 +2700,8 @@ class ConversationSyncService {
       return;
     }
     _pageSyncInFlight = true;
+    _pageSyncOwner = owner;
+    _pageSyncOwnerGeneration = generation;
     ConversationListSyncNotifier.instance.setSyncing(true);
     try {
       _log(
@@ -2095,6 +2709,9 @@ class ConversationSyncService {
       );
       if (reset) {
         final prev = await ConversationLocalStore.instance.readSyncMeta();
+        if (!_isCurrentSync(owner, generation)) {
+          return;
+        }
         await ConversationLocalStore.instance.writeSyncMeta(
           meta: ConversationSyncMeta(
             nextSeq: '0',
@@ -2109,48 +2726,96 @@ class ConversationSyncService {
         );
       }
       ConversationListNotifier.instance.beginSuppressNotify();
+      var c2cResult = _TypedPagePullResult.stale;
+      var groupResult = _TypedPagePullResult.stale;
       try {
-        await _pullOneTypedPageUnlocked(
-          owner: owner,
-          generation: generation,
-          convType: ConversationType.V2TIM_C2C,
-          count: _typedPageCount(ConversationType.V2TIM_C2C),
-          reason: '$reason:c2c',
-        );
-        await _pullOneTypedPageUnlocked(
-          owner: owner,
-          generation: generation,
-          convType: ConversationType.V2TIM_GROUP,
-          count: _typedPageCount(ConversationType.V2TIM_GROUP),
-          reason: '$reason:group',
-        );
+        // The two typed streams are independent. A transient C2C error must
+        // not prevent the group stream from populating its first page.
+        try {
+          c2cResult = await _pullOneTypedPageUnlocked(
+            owner: owner,
+            generation: generation,
+            convType: ConversationType.V2TIM_C2C,
+            count: _typedPageCount(ConversationType.V2TIM_C2C),
+            reason: '$reason:c2c',
+          );
+        } catch (e, st) {
+          c2cResult = _TypedPagePullResult.failed;
+          _log('bootstrap C2C page failed: $e');
+          if (kIsWeb) {
+            debugPrint('ConversationSync: bootstrap C2C stack: $st');
+          }
+        }
+        if (_isCurrentSync(owner, generation)) {
+          try {
+            groupResult = await _pullOneTypedPageUnlocked(
+              owner: owner,
+              generation: generation,
+              convType: ConversationType.V2TIM_GROUP,
+              count: _typedPageCount(ConversationType.V2TIM_GROUP),
+              reason: '$reason:group',
+            );
+          } catch (e, st) {
+            groupResult = _TypedPagePullResult.failed;
+            _log('bootstrap group page failed: $e');
+            if (kIsWeb) {
+              debugPrint('ConversationSync: bootstrap group stack: $st');
+            }
+          }
+        }
       } finally {
         ConversationListNotifier.instance.endSuppressNotify();
       }
+      if (_isCurrentSync(owner, generation) &&
+          c2cResult == _TypedPagePullResult.failed) {
+        final meta = await ConversationLocalStore.instance.readSyncMeta(
+          ownerUserId: owner,
+        );
+        if (_isCurrentSync(owner, generation) && meta.c2cHaveMore) {
+          // This is replayed after the current page lock is released. Do not
+          // let a successful group page consume the C2C retry opportunity.
+          _enqueuePendingSync(
+            reason: '${reason}:c2c_retry',
+            conversationType: ConversationType.V2TIM_C2C,
+            drainMode: ConversationSdkDrainMode.singlePage,
+            reloadUiEachPage: false,
+          );
+        }
+      }
+      if (!_isCurrentSync(owner, generation)) {
+        return;
+      }
       await reloadUiFromLocal(immediate: true, forceFull: true);
-      ConversationListSyncNotifier.instance.setHasSyncedOnce(true);
+      if (_isCurrentSync(owner, generation) &&
+          c2cResult != _TypedPagePullResult.failed &&
+          groupResult != _TypedPagePullResult.failed) {
+        final latest = await ConversationLocalStore.instance.readSyncMeta(
+          ownerUserId: owner,
+        );
+        if (_isCurrentSync(owner, generation)) {
+          ConversationListSyncNotifier.instance
+              .setHasSyncedOnce(latest.hasSyncedOnce);
+        }
+      }
     } catch (e, st) {
       _log('bootstrapTypedFirstScreen failed: $e');
       if (kIsWeb) {
         debugPrint('ConversationSync: bootstrapTyped stack: $st');
       }
     } finally {
-      _pageSyncInFlight = false;
-      ConversationListSyncNotifier.instance.setSyncing(false);
-      await _replayPendingPatches();
-      final pending = _pendingSdkSync;
-      if (pending != null) {
-        _pendingSdkSync = null;
-        unawaited(
-          syncFromSdk(
-            reason: pending.reason,
-            reset: pending.reset,
-            force: pending.force,
-            loadAllPages: pending.loadAllPages,
-            reloadUiEachPage: pending.reloadUiEachPage,
-            drainMode: pending.drainMode,
-          ),
-        );
+      final ownsPageSync = _pageSyncOwner == owner &&
+          _pageSyncOwnerGeneration == generation;
+      if (ownsPageSync) {
+        _pageSyncInFlight = false;
+        _pageSyncOwner = '';
+        _pageSyncOwnerGeneration = -1;
+        ConversationListSyncNotifier.instance.setSyncing(false);
+        await _replayPendingPatches();
+        final pending = _pendingSdkSync;
+        if (pending != null) {
+          _pendingSdkSync = null;
+          unawaited(_replayPendingSdkSync(pending));
+        }
       }
     }
   }
@@ -2179,19 +2844,25 @@ class ConversationSyncService {
         : drainMode;
     if (_pageSyncInFlight) {
       _enqueuePendingSync(
-        reason: '$reason#type=$type',
+        reason: reason,
         reset: reset,
         force: force,
         drainMode: mode,
         reloadUiEachPage: false,
+        conversationType: type,
       );
       return;
     }
     _pageSyncInFlight = true;
+    _pageSyncOwner = owner;
+    _pageSyncOwnerGeneration = generation;
     ConversationListSyncNotifier.instance.setSyncing(true);
     try {
       if (reset || force) {
         final prev = await ConversationLocalStore.instance.readSyncMeta();
+        if (!_isCurrentSync(owner, generation)) {
+          return;
+        }
         await ConversationLocalStore.instance.writeSyncMeta(
           meta: prev.withTypedCursor(
             convType: type,
@@ -2212,10 +2883,16 @@ class ConversationSyncService {
             count: pageCount,
             reason: reason,
           );
-          if (pulled) {
+          if (!_isCurrentSync(owner, generation)) {
+            break;
+          }
+          if (pulled == _TypedPagePullResult.loaded) {
             pagesLoaded++;
           }
           final meta = await ConversationLocalStore.instance.readSyncMeta();
+          if (!_isCurrentSync(owner, generation)) {
+            break;
+          }
           final haveMore = meta.haveMoreForType(type);
           var shouldContinue = false;
           if (!haveMore) {
@@ -2229,7 +2906,9 @@ class ConversationSyncService {
             await Future<void>.delayed(
               ConversationPerfFlags.backgroundPageYield,
             );
-            shouldContinue = _pendingSdkSync == null && !_shouldPauseIdleWork();
+            shouldContinue = _isCurrentSync(owner, generation) &&
+                _pendingSdkSync == null &&
+                !_shouldPauseIdleWork();
           }
           if (!shouldContinue) {
             break;
@@ -2244,22 +2923,19 @@ class ConversationSyncService {
         debugPrint('ConversationSync: typed sync stack: $st');
       }
     } finally {
-      _pageSyncInFlight = false;
-      ConversationListSyncNotifier.instance.setSyncing(false);
-      await _replayPendingPatches();
-      final pending = _pendingSdkSync;
-      if (pending != null) {
-        _pendingSdkSync = null;
-        unawaited(
-          syncFromSdk(
-            reason: pending.reason,
-            reset: pending.reset,
-            force: pending.force,
-            loadAllPages: pending.loadAllPages,
-            reloadUiEachPage: pending.reloadUiEachPage,
-            drainMode: pending.drainMode,
-          ),
-        );
+      final ownsPageSync = _pageSyncOwner == owner &&
+          _pageSyncOwnerGeneration == generation;
+      if (ownsPageSync) {
+        _pageSyncInFlight = false;
+        _pageSyncOwner = '';
+        _pageSyncOwnerGeneration = -1;
+        ConversationListSyncNotifier.instance.setSyncing(false);
+        await _replayPendingPatches();
+        final pending = _pendingSdkSync;
+        if (pending != null) {
+          _pendingSdkSync = null;
+          unawaited(_replayPendingSdkSync(pending));
+        }
       }
     }
   }
@@ -2270,6 +2946,7 @@ class ConversationSyncService {
     required bool force,
     required int count,
     ConversationSdkDrainMode? drainMode,
+    int? conversationType,
   }) async {
     final r = reason.trim();
     final wantsReset = reset || force;
@@ -2279,12 +2956,9 @@ class ConversationSyncService {
         r == 'initial' ||
         r.startsWith('initial');
 
-    if (r.contains('#type=')) {
-      final type = r.contains('type=2')
-          ? ConversationType.V2TIM_GROUP
-          : ConversationType.V2TIM_C2C;
+    if (conversationType != null) {
       await syncFromSdkByType(
-        convType: type,
+        convType: conversationType,
         reason: r,
         reset: reset,
         force: force,
@@ -2326,8 +3000,8 @@ class ConversationSyncService {
   }
 
   /// 拉一页并更新该类型游标。调用方须已持有 [_pageSyncInFlight]。
-  /// 返回是否写入了会话。
-  Future<bool> _pullOneTypedPageUnlocked({
+  /// 返回本页是否加载、为空、失败或已因会话切换失效。
+  Future<_TypedPagePullResult> _pullOneTypedPageUnlocked({
     required String owner,
     required int generation,
     required int convType,
@@ -2335,13 +3009,13 @@ class ConversationSyncService {
     required String reason,
   }) async {
     if (!_isCurrentSync(owner, generation)) {
-      return false;
+      return _TypedPagePullResult.stale;
     }
     final meta = await ConversationLocalStore.instance.readSyncMeta(
       ownerUserId: owner,
     );
     if (!meta.haveMoreForType(convType)) {
-      return false;
+      return _TypedPagePullResult.noMore;
     }
     final requestedNextSeq = meta.nextSeqForType(convType);
     final fetched = await _fetchConversationListByFilter(
@@ -2350,14 +3024,14 @@ class ConversationSyncService {
       count: count,
     );
     if (!_isCurrentSync(owner, generation)) {
-      return false;
+      return _TypedPagePullResult.stale;
     }
     if (fetched.code != 0) {
       _log(
         'ByFilter fail type=$convType code=${fetched.code} '
         'desc=${fetched.desc} reason=$reason',
       );
-      return false;
+      return _TypedPagePullResult.failed;
     }
     final page = fetched.conversationList;
     final nextSeq = fetched.nextSeq;
@@ -2373,15 +3047,20 @@ class ConversationSyncService {
     if (page.isNotEmpty) {
       final persistable = _filterPersistableConversations(page);
       if (persistable.isNotEmpty) {
-        loadedAny = true;
-        final merged = upsertBatchOverride != null
-            ? await upsertBatchOverride!(persistable)
-            : await ConversationLocalStore.instance.upsertBatch(
-                conversations: persistable,
-                ownerUserId: owner,
-              );
+        final merged = await _commitSdkConversationBatch(
+          ownerUserId: owner,
+          conversations: persistable,
+          source: ConversationMutationSource.sdkPage,
+        );
+        loadedAny = merged.isNotEmpty;
+        unawaited(
+          ConversationMutationShadowBridge.instance.compareLegacyProjection(
+            ownerUserId: owner,
+            conversations: merged,
+          ),
+        );
         if (!_isCurrentSync(owner, generation)) {
-          return false;
+          return _TypedPagePullResult.stale;
         }
         await _purgeObsoleteGroupConversationTwins(
           reason: 'typedSync:$reason',
@@ -2395,15 +3074,26 @@ class ConversationSyncService {
             reason: 'typed_sync_db_only',
           );
         }
+        // A cold-start restore may have terminally observed an empty SQLite
+        // page before this SDK page committed. In SDK-primary mode the paced
+        // path intentionally skips UI apply, so wake only an empty type here.
+        await ConversationListNotifier.instance
+            .refreshEmptySdkPrimaryTypeProjection(
+          convType: convType,
+          reason: 'typed_sync:$reason',
+        );
       }
       unawaited(_purgeRejectedGroupConversations(page));
     }
     if (!_isCurrentSync(owner, generation)) {
-      return false;
+      return _TypedPagePullResult.stale;
     }
     final latest = await ConversationLocalStore.instance.readSyncMeta(
       ownerUserId: owner,
     );
+    if (!_isCurrentSync(owner, generation)) {
+      return _TypedPagePullResult.stale;
+    }
     await ConversationLocalStore.instance.writeSyncMeta(
       meta: latest
           .withTypedCursor(
@@ -2435,7 +3125,9 @@ class ConversationSyncService {
         maybeBackfillC2cFromHistoryPeers(reason: 'typed_c2c_empty:$reason'),
       );
     }
-    return loadedAny;
+    return loadedAny
+        ? _TypedPagePullResult.loaded
+        : _TypedPagePullResult.empty;
   }
 
   bool _isCurrentSync(String owner, int generation) {
@@ -2506,7 +3198,12 @@ class ConversationSyncService {
     bool loadAllPages = false,
     bool reloadUiEachPage = false,
     ConversationSdkDrainMode? drainMode,
+    int? conversationType,
   }) async {
+    final lifecycleToken = _lifecycleGuard.begin('conversation-sync');
+    if (!_lifecycleGuard.canCommit(lifecycleToken)) {
+      return;
+    }
     // 业务灌库只走 ByFilter typed；混流 getConversationList 已退役。
     await _syncFromSdkTypedRedirect(
       reason: reason,
@@ -2514,6 +3211,7 @@ class ConversationSyncService {
       force: force,
       count: count,
       drainMode: drainMode,
+      conversationType: conversationType,
     );
   }
 
@@ -2534,7 +3232,7 @@ class ConversationSyncService {
     }
     await syncFromSdkByType(
       convType: type,
-      reason: 'sync_next_page#type=$type',
+      reason: 'sync_next_page',
       count: count > 0 ? count : _typedPageCount(type),
       drainMode: ConversationSdkDrainMode.singlePage,
     );
@@ -2561,6 +3259,65 @@ class ConversationSyncService {
         _c2cHistoryBackfillInFlight = null;
       }
     }
+  }
+
+  Future<void> _persistSdkDeleted(
+    List<String> ids, {
+    SessionIdentity? identity,
+  }) async {
+    if (identity != null && !_isCurrentRealtimeIdentity(identity)) return;
+    final deleted = await _commitConversationDeletes(
+      ids,
+      ownerUserId: identity?.ownerUserId,
+    );
+    if (identity != null && !_isCurrentRealtimeIdentity(identity)) return;
+    if (deleted.isEmpty) {
+      return;
+    }
+    await _notifyUiAfterLocalWrite(deletedIds: deleted);
+    _notifyActiveChatClosed(deleted);
+  }
+
+  Future<List<String>> _commitConversationDeletes(
+    List<String> ids, {
+    String? ownerUserId,
+  }) async {
+    final owner = ownerUserId?.trim().isNotEmpty == true
+        ? ownerUserId!.trim()
+        : _ownerUserId();
+    for (final id in ids) {
+      await _restoreDurableMutationState(
+        ownerUserId: owner,
+        conversationId: id,
+      );
+    }
+    if (!ConversationMutationShadowBridge.authoritativeSdkCommitEnabled) {
+      // 072 rollback allowlist: the kill switch restores the complete legacy
+      // writer; authoritative and legacy writes are never active together.
+      final admitted = await ConversationMutationShadowBridge.instance
+          .admitSdkDeletedForCommit(
+        ownerUserId: owner,
+        conversationIds: ids,
+      );
+      return ConversationLocalStore.instance.deleteBatch(
+        conversationIds: admitted,
+        ownerUserId: owner,
+      );
+    }
+    final plans =
+        await ConversationMutationShadowBridge.instance.prepareSdkDeleteCommits(
+      ownerUserId: owner,
+      conversationIds: ids,
+    );
+    final deleted = <String>[];
+    for (final plan in plans) {
+      final result = await ConversationLocalStore.instance
+          .commitCoordinatorPlan(plan: plan);
+      if (result.shouldNotifyUi) {
+        deleted.addAll(result.deletedConversationIds);
+      }
+    }
+    return deleted;
   }
 
   Future<C2cHistoryBackfillStats> _runC2cHistoryBackfill({
@@ -2831,30 +3588,13 @@ class ConversationSyncService {
     }
 
     if (admit.isNotEmpty) {
-      final merged = upsertBatchOverride != null
-          ? await upsertBatchOverride!(admit)
-          : await ConversationLocalStore.instance.upsertBatch(
-              conversations: admit,
-              ownerUserId: owner,
-            );
-      // 再刷一遍置顶列，保证 ORDER BY is_pinned 与 PinSync 一致。
-      await ConversationLocalStore.instance.replaceAllPinnedFlags(
-        pinnedConversationIds:
-            ConversationPinSyncService.instance.pinnedConversationIds,
+      final merged = await _commitSdkConversationBatch(
         ownerUserId: owner,
+        conversations: admit,
+        source: ConversationMutationSource.sdkPage,
       );
       await _notifyUiAfterLocalWrite(upserted: merged);
       await ConversationListNotifier.instance.refreshTypeTotals();
-      for (final c in merged) {
-        final opt = c.recvOpt;
-        if (opt == null) {
-          continue;
-        }
-        ConversationListNotifier.instance.applyRecvOptLocally(
-          conversationID: c.conversationID,
-          recvOpt: opt,
-        );
-      }
     }
 
     final stats = C2cHistoryBackfillStats(
@@ -2994,13 +3734,15 @@ class ConversationSyncService {
       return;
     }
 
-    final merged = await ConversationLocalStore.instance.upsertBatch(
-      conversations: <V2TimConversation>[conversation],
+    final merged = await commitCreatedConversation(
+      conversation,
+      notifyUi: false,
     );
     final toShow =
         merged.isNotEmpty ? merged : <V2TimConversation>[conversation];
     final notifier = ConversationListNotifier.instance;
-    await notifier.applyConversationsFromStore(
+    await notifier.applyCompatibilityStoreProjection(
+      reason: ConversationStoreProjectionReason.sdkCompatibilityRecovery,
       upserted: toShow,
       forceAdmitIds: <String>{convId},
     );
@@ -3018,7 +3760,10 @@ class ConversationSyncService {
     }
   }
 
-  Future<void> refreshConversationItem(String conversationID) async {
+  Future<void> refreshConversationItem(
+    String conversationID, {
+    bool allowRecreate = false,
+  }) async {
     final id = conversationID.trim();
     if (id.isEmpty) {
       return;
@@ -3034,10 +3779,18 @@ class ConversationSyncService {
       return;
     }
     _pendingNonMemberGroupConversations.remove(id);
-    final merged = await ConversationLocalStore.instance.upsertBatch(
-      conversations: [conversation],
+    ConversationSdkCommittedBatch? committedBatch;
+    final merged = await _commitSdkConversationBatch(
+      ownerUserId: _ownerUserId(),
+      conversations: <V2TimConversation>[conversation],
+      source: ConversationMutationSource.sdkPage,
+      allowRecreate: allowRecreate,
+      onCommittedBatch: (result) => committedBatch = result,
     );
-    await _notifyUiAfterLocalWrite(upserted: merged);
+    await _notifyUiAfterLocalWrite(
+      upserted: merged,
+      committedBatch: committedBatch,
+    );
   }
 
   /// 用户已经从列表成功打开会话：立即保留 UI 行，并排队落入本地库。
@@ -3057,41 +3810,48 @@ class ConversationSyncService {
       conversation,
     );
     if (!_shouldPersistConversation(conversation)) {
-      const visibilityLog = false;
-      if (visibilityLog) {
-        debugPrint(
-          '[ConversationVisibility] event=open_retain_rejected '
-          'conv=$convId group=${conversation.groupID ?? ''}',
-        );
-      }
       return;
     }
 
     // 先把写请求放入 coalesce 队列，再补 UI；这样即使用户立刻返回，
     // 返回水合门禁也能等到该写入完成。
-    final persist = ConversationLocalStore.instance.upsertBatch(
+    ConversationSdkCommittedBatch? committedBatch;
+    final merged = await _commitSdkConversationBatch(
+      ownerUserId: _ownerUserId(),
       conversations: <V2TimConversation>[conversation],
+      source: ConversationMutationSource.sdkPage,
+      onCommittedBatch: (result) => committedBatch = result,
     );
-    await ConversationListNotifier.instance.applyConversationsFromStore(
-      upserted: <V2TimConversation>[conversation],
-      forceAdmitIds: <String>{convId},
-    );
-    final merged = await persist;
     if (merged.isNotEmpty) {
-      await ConversationListNotifier.instance.applyConversationsFromStore(
-        upserted: merged,
-        forceAdmitIds: <String>{convId},
-      );
+      final notifier = ConversationListNotifier.instance;
+      if (committedBatch != null) {
+        await notifier.applyCommittedBatch(
+          ConversationUiSnapshotBatch<V2TimConversation>(
+            upsertedSnapshots: merged,
+            deletedCanonicalIds: const <String>[],
+            structureChanged: committedBatch!.structureChanged,
+            changedFieldMasks: committedBatch!.changedFieldMasks,
+            commitGeneration: 0,
+            unreadDeltas: committedBatch!.unreadDeltas.map(
+              (delta) => ConversationUiUnreadDelta(
+                isGroup: delta.isGroup,
+                oldNotifiable: delta.oldNotifiable,
+                newNotifiable: delta.newNotifiable,
+              ),
+            ),
+            unreadProjectionComplete: committedBatch!.unreadProjectionComplete,
+          ),
+          forceAdmitIds: <String>{convId},
+        );
+      } else {
+        await notifier.applyCompatibilityStoreProjection(
+          reason: ConversationStoreProjectionReason.sdkCompatibilityRecovery,
+          upserted: merged,
+          forceAdmitIds: <String>{convId},
+        );
+      }
     }
     await ConversationListNotifier.instance.refreshTypeTotals();
-    const visibilityLog = false;
-    if (visibilityLog) {
-      debugPrint(
-        '[ConversationVisibility] event=open_retain_done conv=$convId '
-        'persisted=${merged.isNotEmpty} '
-        'notifier=${ConversationListNotifier.instance.conversations.any((item) => MessageConversationId.sameConversation(item.conversationID, convId))}',
-      );
-    }
   }
 
   /// 本人新入群后：拉 SDK 会话 + 冲刷挂起项 + 热窗 reload（对齐杀进程重开路径）。
@@ -3099,7 +3859,7 @@ class ConversationSyncService {
     final id = ChatIdFormat.normalizeGroupId(groupId);
     if (id.isNotEmpty) {
       final convId = id.startsWith('group_') ? id : 'group_$id';
-      await refreshConversationItem(convId);
+      await refreshConversationItem(convId, allowRecreate: true);
     }
     await flushPendingGroupConversationsAfterMembershipChange();
     _scheduleMembershipExpandHotWindowReload();
@@ -3138,10 +3898,17 @@ class ConversationSyncService {
     if (ready.isEmpty) {
       return;
     }
-    final merged = await ConversationLocalStore.instance.upsertBatch(
+    ConversationSdkCommittedBatch? committedBatch;
+    final merged = await _commitSdkConversationBatch(
+      ownerUserId: _ownerUserId(),
       conversations: ready,
+      source: ConversationMutationSource.sdkPage,
+      onCommittedBatch: (result) => committedBatch = result,
     );
-    await _notifyUiAfterLocalWrite(upserted: merged);
+    await _notifyUiAfterLocalWrite(
+      upserted: merged,
+      committedBatch: committedBatch,
+    );
     _log(
       'flushPendingGroupConversations count=${ready.length} '
       'stillPending=${_pendingNonMemberGroupConversations.length}',
@@ -3174,8 +3941,14 @@ class ConversationSyncService {
     }
   }
 
-  void _onRecvNewMessageForMembershipBridge(V2TimMessage message) {
-    final loginUser = _ownerUserId();
+  void _onRecvNewMessageForMembershipBridge(
+    V2TimMessage message, {
+    SessionIdentity? identity,
+  }) {
+    if (identity != null && !_isCurrentRealtimeIdentity(identity)) {
+      return;
+    }
+    final loginUser = identity?.ownerUserId ?? _ownerUserId();
     if (!GroupTipsMessageHelper.isSelfInvitedOrJoined(message, loginUser)) {
       return;
     }
@@ -3193,6 +3966,37 @@ class ConversationSyncService {
         groupName: pending?.showName?.trim() ?? '',
         avatarUrl: pending?.faceUrl?.trim() ?? '',
       ),
+    );
+  }
+
+  /// Advanced message callbacks are the earliest reliable source for an
+  /// inbound message. Keep the conversation preview independent from the
+  /// notification/banner listener: notification settings may be disabled,
+  /// attached late, or need to be reattached after an IM reconnect.
+  ///
+  /// The conversation listener remains the authoritative SDK snapshot path;
+  /// this patch only fills the gap where that snapshot is delayed or still
+  /// contains the previous lastMessage.
+  void _patchInboundConversationPreview(
+    V2TimMessage message, {
+    SessionIdentity? identity,
+  }) {
+    if (identity != null && !_isCurrentRealtimeIdentity(identity)) {
+      return;
+    }
+    if (message.isSelf == true || TypingStatusMessage.isTypingStatus(message)) {
+      return;
+    }
+    final conversationID = MessageConversationId.fromMessage(message);
+    if (conversationID == null || conversationID.trim().isEmpty) {
+      return;
+    }
+    unawaited(
+      patchConversationLastMessage(
+        conversationID: conversationID,
+        message: message,
+        identity: identity,
+      ).catchError((_) {}),
     );
   }
 
@@ -3317,6 +4121,20 @@ class ConversationSyncService {
     if (id.isEmpty || targets.isEmpty) {
       return;
     }
+    final notifier = ConversationListNotifier.instance;
+    final optimisticApplied = notifier.replaceLastMessageAfterDeleteLocally(
+      conversationID: id,
+      deletedMessageIds: targets,
+      replacement: fallbackLastMessage,
+    );
+    if (kDebugMode) {
+      debugPrint(
+        '[ConversationDeletePreview] sync-start conv=$id '
+        'deleted=${targets.join(',')} '
+        'fallback=${fallbackLastMessage?.msgID ?? fallbackLastMessage?.id ?? '<empty>'} '
+        'optimistic=$optimisticApplied',
+      );
+    }
     // 传入的是裸 userID/groupID；先解析成 store 里存的完整会话 id。
     var storedId = id;
     final matched = await ConversationLocalStore.instance.conversationById(id);
@@ -3330,14 +4148,32 @@ class ConversationSyncService {
       replacement: fallbackLastMessage,
     );
     if (updated == null) {
+      if (kDebugMode) {
+        debugPrint(
+          '[ConversationDeletePreview] store-miss conv=$storedId '
+          'optimistic=$optimisticApplied',
+        );
+      }
       return;
     }
-    if (fallbackLastMessage == null) {
-      ConversationListNotifier.instance.clearLastMessageLocally(storedId);
+    if (updated.lastMessage == null) {
+      notifier.clearLastMessageLocally(storedId);
     }
-    await ConversationListNotifier.instance.applyConversationsFromStore(
+    await notifier.applyCompatibilityStoreProjection(
+      reason: ConversationStoreProjectionReason.sdkCompatibilityRecovery,
       upserted: [updated],
+      changedFieldMasks: <String, Set<ConversationMutationField>>{
+        storedId: <ConversationMutationField>{
+          ConversationMutationField.lastMessage,
+        },
+      },
     );
+    if (kDebugMode) {
+      debugPrint(
+        '[ConversationDeletePreview] projected conv=$storedId '
+        'last=${updated.lastMessage?.msgID ?? updated.lastMessage?.id ?? '<empty>'}',
+      );
+    }
   }
 
   /// 对方已读回执：若预览即为对应己方消息，写回 lastMessage.isPeerRead。
@@ -3384,22 +4220,36 @@ class ConversationSyncService {
       return;
     }
     last.isPeerRead = true;
-    final merged = await ConversationLocalStore.instance.upsertBatch(
-      conversations: [existing],
+    ConversationSdkCommittedBatch? committedBatch;
+    final merged = await _commitSdkConversationBatch(
+      ownerUserId: _ownerUserId(),
+      conversations: <V2TimConversation>[existing],
+      source: ConversationMutationSource.sdkRealtime,
+      onCommittedBatch: (result) => committedBatch = result,
     );
-    await _notifyUiAfterLocalWrite(upserted: merged);
+    await _notifyUiAfterLocalWrite(
+      upserted: merged,
+      committedBatch: committedBatch,
+    );
   }
 
   /// 用当前消息乐观更新本地会话预览，避免横幅先于列表刷新。
   Future<void> patchConversationLastMessage({
     required String conversationID,
     required V2TimMessage message,
+    SessionIdentity? identity,
   }) async {
+    if (identity != null && !_isCurrentRealtimeIdentity(identity)) {
+      return;
+    }
     final id = conversationID.trim();
     if (id.isEmpty) {
       return;
     }
     if (_pageSyncInFlight) {
+      if (identity != null && !_isCurrentRealtimeIdentity(identity)) {
+        return;
+      }
       _pendingPatches[id] = message;
       _patchesQueuedDuringSync++;
       _pendingPatchesFirstQueuedAt ??= DateTime.now();
@@ -3414,6 +4264,7 @@ class ConversationSyncService {
     await _applyPatchConversationLastMessage(
       conversationID: id,
       message: message,
+      identity: identity,
     );
   }
 
@@ -3491,7 +4342,11 @@ class ConversationSyncService {
     required String conversationID,
     required V2TimMessage message,
     bool notifyUi = true,
+    SessionIdentity? identity,
   }) async {
+    if (identity != null && !_isCurrentRealtimeIdentity(identity)) {
+      return null;
+    }
     final id = conversationID.trim();
     if (id.isEmpty) {
       return null;
@@ -3545,6 +4400,9 @@ class ConversationSyncService {
       conversation = await _conversationService.getConversation(
         conversationID: candidate,
       );
+      if (identity != null && !_isCurrentRealtimeIdentity(identity)) {
+        return null;
+      }
       if (conversation != null) {
         break;
       }
@@ -3582,7 +4440,9 @@ class ConversationSyncService {
       );
       // 入群竞态：先挂起并触发成员恢复，勿立刻 prune（否则永远等杀进程）。
       _stashPendingNonMemberGroupConversations([conversation]);
-      // 仍把预览推到内存列表，避免发完消息回列表预览空白。
+      // 072 phase-6 allowlist: membership is not authoritative yet, so this
+      // row cannot be committed. Keep only a transient pending preview until
+      // membership recovery admits it through the Coordinator.
       ConversationListNotifier.instance.applyLastMessageLocally(
         conversationID: conversation.conversationID,
         message: message,
@@ -3606,6 +4466,7 @@ class ConversationSyncService {
         conversation,
         message: message,
         notifyUi: notifyUi,
+        identity: identity,
       );
     }
     final last = conversation.lastMessage;
@@ -3645,6 +4506,7 @@ class ConversationSyncService {
       conversation,
       message: message,
       notifyUi: notifyUi,
+      identity: identity,
     );
   }
 
@@ -3653,26 +4515,38 @@ class ConversationSyncService {
     V2TimConversation conversation, {
     required V2TimMessage message,
     required bool notifyUi,
+    SessionIdentity? identity,
   }) async {
+    if (identity != null && !_isCurrentRealtimeIdentity(identity)) {
+      return null;
+    }
     if (!notifyUi) {
       // sync replay / 批量路径：直接落库。
-      return ConversationLocalStore.instance.upsertBatch(
-        conversations: [conversation],
+      return _commitSdkConversationBatch(
+        ownerUserId: identity?.ownerUserId ?? _ownerUserId(),
+        conversations: <V2TimConversation>[conversation],
+        source: ConversationMutationSource.sdkRealtime,
       );
     }
     _enqueuePersistChanged(
       [conversation],
       reason: 'send_patch',
       prepare: true,
+      source: ConversationMutationSource.sdkRealtime,
+      allowRecreate: false,
+      identity: identity,
     );
     ConversationPerfGateLog.log(
       'persist_dedup_merge_send_patch',
       extras: <String, Object?>{
         'conversationID': conversation.conversationID,
-        'buffer': _persistDedupBuffer.length,
+        'buffer': _pendingPersistEvents.length,
         'busy': _isUiBusyForPersist,
       },
     );
+    // 072 phase-6 allowlist: outgoing preview is a transient pending state.
+    // The coalesced SDK row above is the only durable writer and later emits
+    // the committed UI batch; removing this would regress immediate send UI.
     ConversationListNotifier.instance.applyLastMessageLocally(
       conversationID: conversation.conversationID,
       message: message,
@@ -3692,7 +4566,8 @@ class ConversationSyncService {
       )) {
         conversation.unreadCount = (conversation.unreadCount ?? 0) + 1;
       }
-      await ConversationListNotifier.instance.applyConversationsFromStore(
+      await ConversationListNotifier.instance.applyCompatibilityStoreProjection(
+        reason: ConversationStoreProjectionReason.sdkCompatibilityRecovery,
         upserted: <V2TimConversation>[conversation],
         forceAdmitIds: <String>{convId},
       );
@@ -3716,13 +4591,10 @@ class ConversationSyncService {
     if (id.isEmpty) {
       return;
     }
+    // A user-initiated read is authoritative and must immediately release
+    // any short-lived optimistic unread protection for this conversation.
+    ConversationUnreadGuard.clearOptimisticUnread(id);
     if (!forceImmediateUi) {
-      final existing = await ConversationLocalStore.instance.conversationById(
-        id,
-      );
-      if (existing != null && (existing.unreadCount ?? 0) == 0) {
-        return;
-      }
       final lastAt = _lastMarkReadAt;
       if (_lastMarkReadId == id &&
           lastAt != null &&
@@ -3749,9 +4621,41 @@ class ConversationSyncService {
       );
       return;
     }
-    final updated = await ConversationLocalStore.instance
-        .markConversationReadLocally(conversationID);
+    final owner = _ownerUserId();
+    final readBarrier = ConversationLocalStore.instance.recordReadClearedAnchor(
+      id,
+      ownerUserId: owner,
+    );
+    await _restoreDurableMutationState(
+      ownerUserId: owner,
+      conversationId: id,
+    );
+    final plan = await ConversationMutationShadowBridge.instance
+        .prepareLocalIntentCommit(
+      ownerUserId: owner,
+      conversationId: id,
+      fieldPatch: const <ConversationMutationField, Object?>{
+        ConversationMutationField.unread: 0,
+      },
+      // Keep the local read barrier in the same version domain as SDK
+      // message patches. A local sequence number is much smaller than a
+      // message timestamp/orderkey and would otherwise lose to an old SDK
+      // snapshot.
+      sourceVersion: readBarrier?.version ?? _readBarrierVersionFor(id),
+    );
+    final commit = plan == null
+        ? null
+        : await ConversationLocalStore.instance.commitCoordinatorPlan(
+            plan: plan,
+          );
+    final updated = commit == null || commit.upsertedSnapshots.isEmpty
+        ? null
+        : commit.upsertedSnapshots.first;
     if (updated == null) {
+      if (commit != null) {
+        _lastMarkReadId = id;
+        _lastMarkReadAt = DateTime.now();
+      }
       ConversationUnreadTrace.log(
         'mark_read_locally_done',
         conversationID: id,
@@ -3766,6 +4670,60 @@ class ConversationSyncService {
       'mark_read_locally_done',
       conversationID: id,
       unreadAfter: updated.unreadCount ?? 0,
+    );
+  }
+
+  int? _readBarrierVersionFor(String conversationID) {
+    for (final conversation
+        in ConversationListNotifier.instance.conversations) {
+      if (!MessageConversationId.sameConversation(
+        conversation.conversationID,
+        conversationID,
+      )) {
+        continue;
+      }
+      final timestamp = conversation.lastMessage?.timestamp ?? 0;
+      // Match ConversationReadBarrier's version domain. `orderkey` determines
+      // list position only and must not make an old snapshot look post-read.
+      return timestamp > 0 ? timestamp + 1 : null;
+    }
+    return null;
+  }
+
+  Future<MarkReadBatchResult> markConversationsReadLocallyBatch(
+    Iterable<String> conversationIds,
+  ) async {
+    final owner = _ownerUserId();
+    final plans = <ConversationDatabaseCommitPlan<V2TimConversation>>[];
+    for (final rawId in conversationIds) {
+      final id = rawId.trim();
+      if (id.isEmpty) {
+        continue;
+      }
+      await _restoreDurableMutationState(
+        ownerUserId: owner,
+        conversationId: id,
+      );
+      final readBarrier =
+          ConversationLocalStore.instance.recordReadClearedAnchor(
+        id,
+        ownerUserId: owner,
+      );
+      final plan = await ConversationMutationShadowBridge.instance
+          .prepareLocalIntentCommit(
+        ownerUserId: owner,
+        conversationId: id,
+        fieldPatch: const <ConversationMutationField, Object?>{
+          ConversationMutationField.unread: 0,
+        },
+        sourceVersion: readBarrier?.version ?? _readBarrierVersionFor(id),
+      );
+      if (plan != null) {
+        plans.add(plan);
+      }
+    }
+    return ConversationLocalStore.instance.commitCoordinatorMarkReadPlans(
+      plans: plans,
     );
   }
 
@@ -3791,8 +4749,10 @@ class ConversationSyncService {
       final persistable = _filterPersistableConversations(typed);
       if (persistable.isNotEmpty) {
         if (ConversationPerfFlags.conversationListSdkPrimary) {
-          await ConversationLocalStore.instance.upsertBatch(
+          await _commitSdkConversationBatch(
+            ownerUserId: _ownerUserId(),
             conversations: persistable,
+            source: ConversationMutationSource.sdkPage,
           );
           ConversationPerfGateLog.log(
             'mirror_skip_ui',
@@ -3825,8 +4785,10 @@ class ConversationSyncService {
             },
           );
         } else if (ConversationPerfFlags.viewModelPageUiApplyDeferred) {
-          final merged = await ConversationLocalStore.instance.upsertBatch(
+          final merged = await _commitSdkConversationBatch(
+            ownerUserId: _ownerUserId(),
             conversations: persistable,
+            source: ConversationMutationSource.sdkPage,
           );
           final uiMode = _shouldDeferPersistUiApply() ? 'defer' : 'paced';
           ConversationPerfGateLog.log(
@@ -3841,8 +4803,10 @@ class ConversationSyncService {
             reason: 'view_model_page',
           );
         } else {
-          final merged = await ConversationLocalStore.instance.upsertBatch(
+          final merged = await _commitSdkConversationBatch(
+            ownerUserId: _ownerUserId(),
             conversations: persistable,
+            source: ConversationMutationSource.sdkPage,
           );
           ConversationPerfGateLog.log(
             'view_model_page_persist',
@@ -3863,39 +4827,12 @@ class ConversationSyncService {
   Future<void> onViewModelConversationsChanged(
     List<V2TimConversation> conversations,
   ) async {
-    if (ImSnapshotBootstrapService.instance.shouldSuppressViewModelPersist) {
-      _log(
-        'view_model_changed skipped (snapshot/login bootstrap gate) '
-        'count=${conversations.length}',
-      );
-      return;
-    }
-    await _persistChanged(conversations, reason: 'view_model_changed');
-  }
-
-  List<V2TimConversation> _filterChangedViewModelConversations(
-    List<V2TimConversation> conversations,
-  ) {
-    final changed = <V2TimConversation>[];
-    for (final conversation in conversations) {
-      final id = conversation.conversationID.trim();
-      if (id.isEmpty) {
-        continue;
-      }
-      final fingerprint = _viewModelFingerprint(conversation);
-      final pendingKey = _findPersistDedupBufferKey(id);
-      final pending =
-          pendingKey == null ? null : _persistDedupBuffer[pendingKey];
-      final previous = pending != null
-          ? _viewModelFingerprint(pending)
-          : (_persistInFlightFingerprints[id] ??
-              _viewModelPersistFingerprints[id]);
-      if (previous == fingerprint) {
-        continue;
-      }
-      changed.add(conversation);
-    }
-    return changed;
+    // Compatibility boundary only. UIKit mirrors the direct SDK realtime
+    // listener and is deliberately not a persistence writer (Plan 093).
+    ConversationPerfGateLog.log(
+      'view_model_changed_diagnostic_only',
+      extras: <String, Object?>{'count': conversations.length},
+    );
   }
 
   static String _viewModelFingerprint(V2TimConversation conversation) {
@@ -3919,6 +4856,7 @@ class ConversationSyncService {
       last?.timestamp,
       last?.elemType,
       last?.status,
+      last?.isPeerRead == true,
     ].join('\u001f');
   }
 
@@ -3964,7 +4902,11 @@ class ConversationSyncService {
   Future<void> _persistChanged(
     List<V2TimConversation> conversations, {
     required String reason,
+    required ConversationMutationSource source,
+    required bool allowRecreate,
+    SessionIdentity? identity,
   }) async {
+    if (identity != null && !_isCurrentRealtimeIdentity(identity)) return;
     for (final conversation in conversations) {
       _prepareConversationForPersist(conversation);
       ConversationPerfGateLog.markRealtimeConversationCallback(
@@ -3983,23 +4925,39 @@ class ConversationSyncService {
         );
       }
     }
-    final changed = _filterChangedViewModelConversations(conversations);
-    if (changed.isEmpty) {
-      _log('$reason skipped unchanged count=${conversations.length}');
-      return;
-    }
-    _enqueuePersistChanged(changed, reason: reason, prepare: false);
+    _enqueuePersistChanged(
+      conversations,
+      reason: reason,
+      prepare: false,
+      source: source,
+      allowRecreate: allowRecreate,
+      identity: identity,
+    );
   }
 
   @visibleForTesting
   Future<void> persistChangedForTest(
     List<V2TimConversation> conversations, {
     String reason = 'test',
+    ConversationMutationSource source = ConversationMutationSource.sdkRealtime,
+    bool allowRecreate = false,
   }) async {
-    enqueuePersistChangedForTest(conversations, reason: reason);
+    enqueuePersistChangedForTest(
+      conversations,
+      reason: reason,
+      source: source,
+      allowRecreate: allowRecreate,
+    );
     _persistDedupTimer?.cancel();
     _persistDedupTimer = null;
-    await _flushPersistDedupBuffer(reason: reason);
+    await _flushPersistEventQueue(reason: reason);
+  }
+
+  @visibleForTesting
+  Future<void> flushPersistChangedForTest({String reason = 'test'}) async {
+    _persistDedupTimer?.cancel();
+    _persistDedupTimer = null;
+    await _flushPersistEventQueue(reason: reason);
   }
 
   @visibleForTesting
@@ -4014,18 +4972,40 @@ class ConversationSyncService {
   void enqueuePersistChangedForTest(
     List<V2TimConversation> conversations, {
     String reason = 'changed',
+    ConversationMutationSource source = ConversationMutationSource.sdkRealtime,
+    bool allowRecreate = false,
   }) {
-    _enqueuePersistChanged(conversations, reason: reason, prepare: true);
+    _enqueuePersistChanged(
+      conversations,
+      reason: reason,
+      prepare: true,
+      source: source,
+      allowRecreate: allowRecreate,
+    );
   }
 
   void _enqueuePersistChanged(
     List<V2TimConversation> conversations, {
     required String reason,
     required bool prepare,
+    required ConversationMutationSource source,
+    required bool allowRecreate,
+    SessionIdentity? identity,
   }) {
     if (conversations.isEmpty) {
       return;
     }
+    if (identity != null && !_isCurrentRealtimeIdentity(identity)) return;
+    final owner = identity?.ownerUserId ?? _ownerUserId();
+    if (owner.isEmpty) {
+      return;
+    }
+    if (_pendingPersistOwner != owner) {
+      _pendingPersistEvents.clear();
+      _pendingPersistOwner = owner;
+      _pendingPersistOwnerGeneration++;
+    }
+    final ownerGeneration = _pendingPersistOwnerGeneration;
     for (final conversation in conversations) {
       final id = conversation.conversationID.trim();
       if (id.isEmpty) {
@@ -4034,53 +5014,62 @@ class ConversationSyncService {
       if (prepare) {
         _prepareConversationForPersist(conversation);
       }
-      final existingKey = _findPersistDedupBufferKey(id);
-      if (existingKey == null) {
-        _persistDedupBuffer[id] = conversation;
+      final type = conversation.type == ConversationType.V2TIM_GROUP
+          ? ConversationMutationConversationType.group
+          : ConversationMutationConversationType.c2c;
+      final canonical = canonicalizeConversationMutationId(id, type);
+      if (canonical.isEmpty) {
         continue;
       }
-      final existing = _persistDedupBuffer[existingKey]!;
-      final preferredId = ChatIdFormat.preferredGroupConversationId(
-        existing.conversationID,
-        id,
+      final fingerprint = _viewModelFingerprint(conversation);
+      final duplicate = _pendingPersistEvents.any(
+        (event) =>
+            event.ownerGeneration == ownerGeneration &&
+            event.canonicalConversationId == canonical &&
+            event.source == source &&
+            event.fingerprint == fingerprint,
       );
-      final keep = preferredId == id ? conversation : existing;
-      keep.conversationID = preferredId;
-      final preferredGid = preferredId.startsWith('group_')
-          ? preferredId.substring(6)
-          : preferredId;
-      if (preferredGid.isNotEmpty) {
-        keep.groupID = preferredGid;
+      if (duplicate) {
+        continue;
       }
-      if (existingKey != preferredId) {
-        _persistDedupBuffer.remove(existingKey);
-      }
-      _persistDedupBuffer[preferredId] = keep;
+      final sequence = ++_persistCommitSequence;
+      _latestPersistSequenceById[canonical] = sequence;
+      _pendingPersistEvents.add(
+        _PendingConversationEvent(
+          ownerUserId: owner,
+          ownerGeneration: ownerGeneration,
+          canonicalConversationId: canonical,
+          sequence: sequence,
+          source: source,
+          allowRecreate: allowRecreate,
+          reason: reason,
+          snapshot: conversation,
+          fingerprint: fingerprint,
+        ),
+      );
+      final last = conversation.lastMessage;
+      ConversationPerfGateLog.traceConversationProjection(
+        stage: 'enqueue',
+        conversationId: id,
+        messageId: last?.msgID ?? last?.id ?? '',
+        timestamp: last?.timestamp ?? 0,
+        orderkey: conversation.orderkey ?? 0,
+        source: source.name,
+        sequence: sequence,
+        decision: 'queued',
+      );
     }
-    if (_persistDedupBuffer.isEmpty) {
+    if (_pendingPersistEvents.isEmpty) {
       return;
     }
-    _persistPendingReason = reason;
     _persistDedupTimer?.cancel();
+    if (_pendingPersistEvents.length >= _pendingPersistEventCap) {
+      unawaited(_flushPersistEventQueue(reason: 'queue_cap'));
+      return;
+    }
     _persistDedupTimer = Timer(_persistDedupDelayForReason(reason), () {
-      unawaited(_flushPersistDedupBuffer(reason: _persistPendingReason));
+      unawaited(_flushPersistEventQueue(reason: reason));
     });
-  }
-
-  String? _findPersistDedupBufferKey(String conversationId) {
-    final id = conversationId.trim();
-    if (id.isEmpty) {
-      return null;
-    }
-    if (_persistDedupBuffer.containsKey(id)) {
-      return id;
-    }
-    for (final entry in _persistDedupBuffer.entries) {
-      if (MessageConversationId.sameConversation(entry.key, id)) {
-        return entry.key;
-      }
-    }
-    return null;
   }
 
   bool _shouldPersistConversation(V2TimConversation conversation) {
@@ -4095,6 +5084,154 @@ class ConversationSyncService {
     return conversations
         .where(_shouldPersistConversation)
         .toList(growable: false);
+  }
+
+  Future<List<V2TimConversation>> _commitSdkConversationBatch({
+    required String ownerUserId,
+    required List<V2TimConversation> conversations,
+    required ConversationMutationSource source,
+    bool allowRecreate = false,
+    void Function(ConversationSdkCommittedBatch result)? onCommittedBatch,
+  }) async {
+    if (conversations.isEmpty) {
+      return const <V2TimConversation>[];
+    }
+    final sourceVersionFloors = <String, int>{};
+    for (final conversation in conversations) {
+      final floor =
+          ConversationLocalStore.instance.resolveSdkUnreadAgainstReadBarrier(
+        conversation,
+        ownerUserId: ownerUserId,
+      );
+      if (floor > 0) {
+        sourceVersionFloors[conversation.conversationID] = floor;
+      }
+    }
+    final bridge = ConversationMutationShadowBridge.instance;
+    final durableById =
+        await ConversationLocalStore.instance.coordinatorDurableStates(
+      ownerUserId: ownerUserId,
+      conversationIds:
+          conversations.map((conversation) => conversation.conversationID),
+    );
+    for (final conversation in conversations) {
+      final durable = durableById[conversation.conversationID] ??
+          const ConversationCoordinatorDurableState(
+            generation: 0,
+            tombstoned: false,
+          );
+      bridge.restoreDurableConversationState(
+        ownerUserId: ownerUserId,
+        conversationId: conversation.conversationID,
+        generation: durable.generation,
+        tombstoned: durable.tombstoned,
+      );
+    }
+    // Test overrides and the runtime kill switch intentionally retain the
+    // complete legacy path. Production authoritative mode must not admit and
+    // then write the same rows again through upsertBatch.
+    if (upsertBatchOverride != null) {
+      return upsertBatchOverride!(conversations);
+    }
+    if (!ConversationMutationShadowBridge.authoritativeSdkCommitEnabled) {
+      // 072 rollback allowlist: retain one whole-path rollback, never a
+      // production dual-write beside Coordinator commits.
+      final admitted = await bridge.admitSdkConversationsForCommit(
+        ownerUserId: ownerUserId,
+        conversations: conversations,
+        source: source,
+        allowRecreate: allowRecreate,
+      );
+      if (admitted.isEmpty) {
+        return const <V2TimConversation>[];
+      }
+      return ConversationLocalStore.instance.upsertBatch(
+        conversations: admitted,
+        ownerUserId: ownerUserId,
+      );
+    }
+
+    final candidates = await bridge.prepareSdkConversationCommits(
+      ownerUserId: ownerUserId,
+      conversations: conversations,
+      source: source,
+      allowRecreate: allowRecreate,
+      sourceVersionFloorByConversationId: sourceVersionFloors,
+    );
+    final result = await ConversationLocalStore.instance
+        .commitCoordinatorSdkUpsertPlansBatchResult(
+      plans:
+          candidates.map((candidate) => candidate.plan).toList(growable: false),
+    );
+    onCommittedBatch?.call(result);
+    return result.upserted;
+  }
+
+  /// Public phase-4 boundaries for SDK/snapshot rows produced outside this
+  /// service. They all converge on the same Coordinator → Store commit path.
+  Future<List<V2TimConversation>> commitSnapshotConversations({
+    required String ownerUserId,
+    required List<V2TimConversation> conversations,
+  }) {
+    return _commitSdkConversationBatch(
+      ownerUserId: ownerUserId,
+      conversations: conversations,
+      source: ConversationMutationSource.snapshot,
+    );
+  }
+
+  Future<List<V2TimConversation>> commitSdkHydratedConversations(
+    List<V2TimConversation> conversations,
+  ) {
+    return _commitSdkConversationBatch(
+      ownerUserId: _ownerUserId(),
+      conversations: conversations,
+      source: ConversationMutationSource.sdkPage,
+    );
+  }
+
+  Future<List<V2TimConversation>> commitCreatedConversation(
+    V2TimConversation conversation, {
+    bool notifyUi = true,
+  }) async {
+    ConversationSdkCommittedBatch? committedBatch;
+    final committed = await _commitSdkConversationBatch(
+      ownerUserId: _ownerUserId(),
+      conversations: <V2TimConversation>[conversation],
+      source: ConversationMutationSource.sdkRealtime,
+      allowRecreate: true,
+      onCommittedBatch: (result) => committedBatch = result,
+    );
+    if (notifyUi && committed.isNotEmpty) {
+      final notifier = ConversationListNotifier.instance;
+      if (committedBatch != null) {
+        await notifier.applyCommittedBatch(
+          ConversationUiSnapshotBatch<V2TimConversation>(
+            upsertedSnapshots: committed,
+            deletedCanonicalIds: const <String>[],
+            structureChanged: committedBatch!.structureChanged,
+            changedFieldMasks: committedBatch!.changedFieldMasks,
+            commitGeneration: 0,
+            unreadDeltas: committedBatch!.unreadDeltas.map(
+              (delta) => ConversationUiUnreadDelta(
+                isGroup: delta.isGroup,
+                oldNotifiable: delta.oldNotifiable,
+                newNotifiable: delta.newNotifiable,
+              ),
+            ),
+            unreadProjectionComplete: committedBatch!.unreadProjectionComplete,
+          ),
+          forceAdmitIds: <String>{conversation.conversationID},
+        );
+      } else {
+        await notifier.applyCompatibilityStoreProjection(
+          reason: ConversationStoreProjectionReason.sdkCompatibilityRecovery,
+          upserted: committed,
+          forceAdmitIds: <String>{conversation.conversationID},
+        );
+      }
+    }
+    return committed;
   }
 
   Future<void> _purgeRejectedGroupConversations(
@@ -4161,8 +5298,8 @@ class ConversationSyncService {
     if (targets.isEmpty) {
       return;
     }
-    final deleted = await ConversationLocalStore.instance.deleteBatch(
-      conversationIds: targets.toList(growable: false),
+    final deleted = await _commitConversationDeletes(
+      targets.toList(growable: false),
     );
     for (final id in targets) {
       try {
@@ -4185,140 +5322,195 @@ class ConversationSyncService {
     );
   }
 
-  Future<void> _flushPersistDedupBuffer({required String reason}) async {
+  Future<void> _flushPersistEventQueue({required String reason}) async {
     _persistDedupTimer = null;
-    if (_persistDedupBuffer.isEmpty) {
+    final previous = _persistFlushTail;
+    final current = previous.then((_) => _drainPersistEventQueue(reason));
+    _persistFlushTail = current.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    await current;
+  }
+
+  Future<void> _drainPersistEventQueue(String flushReason) async {
+    if (_pendingPersistEvents.isEmpty) {
       return;
     }
-    final conversations = _persistDedupBuffer.values.toList(growable: false);
-    _persistDedupBuffer.clear();
+    final events = List<_PendingConversationEvent>.from(_pendingPersistEvents)
+      ..sort((a, b) => a.sequence.compareTo(b.sequence));
+    _pendingPersistEvents.clear();
     persistFlushInvocationCount++;
-    final persistable = _filterPersistableConversations(conversations);
-    final persistableIds = persistable
-        .map((c) => c.conversationID.trim())
-        .where((id) => id.isNotEmpty)
-        .toSet();
-    final rejected = conversations
-        .where((c) => !persistableIds.contains(c.conversationID.trim()))
-        .toList(growable: false);
-    // 入群事件可能晚于 IM 会话：先挂起，勿直接丢掉（杀进程重开才能看见）。
+
+    final accepted = <_PendingConversationEvent>[];
+    final rejected = <V2TimConversation>[];
+    for (final event in events) {
+      if (event.ownerUserId != _pendingPersistOwner ||
+          event.ownerGeneration != _pendingPersistOwnerGeneration) {
+        continue;
+      }
+      if (_shouldPersistConversation(event.snapshot)) {
+        accepted.add(event);
+      } else {
+        rejected.add(event.snapshot);
+      }
+    }
     _stashPendingNonMemberGroupConversations(rejected);
-    if (persistable.isEmpty) {
-      _log(
-        'persistChanged reason=coalesced:$reason skipped_non_member='
-        '${conversations.length} pending='
-        '${_pendingNonMemberGroupConversations.length}',
-      );
+    if (accepted.isEmpty) {
       return;
     }
-    final fingerprints = <String, String>{
-      for (final conversation in persistable)
-        if (conversation.conversationID.trim().isNotEmpty)
-          conversation.conversationID.trim():
-              _viewModelFingerprint(conversation),
-    };
-    _persistInFlightFingerprints.addAll(fingerprints);
-    final hotListener = _isConversationListenerPersistReason(reason);
-    final sdkPrimary = ConversationPerfFlags.conversationListSdkPrimary;
-    // Phase2：Listener 热路径先用 SDK 对象灌 TabStore，再 mirror 写库。
-    if (sdkPrimary && hotListener) {
-      await ConversationListNotifier.instance.applyConversationsFromStore(
-        upserted: persistable,
-      );
-      ConversationPerfGateLog.log(
-        'ui_source',
-        extras: <String, Object?>{
-          'source': 'sdk_listener',
-          'reason': reason,
-          'count': persistable.length,
-        },
-      );
-    }
-    late final List<V2TimConversation> merged;
-    try {
-      merged = upsertBatchOverride != null
-          ? await upsertBatchOverride!(persistable)
-          : await ConversationLocalStore.instance.upsertBatch(
-              conversations: persistable,
-            );
-      for (final entry in fingerprints.entries) {
-        if (_persistInFlightFingerprints[entry.key] == entry.value) {
-          _viewModelPersistFingerprints[entry.key] = entry.value;
+
+    final finalByCanonical = LinkedHashMap<String, V2TimConversation>();
+    final committedFieldMasks =
+        <String, Set<ConversationMutationField>>{};
+    final committedUnreadDeltas = <ConversationUiUnreadDelta>[];
+    var unreadProjectionComplete = true;
+    var committedStructureChanged = false;
+    var index = 0;
+    while (index < accepted.length) {
+      final first = accepted[index];
+      final batch = <_PendingConversationEvent>[first];
+      index++;
+      while (index < accepted.length) {
+        final next = accepted[index];
+        if (next.ownerUserId != first.ownerUserId ||
+            next.ownerGeneration != first.ownerGeneration ||
+            next.source != first.source ||
+            next.allowRecreate != first.allowRecreate) {
+          break;
+        }
+        batch.add(next);
+        index++;
+      }
+      if (_pendingPersistOwner != first.ownerUserId ||
+          _pendingPersistOwnerGeneration != first.ownerGeneration) {
+        continue;
+      }
+      final snapshots = batch.map((event) => event.snapshot).toList();
+      final fingerprints = <String, String>{
+        for (final event in batch)
+          event.canonicalConversationId: event.fingerprint,
+      };
+      _persistInFlightFingerprints.addAll(fingerprints);
+      late final List<V2TimConversation> merged;
+      try {
+        ConversationSdkCommittedBatch? batchResult;
+        merged = upsertBatchOverride != null
+            ? await upsertBatchOverride!(snapshots)
+            : await _commitSdkConversationBatch(
+                ownerUserId: first.ownerUserId,
+                conversations: snapshots,
+                source: first.source,
+                allowRecreate: first.allowRecreate,
+                onCommittedBatch: (result) => batchResult = result,
+              );
+        if (batchResult != null) {
+          committedStructureChanged =
+              committedStructureChanged || batchResult!.structureChanged;
+          committedUnreadDeltas.addAll(batchResult!.unreadDeltas);
+          unreadProjectionComplete = unreadProjectionComplete &&
+              batchResult!.unreadProjectionComplete;
+          for (final entry in batchResult!.changedFieldMasks.entries) {
+            committedFieldMasks[entry.key] = <ConversationMutationField>{
+              ...(committedFieldMasks[entry.key] ??
+                  const <ConversationMutationField>{}),
+              ...entry.value,
+            };
+          }
+        }
+        if (_pendingPersistOwner == first.ownerUserId &&
+            _pendingPersistOwnerGeneration == first.ownerGeneration) {
+          for (final event in batch) {
+            _viewModelPersistFingerprints[event.canonicalConversationId] =
+                event.fingerprint;
+          }
+        }
+      } finally {
+        for (final entry in fingerprints.entries) {
+          if (_persistInFlightFingerprints[entry.key] == entry.value) {
+            _persistInFlightFingerprints.remove(entry.key);
+          }
         }
       }
-    } finally {
-      for (final entry in fingerprints.entries) {
-        if (_persistInFlightFingerprints[entry.key] == entry.value) {
-          _persistInFlightFingerprints.remove(entry.key);
+      for (final conversation in merged) {
+        final type = conversation.type == ConversationType.V2TIM_GROUP
+            ? ConversationMutationConversationType.group
+            : ConversationMutationConversationType.c2c;
+        final canonical = canonicalizeConversationMutationId(
+          conversation.conversationID,
+          type,
+        );
+        if (canonical.isNotEmpty) {
+          finalByCanonical[canonical] = conversation;
         }
       }
     }
+
+    if (finalByCanonical.isEmpty ||
+        accepted.first.ownerUserId != _pendingPersistOwner ||
+        accepted.first.ownerGeneration != _pendingPersistOwnerGeneration) {
+      return;
+    }
+    final merged = finalByCanonical.values.toList(growable: false);
+    final hotListener = accepted.any(
+      (event) => _isConversationListenerPersistReason(event.reason),
+    );
     ConversationPinFlickerLog.log(
       'persist_flush',
       extras: <String, Object?>{
-        'reason': reason,
-        'count': persistable.length,
+        'reason': flushReason,
+        'count': accepted.length,
+        'projected': merged.length,
         'deferring': ConversationListNotifier.instance.isDeferringPinReorder,
-        'ids': persistable
-            .map((e) => e.conversationID.trim())
-            .where((e) => e.isNotEmpty)
-            .take(6)
-            .join(','),
       },
     );
     for (final conversation in merged) {
       ConversationPerfGateLog.markRealtimePersistDone(
         conversationId: conversation.conversationID,
-        reason: reason,
+        reason: flushReason,
       );
     }
-    if (sdkPrimary && hotListener) {
-      ConversationPerfGateLog.log(
-        'mirror_skip_ui',
-        extras: <String, Object?>{
-          'via': 'persist_flush',
-          'reason': reason,
-          'count': merged.length,
-        },
-      );
-    } else {
-      // SDK 会话监听热路径：写库后立刻灌 UI，避开 scroll/quiet pending 帽丢更新。
-      await _notifyUiAfterLocalWrite(
+    await _notifyUiAfterLocalWrite(
+      upserted: merged,
+      immediate: hotListener,
+      committedBatch: ConversationSdkCommittedBatch(
         upserted: merged,
-        immediate: hotListener,
+        unreadDeltas: committedUnreadDeltas,
+        unreadProjectionComplete: unreadProjectionComplete,
+        changedFieldMasks: committedFieldMasks,
+        structureChanged: committedStructureChanged,
+      ),
+    );
+    // The SDK-primary conversation list is projected from the committed
+    // snapshot above, while the bottom-tab badge is backed by a separate
+    // aggregate.  Realtime preview paths may already have applied an
+    // optimistic unread delta, so replaying the commit delta here would
+    // double-count it.  Calibrate from the now-committed store instead; the
+    // aggregate protects newer optimistic values while the query is running.
+    if (accepted.any(
+      (event) => event.source == ConversationMutationSource.sdkRealtime,
+    )) {
+      ConversationUnreadAggregate.instance.scheduleRefresh(
+        reason: 'realtime_commit',
       );
     }
-    _log('persistChanged reason=coalesced:$reason count=${persistable.length}');
+    unawaited(
+      ConversationMutationShadowBridge.instance.compareLegacyProjection(
+        ownerUserId: accepted.first.ownerUserId,
+        conversations: merged,
+      ),
+    );
     await _purgeObsoleteGroupConversationTwins(
-      reason: 'persist_flush:$reason',
+      reason: 'persist_flush:$flushReason',
       upsertObsoleteIds: await _collectObsoleteGroupTwinIds(
-        extraIds: persistable.map((c) => c.conversationID),
+        extraIds: merged.map((c) => c.conversationID),
       ),
     );
     ConversationUnreadTrace.logConversations(
       'persist_flush_upserted',
       conversations: merged,
-      extras: <String, Object?>{'reason': reason},
+      extras: <String, Object?>{'reason': flushReason},
     );
-    for (final conversation in persistable) {
-      final id = conversation.conversationID.trim();
-      if (id.isEmpty) {
-        continue;
-      }
-      int? uiUnread;
-      for (final item in ConversationListNotifier.instance.conversations) {
-        if (MessageConversationId.sameConversation(item.conversationID, id)) {
-          uiUnread = item.unreadCount ?? 0;
-          break;
-        }
-      }
-      ConversationUnreadTrace.log(
-        'persist_flush_ui_state',
-        conversationID: id,
-        unreadAfter: uiUnread,
-        extras: <String, Object?>{'reason': reason},
-      );
-    }
   }
 
   Future<void> _persistDeleted(
@@ -4358,9 +5550,7 @@ class ConversationSyncService {
         ArchiveHistoryProvider.clearHistoryClearPending(id);
       }
     }
-    final deleted = await ConversationLocalStore.instance.deleteBatch(
-      conversationIds: deletable,
-    );
+    final deleted = await _commitConversationDeletes(deletable);
     await _notifyUiAfterLocalWrite(deletedIds: deleted);
     _notifyActiveChatClosed(deleted);
     _log(
@@ -4388,8 +5578,16 @@ class ConversationSyncService {
     ConversationDeletedBus.instance.notifyDeleted(deletedIds);
   }
 
-  Future<void> clearSession() async {
+  Future<void> clearSession({String? ownerUserId}) async {
+    _realtimeIdentity = null;
     _syncGeneration++;
+    // Invalidate the lock immediately. The old SDK future may still complete,
+    // but its owner/generation no longer matches and therefore cannot clear or
+    // overwrite a new account's sync state in its finally block.
+    _pageSyncInFlight = false;
+    _pageSyncOwner = '';
+    _pageSyncOwnerGeneration = -1;
+    ConversationMutationShadowBridge.instance.clearSession();
     _awaitingPostServerSync = false;
     _c2cHistoryBackfillInFlight = null;
     _c2cHistoryBackfillScheduled = false;
@@ -4413,85 +5611,22 @@ class ConversationSyncService {
     _postPopCoalesceScheduled = false;
     _persistDedupTimer?.cancel();
     _persistDedupTimer = null;
-    _persistDedupBuffer.clear();
+    _pendingPersistEvents.clear();
+    _pendingPersistOwner = '';
+    _pendingPersistOwnerGeneration++;
+    _persistFlushTail = Future<void>.value();
+    _latestPersistSequenceById.clear();
     _viewModelPersistFingerprints.clear();
-    _persistPendingReason = 'changed';
+    _persistInFlightFingerprints.clear();
     _recentlyLeftConversationId = null;
     _idleDrainTimer?.cancel();
     _idleDrainTimer = null;
     _idleDrainSessionPages = 0;
     _backgroundDrainInFlight = false;
-    await ConversationLocalStore.instance.clearSession();
+    await ConversationLocalStore.instance.clearSession(
+      ownerUserId: ownerUserId,
+    );
     ConversationListNotifier.instance.clearSession();
     ConversationListSyncNotifier.instance.clearSession();
-  }
-}
-
-class _PendingSdkSync {
-  const _PendingSdkSync({
-    required this.reason,
-    required this.reset,
-    required this.force,
-    required this.loadAllPages,
-    required this.reloadUiEachPage,
-    this.drainMode,
-  });
-
-  final String reason;
-  final bool reset;
-  final bool force;
-  final bool loadAllPages;
-  final bool reloadUiEachPage;
-  final ConversationSdkDrainMode? drainMode;
-
-  _PendingSdkSync mergePreferStronger(_PendingSdkSync other) {
-    final preferOther = other.reset ||
-        other.force ||
-        other.loadAllPages ||
-        other.drainMode == ConversationSdkDrainMode.foregroundLimited ||
-        other.reason.contains('sync_server_finish');
-    final mergedMode = _strongerDrainMode(drainMode, other.drainMode);
-    if (preferOther) {
-      return _PendingSdkSync(
-        reason: other.reason,
-        reset: reset || other.reset,
-        force: force || other.force,
-        loadAllPages: loadAllPages || other.loadAllPages,
-        reloadUiEachPage: reloadUiEachPage && other.reloadUiEachPage,
-        drainMode: mergedMode ?? other.drainMode,
-      );
-    }
-    return _PendingSdkSync(
-      reason: reason,
-      reset: reset || other.reset,
-      force: force || other.force,
-      loadAllPages: loadAllPages || other.loadAllPages,
-      reloadUiEachPage: reloadUiEachPage && other.reloadUiEachPage,
-      drainMode: mergedMode ?? drainMode,
-    );
-  }
-
-  static ConversationSdkDrainMode? _strongerDrainMode(
-    ConversationSdkDrainMode? a,
-    ConversationSdkDrainMode? b,
-  ) {
-    if (a == null) {
-      return b;
-    }
-    if (b == null) {
-      return a;
-    }
-    int rank(ConversationSdkDrainMode m) {
-      switch (m) {
-        case ConversationSdkDrainMode.singlePage:
-          return 1;
-        case ConversationSdkDrainMode.foregroundLimited:
-          return 2;
-        case ConversationSdkDrainMode.backgroundContinue:
-          return 3;
-      }
-    }
-
-    return rank(a) >= rank(b) ? a : b;
   }
 }

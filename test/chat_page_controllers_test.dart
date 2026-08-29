@@ -51,6 +51,61 @@ void main() {
       expect(last, 'hello world');
       draft.dispose();
     });
+
+    test('empty text clears immediately and invalidates stale load', () {
+      final draft = ChatDraftController();
+      final loadRevision = draft.stateRevision;
+      var persisted = 'not-called';
+
+      draft.onChanged('', persist: (raw, _) => persisted = raw);
+
+      expect(persisted, '');
+      expect(draft.canApplyLoadedDraft(loadRevision), isFalse);
+      expect(draft.text, isNull);
+      draft.dispose();
+    });
+
+    test('send completion rejects an in-flight loaded draft', () {
+      final draft = ChatDraftController();
+      final loadRevision = draft.stateRevision;
+
+      draft.markSendCompleted();
+
+      expect(draft.canApplyLoadedDraft(loadRevision), isFalse);
+      expect(draft.shouldSuppressLifecyclePersist, isTrue);
+      draft.dispose();
+    });
+
+    test('conversation switch rejects old work and accepts new edits', () {
+      final draft = ChatDraftController();
+      final oldRevision = draft.stateRevision;
+      draft.markSendCompleted();
+
+      draft.beginConversation();
+
+      expect(draft.canApplyLoadedDraft(oldRevision), isFalse);
+      expect(draft.shouldSuppressLifecyclePersist, isFalse);
+      draft.onChanged('new conversation', persist: (_, __) {});
+      expect(draft.text, 'new conversation');
+      draft.dispose();
+    });
+
+    test('write queue continues after an operation fails', () async {
+      final queue = ChatDraftWriteQueue();
+      final completed = <String>[];
+      Object? capturedError;
+
+      await queue.enqueue(
+        () async => throw StateError('first write failed'),
+        onError: (error, _) => capturedError = error,
+      );
+      await queue.enqueue(() async {
+        completed.add('second write');
+      });
+
+      expect(capturedError, isA<StateError>());
+      expect(completed, <String>['second write']);
+    });
   });
 
   group('C2cSendPermissionController', () {
@@ -136,6 +191,24 @@ void main() {
 
       expect(secondGeneration, greaterThan(firstGeneration));
       expect(life.postOpenTasksGeneration, secondGeneration);
+    });
+
+    test('chat open phase advances in order and rejects stale generation', () {
+      final life = ChatOpenLifecycle();
+      final generation = life.beginConversation();
+      expect(life.phase, ChatOpenPhase.created);
+      expect(life.markInteractive(generation), isFalse);
+      expect(life.markHistoryReady(generation), isTrue);
+      expect(life.markInteractive(generation), isTrue);
+      expect(life.markEnriched(generation), isTrue);
+      expect(life.markHistoryReady(generation), isFalse);
+
+      final nextGeneration = life.beginConversation();
+      expect(life.phase, ChatOpenPhase.created);
+      expect(life.markHistoryReady(generation), isFalse);
+      expect(life.markHistoryReady(nextGeneration), isTrue);
+      life.resetForDispose();
+      expect(life.phase, ChatOpenPhase.disposed);
     });
 
     test('post-open work waits for history gate and survives gate errors',

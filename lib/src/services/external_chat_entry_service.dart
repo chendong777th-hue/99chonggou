@@ -13,6 +13,7 @@ class ExternalChatEntryService {
 
   _ActiveChatSnapshot? _activeChat;
   String? _lastStateSignature;
+  int? _activeSourceToken;
 
   void _syncRegistry({
     required String conversationID,
@@ -25,6 +26,12 @@ class ExternalChatEntryService {
     );
     ActiveChatRegistry.instance.updateRouteVisible(isRouteVisible);
     ActiveChatRegistry.instance.updateHasVisibleMessages(hasVisibleMessages);
+  }
+
+  /// Claims the active publisher for a mounted chat page. Delayed callbacks
+  /// from older pages are ignored once another page claims this token.
+  void claimActiveChatSource(int sourceToken) {
+    _activeSourceToken = sourceToken;
   }
 
   String? resolveConversationId({
@@ -113,11 +120,18 @@ class ExternalChatEntryService {
     required String conversationID,
     required bool isRouteVisible,
     required bool hasVisibleMessages,
+    int? sourceToken,
   }) {
     final id = conversationID.trim();
     if (id.isEmpty) {
       return;
     }
+    if (_activeSourceToken != null &&
+        sourceToken != null &&
+        _activeSourceToken != sourceToken) {
+      return;
+    }
+    _activeSourceToken ??= sourceToken;
     final next = _ActiveChatSnapshot(
       conversationID: id,
       isRouteVisible: isRouteVisible,
@@ -151,12 +165,17 @@ class ExternalChatEntryService {
     );
   }
 
-  void clearActiveChatState(String? conversationID) {
+  void clearActiveChatState(String? conversationID, {int? sourceToken}) {
     final id = conversationID?.trim() ?? '';
     final current = _activeChat;
     if (id.isEmpty ||
         current == null ||
         !MessageConversationId.sameConversation(id, current.conversationID)) {
+      return;
+    }
+    if (_activeSourceToken != null &&
+        sourceToken != null &&
+        _activeSourceToken != sourceToken) {
       return;
     }
     logFlow(
@@ -166,6 +185,7 @@ class ExternalChatEntryService {
     );
     _activeChat = null;
     _lastStateSignature = null;
+    _activeSourceToken = null;
     ActiveChatRegistry.instance.leave(id);
   }
 

@@ -5,6 +5,7 @@ import 'package:tencent_cloud_chat_demo/src/platform/permission_guard.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:photo_manager/photo_manager.dart';
+import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:tencent_chat_i18n_tool/tencent_chat_i18n_tool.dart';
 import 'package:tencent_cloud_chat_demo/src/api/favorite_message_api.dart';
@@ -14,8 +15,8 @@ import 'package:tencent_cloud_chat_demo/src/pages/favorites/widgets/favorite_med
 import 'package:tencent_cloud_chat_demo/src/provider/theme.dart';
 import 'package:tencent_cloud_chat_demo/src/theme/app_colors.dart';
 import 'package:tencent_cloud_chat_demo/utils/toast.dart';
+import 'package:tencent_cloud_chat_demo/src/services/system_media_picker.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/image_edit/editable_asset_picker.dart';
-import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 import 'package:tencent_cloud_chat_demo/src/navigation/app_page_transitions.dart';
 
 /// 新建或编辑收藏（笔记 / 图片 / 短视频）。
@@ -109,19 +110,9 @@ class _FavoriteEditPageState extends State<FavoriteEditPage> {
   Future<void> _pickImage() async {
     final allowed = await PermissionGuard.photosForPick(context);
     if (!allowed || !mounted) return;
-    final theme = Provider.of<DefaultThemeData>(context, listen: false).theme;
-    final picked = await EditableAssetPicker.pickAssets(
-      context,
-      pickerConfig: AssetPickerConfig(
-        maxAssets: 1,
-        requestType: RequestType.image,
-        themeColor: theme.primaryColor ?? const Color(0xFF1E90FF),
-      ),
-    );
+    final picked = await SystemMediaPicker.pickImages(maxAssets: 1);
     if (!mounted || picked == null || picked.isEmpty) return;
-    final file = await EditableAssetPicker.resolveFile(picked.first);
-    if (file == null) return;
-    setState(() => _localImagePath = file.path);
+    setState(() => _localImagePath = picked.first.path);
   }
 
   Future<void> _pickVideo() async {
@@ -198,9 +189,9 @@ class _FavoriteEditPageState extends State<FavoriteEditPage> {
       late FavoriteMessageItem item;
 
       if (widget.isEditing && existing != null) {
-        final pickedNewMedia = (_type == FavoriteMessageType.image &&
-                _localImagePath != null) ||
-            (_type == FavoriteMessageType.video && _localVideoPath != null);
+        final pickedNewMedia =
+            (_type == FavoriteMessageType.image && _localImagePath != null) ||
+                (_type == FavoriteMessageType.video && _localVideoPath != null);
         if (pickedNewMedia) {
           await api.delete(existing.id);
           if (_type == FavoriteMessageType.image) {
@@ -388,9 +379,7 @@ class _FavoriteEditPageState extends State<FavoriteEditPage> {
           ),
         ];
       case FavoriteMessageType.image:
-        final preview = _localImagePath ??
-            _networkMediaUrl ??
-            _networkThumbUrl;
+        final preview = _localImagePath ?? _networkMediaUrl ?? _networkThumbUrl;
         return [
           ClipRRect(
             borderRadius: BorderRadius.circular(10),
@@ -439,8 +428,7 @@ class _FavoriteEditPageState extends State<FavoriteEditPage> {
 
   Widget _buildVideoPreview(bool dark) {
     final hasLocalVideo = _localVideoPath != null;
-    final hasRemote =
-        (_networkThumbUrl?.trim().isNotEmpty ?? false) ||
+    final hasRemote = (_networkThumbUrl?.trim().isNotEmpty ?? false) ||
         (_networkMediaUrl?.trim().isNotEmpty ?? false);
 
     Widget media;
@@ -557,8 +545,7 @@ class _TypeSelector extends StatelessWidget {
                   label,
                   style: TextStyle(
                     fontSize: 13,
-                    fontWeight:
-                        selected ? FontWeight.w600 : FontWeight.w400,
+                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
                     color: selected
                         ? AppColors.primaryBlue
                         : AppColors.text(dark: dark),

@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:ui' as ui;
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -484,6 +486,7 @@ class _TIMUIKItHistoryMessageListItemState
   bool _tooltipLayoutSyncActive = false;
   Rect? _lastTooltipSyncAnchor;
   DateTime? _mobileMenuOpenedAt;
+  Timer? _tooltipDismissGuardTimer;
   bool _isBubbleExtracted = false;
   ui.Image? _contextMenuSnapshot;
 
@@ -491,7 +494,20 @@ class _TIMUIKItHistoryMessageListItemState
   bool _contextMenuPresentationActive = false;
   bool _contextMenuDismisserRegistered = false;
 
+  void _contextMenuTrace(String event, [Map<String, Object?> data = const {}]) {
+    // Context-menu diagnostics are intentionally disabled in production.
+  }
+
   late final VoidCallback _dismissContextMenuOverlays = () {
+    // Global dismissal is broadcast to every mounted row. Only the row that
+    // actually owns an open tooltip/overlay may mutate context-menu state;
+    // stale rows must stay completely inert.
+    if (_mobileTelegramMenuOverlay == null &&
+        _tooltipBlurOverlay == null &&
+        !(tooltip?.isOpen ?? false) &&
+        !_contextMenuPresentationActive) {
+      return;
+    }
     closeTooltip();
   };
 
@@ -547,10 +563,7 @@ class _TIMUIKItHistoryMessageListItemState
       0,
       top,
       media.size.width,
-      media.size.height -
-          top -
-          media.padding.bottom -
-          media.viewInsets.bottom,
+      media.size.height - top - media.padding.bottom - media.viewInsets.bottom,
     );
   }
 
@@ -927,6 +940,12 @@ class _TIMUIKItHistoryMessageListItemState
     TUIChatSeparateViewModel model,
     TUITheme theme,
   ) async {
+    // Keep this unconditional: host applications may provide their own
+    // onLongPress callback, which used to bypass all context-menu tracing.
+    _contextMenuTrace('long_press_trigger', <String, Object?>{
+      'hasExternalHandler': widget.onLongPress != null,
+      'allowLongPress': widget.allowLongPress,
+    });
     if (widget.onLongPress != null) {
       widget.onLongPress!(bubbleContext, message);
       return;
@@ -951,8 +970,15 @@ class _TIMUIKItHistoryMessageListItemState
     required ToolTipsConfig toolTipsConfig,
     required bool isUseMessageReaction,
   }) {
+    _contextMenuTrace('menu_open_requested', <String, Object?>{
+      'conversationID': model.conversationID,
+      'reaction': isUseMessageReaction,
+    });
     // 长按后立刻屏蔽气泡内 tap（红包/转账卡片等），避免菜单弹出前后误触进详情。
-    _beginMessageContextMenuOverlayPresentation();
+    _beginMessageContextMenuOverlayPresentation(
+      message: message,
+      conversationID: model.conversationID,
+    );
     void present() {
       if (!mounted) {
         _endMessageContextMenuOverlayPresentation();
@@ -975,10 +1001,15 @@ class _TIMUIKItHistoryMessageListItemState
   }
 
   void _dismissTooltipIfAllowed() {
-    if (_mobileMenuOpenedAt != null &&
-        DateTime.now().difference(_mobileMenuOpenedAt!) <
-            const Duration(milliseconds: 320)) {
-      return;
+    const guardDuration = Duration(milliseconds: 320);
+    final openedAt = _mobileMenuOpenedAt;
+    if (openedAt != null) {
+      final remaining = guardDuration - DateTime.now().difference(openedAt);
+      if (remaining > Duration.zero) {
+        _tooltipDismissGuardTimer?.cancel();
+        _tooltipDismissGuardTimer = Timer(remaining, closeTooltip);
+        return;
+      }
     }
     closeTooltip();
   }
@@ -1189,12 +1220,51 @@ class _TIMUIKItHistoryMessageListItemState
     );
   }
 
-  void _beginMessageContextMenuOverlayPresentation() {
+  String? _contextMenuAnchorIdentity(V2TimMessage? message) {
+    final candidate = message ?? widget.message;
+    final msgID = candidate.msgID?.trim();
+    if (msgID != null && msgID.isNotEmpty) {
+      return msgID;
+    }
+    final localID = candidate.id?.toString().trim();
+    if (localID != null && localID.isNotEmpty) {
+      return localID;
+    }
+    return null;
+  }
+
+  double? _contextMenuAnchorViewportTop() {
+    // The restore path measures the AutoScrollTag row, so capture the same
+    // row box here. Capturing the inner bubble and restoring the outer tile
+    // introduces padding/avatar offsets and can never be pixel-stable.
+    final rowBox = _key.currentContext?.findRenderObject() as RenderBox?;
+    if (rowBox == null || !rowBox.hasSize || !rowBox.attached) {
+      return null;
+    }
+    final viewport = _messageViewportRect();
+    final rowTop = rowBox.localToGlobal(Offset.zero).dy;
+    final top = rowTop - viewport.top;
+    return top.isFinite ? top : null;
+  }
+
+  void _beginMessageContextMenuOverlayPresentation({
+    V2TimMessage? message,
+    String? conversationID,
+  }) {
     if (_contextMenuPresentationActive) {
       return;
     }
     _contextMenuPresentationActive = true;
-    serviceLocator<TUIChatGlobalModel>().beginMessageContextMenuOverlay();
+    _contextMenuTrace('open_begin', <String, Object?>{
+      'anchorTop': _contextMenuAnchorViewportTop(),
+    });
+    final anchorMessage = message ?? widget.message;
+    serviceLocator<TUIChatGlobalModel>().beginMessageContextMenuOverlay(
+      conversationID: conversationID,
+      anchorMessageID: _contextMenuAnchorIdentity(anchorMessage),
+      anchorSeq: anchorMessage.seq,
+      anchorViewportTop: _contextMenuAnchorViewportTop(),
+    );
     if (mounted) {
       setState(() {});
     }
@@ -1226,12 +1296,17 @@ class _TIMUIKItHistoryMessageListItemState
   }
 
   void _removeTooltipBlurOverlay() {
+    _contextMenuTrace('close_remove_overlay', <String, Object?>{
+      'wasExtracted': _isBubbleExtracted,
+    });
     _stopTooltipLayoutSync();
     _removeMobileTelegramMenuOverlay();
     _tooltipBlurOverlay?.remove();
     _tooltipBlurOverlay = null;
     _tooltipBlurHoleRect = null;
     _mobileMenuOpenedAt = null;
+    _tooltipDismissGuardTimer?.cancel();
+    _tooltipDismissGuardTimer = null;
     _contextMenuSnapshot?.dispose();
     _contextMenuSnapshot = null;
     _unregisterContextMenuOverlayDismisser();
@@ -1274,6 +1349,7 @@ class _TIMUIKItHistoryMessageListItemState
   }
 
   closeTooltip() {
+    _contextMenuTrace('close_requested', <String, Object?>{});
     tooltip?.close();
     _removeTooltipBlurOverlay();
   }
@@ -1304,16 +1380,11 @@ class _TIMUIKItHistoryMessageListItemState
 
     final fullContentRect = _messageFullContentRect();
     final boundaryRect = _messageAnchorRect();
-    // Only fall back to the combined "bubble + menu scroll together" layout when
-    // the bubble and the full action menu genuinely cannot both fit inside the
-    // safe area (very tall text / image / video / card ...). Short messages keep
-    // the in-place menu so the bubble stays where it is instead of jumping to
-    // the top with a large empty area below.
-    final useScrollableMenu = _shouldUseScrollableMenu(
-        boundaryRect, fullContentRect, isUseMessageReaction);
-    final previewRect = useScrollableMenu
-        ? _superLongPreviewRect(showReaction: isUseMessageReaction)
-        : null;
+    // WeChat keeps the message in place. The menu is placed in the available
+    // safe area; it does not turn a long message into a separately scrollable
+    // preview inside the context menu.
+    final useScrollableMenu = false;
+    final previewRect = boundaryRect;
 
     // The snapshot is the full RepaintBoundary, so display it at the bubble
     // rect (its true bounds) to avoid any BoxFit.fill distortion. Anchor the
@@ -1336,7 +1407,10 @@ class _TIMUIKItHistoryMessageListItemState
     _contextMenuSnapshot?.dispose();
     _contextMenuSnapshot = null;
     _removeMobileTelegramMenuOverlay();
-    _beginMessageContextMenuOverlayPresentation();
+    _beginMessageContextMenuOverlayPresentation(
+      message: message,
+      conversationID: model.conversationID,
+    );
 
     final longPressY = _tapDetails?.globalPosition.dy;
 
@@ -1385,53 +1459,9 @@ class _TIMUIKItHistoryMessageListItemState
       _registerContextMenuOverlayDismisser();
     }
 
-    Future<ui.Image?> captureMenuSnapshot() {
-      return TelegramMessageContextController.captureSnapshot(
-        _messageExtractBoundaryKey,
-        context,
-        maxPixelRatio:
-            TelegramMessageContextController.menuCaptureMaxPixelRatio,
-      );
-    }
-
-    // Super-long scrollable menus need the bitmap before insert. Ordinary
-    // bubbles insert the menu first so open is not gated on toImage.
-    if (useScrollableMenu) {
-      final snapshot = await captureMenuSnapshot();
-      if (!mounted) {
-        snapshot?.dispose();
-        _endMessageContextMenuOverlayPresentation();
-        return;
-      }
-      _contextMenuSnapshot = snapshot;
-      if (snapshot != null) {
-        setState(() {
-          _isBubbleExtracted = true;
-        });
-      }
-      insertMenuOverlay();
-      return;
-    }
-
+    // The selected message stays live in the chat list, as in WeChat. Do not
+    // wait for or substitute an asynchronous raster snapshot.
     insertMenuOverlay();
-    final captureOpenedAt = openedAt;
-    unawaited(() async {
-      final snapshot = await captureMenuSnapshot();
-      if (!mounted ||
-          _mobileMenuOpenedAt != captureOpenedAt ||
-          _mobileTelegramMenuOverlay == null) {
-        snapshot?.dispose();
-        return;
-      }
-      _contextMenuSnapshot?.dispose();
-      _contextMenuSnapshot = snapshot;
-      if (snapshot != null) {
-        setState(() {
-          _isBubbleExtracted = true;
-        });
-      }
-      _mobileTelegramMenuOverlay?.markNeedsBuild();
-    }());
   }
 
   bool isReplyMessage(V2TimMessage message) {
@@ -2173,6 +2203,12 @@ class _TIMUIKItHistoryMessageListItemState
     bool? isShowMoreSticker, {
     bool withHaptic = false,
   }) async {
+    _contextMenuTrace('tooltip_open_enter', <String, Object?>{
+      'isDesktop':
+          TUIKitScreenUtils.getFormFactor(context) == DeviceType.Desktop,
+      'hasTooltip': tooltip != null && tooltip!.isOpen,
+      'hasMobileOverlay': _mobileTelegramMenuOverlay != null,
+    });
     if ((tooltip != null && tooltip!.isOpen) ||
         _mobileTelegramMenuOverlay != null) {
       closeTooltip();
@@ -2182,9 +2218,8 @@ class _TIMUIKItHistoryMessageListItemState
 
     final isDesktopScreen =
         TUIKitScreenUtils.getFormFactor(context) == DeviceType.Desktop;
-    // Every long message (text/image/video/...) is now captured in full and
-    // scrolled inside the menu overlay, so we never scroll the list before
-    // opening 鈥?that avoids a jarring jump on long-press.
+    // Keep the chat list and the selected message stationary, as in WeChat;
+    // only the menu placement changes when the available space is limited.
     final tapDetails = isDesktopScreen ? (details ?? _tapDetails) : details;
     final pointer = tapDetails?.globalPosition;
     final isSelf = message.isSelf ?? true;
@@ -2235,7 +2270,10 @@ class _TIMUIKItHistoryMessageListItemState
         pointer: pointer);
     final tooltipTargetCenter =
         finalTapDetail?.globalPosition ?? _messageAnchorRect()?.center;
-    _beginMessageContextMenuOverlayPresentation();
+    _beginMessageContextMenuOverlayPresentation(
+      message: message,
+      conversationID: model.conversationID,
+    );
     // 桌面/Web：轻量定位菜单，不要手机 Telegram 全屏毛玻璃。
     tooltip!.show(c, targetCenter: tooltipTargetCenter);
   }
@@ -3424,7 +3462,12 @@ class _TIMUIKItHistoryMessageListItemState
 
     final globalModel = Provider.of<TUIChatGlobalModel>(context, listen: false);
     return VisibilityDetector(
-      key: Key(message.id ?? message.msgID!),
+      // Optimistic pre-SDK rows legitimately have neither id nor msgID.
+      // A null-asserted key can make Sliver child lookup fail while the row is
+      // hydrated/replaced during a frame. Keep a stable per-object fallback.
+      key: ValueKey<String>(
+        message.id ?? message.msgID ?? 'local_${message.hashCode}',
+      ),
       onVisibilityChanged: (visibilityInfo) {
         if (_readReceiptVisibilityHandled ||
             globalModel.isChatListUserScrolling) {

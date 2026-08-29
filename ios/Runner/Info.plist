@@ -57,8 +57,6 @@
 			</dict>
 		</dict>
 	</dict>
-	<key>NSSupportsLiveActivities</key>
-	<true/>
 	<key>NSUserActivityTypes</key>
 	<array>
 		<string>INSendMessageIntent</string>

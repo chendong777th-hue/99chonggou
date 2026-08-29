@@ -1,16 +1,14 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_flags.dart';
 
-/// 会话性能验收探针。过滤：`[ConvPerfGate]`
-///
-/// 与 `[SqfliteLock]` 并列；正式包可关 [enabled]。
+/// 会话性能验收计数器；不向控制台输出。
 class ConversationPerfGateLog {
   ConversationPerfGateLog._();
 
-  /// 验收包默认开；收工可改 `false`。
   static bool enabled = false;
-
-  static int _seq = 0;
 
   /// conversationID → 消息侧首次打点毫秒（realtime 三段耗时）。
   static final Map<String, int> _msgRecvAtMsByConv = <String, int>{};
@@ -21,25 +19,49 @@ class ConversationPerfGateLog {
   @visibleForTesting
   static void resetCountsForTest() => eventCountsForTest.clear();
 
-  @visibleForTesting
   static bool skipUnreadAggregateScheduleForTest = false;
+
+  static String _traceHash(String value) {
+    final normalized = value.trim();
+    if (normalized.isEmpty) {
+      return '';
+    }
+    return sha256.convert(utf8.encode(normalized)).toString().substring(0, 12);
+  }
+
+  /// Plan 093 monotonic-preview trace. Never include message bodies or raw IDs.
+  static void traceConversationProjection({
+    required String stage,
+    required String conversationId,
+    String messageId = '',
+    int timestamp = 0,
+    int orderkey = 0,
+    String source = '',
+    int sequence = 0,
+    String decision = '',
+  }) {
+    final traceId = _traceHash('$conversationId\u001f$messageId');
+    log(
+      'conversation_projection_trace',
+      extras: <String, Object?>{
+        'stage': stage,
+        'trace': traceId,
+        'conversation': _traceHash(conversationId),
+        'message': _traceHash(messageId),
+        'timestamp': timestamp,
+        'orderkey': orderkey,
+        'source': source,
+        'sequence': sequence,
+        'decision': decision,
+      },
+    );
+  }
 
   static void log(
     String event, {
     Map<String, Object?> extras = const <String, Object?>{},
   }) {
     eventCountsForTest[event] = (eventCountsForTest[event] ?? 0) + 1;
-    if (!enabled) {
-      return;
-    }
-    final seq = ++_seq;
-    final t = DateTime.now().millisecondsSinceEpoch;
-    final buf = StringBuffer('[ConvPerfGate] #$seq t=$t event=$event');
-    for (final entry in extras.entries) {
-      buf.write(' ${entry.key}=${entry.value}');
-    }
-    // ignore: avoid_print
-    print(buf.toString());
   }
 
   /// 消息通道（横幅/通知）到达。

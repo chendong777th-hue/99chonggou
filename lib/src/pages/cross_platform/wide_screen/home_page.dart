@@ -2,9 +2,11 @@ import 'package:bitsdojo_window/bitsdojo_window.dart';
 import 'package:flutter/material.dart';
 import 'package:tencent_cloud_chat_demo/src/conversation.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
+import 'package:tencent_cloud_chat_demo/src/utils/message_conversation_id.dart';
 import 'package:tencent_cloud_chat_demo/src/pages/cross_platform/wide_screen/contact_and_profile.dart';
 import 'package:tencent_cloud_chat_demo/src/pages/cross_platform/wide_screen/me_and_tencent.dart';
 import 'package:tencent_cloud_chat_demo/src/provider/login_user_Info.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/services/app_update_service.dart';
 import 'package:tencent_cloud_chat_sdk/manager/v2_tim_manager.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
@@ -24,6 +26,7 @@ import 'package:tencent_cloud_chat_uikit/ui/utils/platform.dart';
 import 'conversation_and_chat.dart';
 import 'package:provider/provider.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/launch_system_ui.dart';
+
 class HomePageWideScreen extends StatefulWidget {
   const HomePageWideScreen({Key? key}) : super(key: key);
 
@@ -144,15 +147,21 @@ class HomePageWideScreenState extends State<HomePageWideScreen> {
   }
 
   void _onConversationRefreshBus() {
-    if (ConversationRefreshBus.instance.lastReason != 'group_self_removed') {
+    final events = ConversationRefreshBus.instance.lastEvents;
+    final removedEvents = events
+        .where((event) => event.reason == 'group_self_removed')
+        .toList(growable: false);
+    if (removedEvents.isEmpty) {
       return;
     }
-    final targetId =
-        ConversationRefreshBus.instance.lastConversationId?.trim() ?? '';
-    final currentId = currentGroupConversation?.conversationID?.trim() ?? '';
-    if (targetId.isNotEmpty &&
-        currentId.isNotEmpty &&
-        targetId != currentId) {
+    final currentId = currentGroupConversation?.conversationID.trim() ?? '';
+    final matchesCurrent = removedEvents.any((event) {
+      final targetId = event.conversationId?.trim() ?? '';
+      return targetId.isEmpty ||
+          currentId.isEmpty ||
+          MessageConversationId.sameConversation(targetId, currentId);
+    });
+    if (!matchesCurrent) {
       return;
     }
     if (!mounted) {
@@ -184,15 +193,20 @@ class HomePageWideScreenState extends State<HomePageWideScreen> {
     });
   }
 
-  getLoginUserInfo() async {
+  Future<void> getLoginUserInfo() async {
     if (PlatformUtils().isWeb) {
       return;
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) {
+      return;
+    }
     final res = await _sdkInstance.getLoginUser();
-    if (res.code == 0) {
+    if (res.code == 0 && SessionIdentityService.instance.isCurrent(identity)) {
       final result = await _sdkInstance.getUsersInfo(userIDList: [res.data!]);
 
-      if (result.code == 0) {
+      if (result.code == 0 &&
+          SessionIdentityService.instance.isCurrent(identity)) {
         Provider.of<LoginUserInfo>(context, listen: false)
             .setLoginUserInfo(result.data![0]);
       }
@@ -209,8 +223,7 @@ class HomePageWideScreenState extends State<HomePageWideScreen> {
       children: [
         Container(
           width: 64,
-          decoration: BoxDecoration(
-              color: sideBarColor),
+          decoration: BoxDecoration(color: sideBarColor),
           child: Row(
             mainAxisSize: MainAxisSize.max,
             children: [
@@ -254,47 +267,48 @@ class HomePageWideScreenState extends State<HomePageWideScreen> {
         ),
         Expanded(
             child: Column(
-              children: [
-                if(PlatformUtils().isWindows) Container(
-                  height: 40,
-                  decoration: BoxDecoration(
-                      color: sideBarColor),
+          children: [
+            if (PlatformUtils().isWindows)
+              Container(
+                height: 40,
+                decoration: BoxDecoration(color: sideBarColor),
                 child: Row(
                   children: [
                     Expanded(child: MoveWindow()),
-                    MinimizeWindowButton(colors: WindowButtonColors(
-                      iconNormal: sideBarTextColor
-                    ),),
-                    MaximizeWindowButton(colors: WindowButtonColors(
-                        iconNormal: sideBarTextColor
-                    ),),
-                    CloseWindowButton(colors: WindowButtonColors(
-                        iconNormal: sideBarTextColor
-                    ),)
-                  ],
-                ),),
-                Expanded(child: IndexedStack(
-                  index: homePageIndex,
-                  children: [
-                    ConversationAndChat(
-                      conversation: currentC2CConversation,
-                      searchJumpAnchor: currentC2CMessageAnchor,
-                      listScope: ConversationListScope.c2c,
-                      showDesktopUserProfile: true,
+                    MinimizeWindowButton(
+                      colors: WindowButtonColors(iconNormal: sideBarTextColor),
                     ),
-                    ConversationAndChat(
-                      conversation: currentGroupConversation,
-                      searchJumpAnchor: currentGroupMessageAnchor,
-                      listScope: ConversationListScope.group,
-                      showDesktopUserProfile: true,
+                    MaximizeWindowButton(
+                      colors: WindowButtonColors(iconNormal: sideBarTextColor),
                     ),
-                    ContactsAndProfile(onNavigateToChat: _navigateToChat),
-                    const MeAndTencent(),
+                    CloseWindowButton(
+                      colors: WindowButtonColors(iconNormal: sideBarTextColor),
+                    )
                   ],
-                ))
+                ),
+              ),
+            Expanded(
+                child: IndexedStack(
+              index: homePageIndex,
+              children: [
+                ConversationAndChat(
+                  conversation: currentC2CConversation,
+                  searchJumpAnchor: currentC2CMessageAnchor,
+                  listScope: ConversationListScope.c2c,
+                  showDesktopUserProfile: true,
+                ),
+                ConversationAndChat(
+                  conversation: currentGroupConversation,
+                  searchJumpAnchor: currentGroupMessageAnchor,
+                  listScope: ConversationListScope.group,
+                  showDesktopUserProfile: true,
+                ),
+                ContactsAndProfile(onNavigateToChat: _navigateToChat),
+                const MeAndTencent(),
               ],
-            )
-        )
+            ))
+          ],
+        ))
       ],
     );
   }

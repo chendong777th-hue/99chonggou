@@ -12,7 +12,7 @@ class MediaPreviewOverlayRoute<T> extends PageRoute<T>
     this.barrierColor,
     this.enableGestureBack = true,
     this.transitionDuration = mediaPreviewBackdropDuration,
-    this.reverseTransitionDuration = mediaPreviewBackdropDuration,
+    this.reverseTransitionDuration = mediaPreviewCloseDuration,
   });
 
   final RoutePageBuilder pageBuilder;
@@ -55,7 +55,8 @@ class MediaPreviewOverlayRoute<T> extends PageRoute<T>
     Widget child,
   ) {
     // 入场不整页淡入：黑底由页内 scrim 跟 Hero 一起出现，避免和飞行层抢透明度。
-    // 退场仍淡出整页，否则 pop 后黑底会停一拍。
+    // 退场黑底快速淡出（reverseCurve 前段更快），Hero 回飞保持清晰可见，
+    // 避免"整页慢慢变淡"拖沓——对齐 Telegram 的关闭手感。
     final fadingOut = animation.status == AnimationStatus.reverse ||
         animation.status == AnimationStatus.dismissed;
     final page = fadingOut

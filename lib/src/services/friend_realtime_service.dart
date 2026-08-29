@@ -192,9 +192,17 @@ class FriendRealtimeService {
     }
 
     await _connection?.close();
-    final connection = FriendRealtimeConnection(
-      onLine: _handleLine,
-      onDisconnected: _handleDisconnected,
+    late final FriendRealtimeConnection connection;
+    connection = FriendRealtimeConnection(
+      onLine: (line) => _handleLine(
+        line,
+        connection: connection,
+        connectGeneration: connectGeneration,
+      ),
+      onDisconnected: () => _handleDisconnected(
+        connection: connection,
+        connectGeneration: connectGeneration,
+      ),
     );
     _connection = connection;
 
@@ -208,9 +216,7 @@ class FriendRealtimeService {
         port: endpoint.port,
         useTls: endpoint.useTls,
       );
-      if (!_running ||
-          _authFailed ||
-          connectGeneration != _connectGeneration) {
+      if (!_running || _authFailed || connectGeneration != _connectGeneration) {
         await connection.close();
         if (identical(_connection, connection)) {
           _connection = null;
@@ -223,9 +229,7 @@ class FriendRealtimeService {
         'token': token,
         'deviceId': ApiClient.instance.deviceId,
       });
-      if (!_running ||
-          _authFailed ||
-          connectGeneration != _connectGeneration) {
+      if (!_running || _authFailed || connectGeneration != _connectGeneration) {
         await connection.close();
         if (identical(_connection, connection)) {
           _connection = null;
@@ -266,7 +270,16 @@ class FriendRealtimeService {
     } catch (_) {}
   }
 
-  void _handleLine(String line) {
+  void _handleLine(
+    String line, {
+    required FriendRealtimeConnection connection,
+    required int connectGeneration,
+  }) {
+    if (!_running ||
+        connectGeneration != _connectGeneration ||
+        !identical(_connection, connection)) {
+      return;
+    }
     Map<String, dynamic> map;
     try {
       final decoded = jsonDecode(line);
@@ -370,17 +383,21 @@ class FriendRealtimeService {
     }
   }
 
-  void _handleDisconnected() {
-    if (!_running || _authFailed) {
+  void _handleDisconnected({
+    required FriendRealtimeConnection connection,
+    required int connectGeneration,
+  }) {
+    if (!_running ||
+        _authFailed ||
+        connectGeneration != _connectGeneration ||
+        !identical(_connection, connection)) {
       return;
     }
     _authOk = false;
     _pingTimer?.cancel();
     _pingTimer = null;
     _failAllLastSeen(PresenceLastSeenFailCode.disconnected);
-    if (!identical(_connection, null)) {
-      _connection = null;
-    }
+    _connection = null;
     _emitReadyIfChanged();
     _scheduleReconnect();
   }

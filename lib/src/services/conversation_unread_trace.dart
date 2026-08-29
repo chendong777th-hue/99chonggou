@@ -2,10 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
 
-/// 未读角标链路追踪。
-///
-/// 发布版多选已读排查期间保持 [enabled]=true（`print` 在 release 也会进 logcat）。
-/// 测完请改回 false，避免刷屏。
+/// 未读角标链路追踪；Debug 构建输出到控制台，Release 构建保持静默。
 class ConversationUnreadTrace {
   ConversationUnreadTrace._();
 
@@ -19,15 +16,18 @@ class ConversationUnreadTrace {
     int? unreadAfter,
     Map<String, Object?> extras = const {},
   }) {
-    if (!enabled) return;
-    // ignore: avoid_print
-    print(formatLineForTest(
-      event,
-      conversationID: conversationID,
-      unreadBefore: unreadBefore,
-      unreadAfter: unreadAfter,
-      extras: extras,
-    ));
+    if (!enabled && !kDebugMode) {
+      return;
+    }
+    debugPrint(
+      formatLineForTest(
+        event,
+        conversationID: conversationID,
+        unreadBefore: unreadBefore,
+        unreadAfter: unreadAfter,
+        extras: extras,
+      ),
+    );
   }
 
   static void logConversations(
@@ -35,18 +35,25 @@ class ConversationUnreadTrace {
     required List<V2TimConversation> conversations,
     Map<String, Object?> extras = const {},
   }) {
-    if (conversations.isEmpty) {
-      log(event, extras: extras);
+    if (!enabled && !kDebugMode) {
       return;
     }
-    for (final conversation in conversations) {
-      log(
+    final rows = conversations
+        .map(
+          (conversation) =>
+              '${conversation.conversationID.trim()}:${conversation.unreadCount ?? 0}',
+        )
+        .where((entry) => entry.split(':').first.isNotEmpty)
+        .join(',');
+    debugPrint(
+      formatLineForTest(
         event,
-        conversationID: conversation.conversationID,
-        unreadAfter: conversation.unreadCount ?? 0,
-        extras: extras,
-      );
-    }
+        extras: <String, Object?>{
+          ...extras,
+          'rows': rows.isEmpty ? '(none)' : rows,
+        },
+      ),
+    );
   }
 
   @visibleForTesting
@@ -79,30 +86,17 @@ class ConversationUnreadTrace {
   }
 }
 
-/// 多选「标记已读」专用日志（决策 / bulk / 队列）。
-/// 需要排查时临时改 [enabled]=true；默认关闭避免进群连打刷屏。
+/// 多选「标记已读」诊断的兼容入口；不向控制台输出。
 class MarkSelectedReadLog {
   MarkSelectedReadLog._();
 
   static const bool enabled = false;
-  static const _tag = 'MarkSelectedRead';
   static const int _idSampleLimit = 40;
 
-  static void log(String message, [Map<String, Object?> extras = const {}]) {
-    if (!enabled) return;
-    final buffer = StringBuffer('[$_tag] $message');
-    for (final entry in extras.entries) {
-      final value = entry.value;
-      if (value == null) {
-        continue;
-      }
-      buffer.write(' ${entry.key}=$value');
-    }
-    // ignore: avoid_print
-    print(buffer.toString());
-  }
+  static void log(String message, [Map<String, Object?> extras = const {}]) {}
 
-  static String summarizeIds(Iterable<String> ids, {int limit = _idSampleLimit}) {
+  static String summarizeIds(Iterable<String> ids,
+      {int limit = _idSampleLimit}) {
     final list = ids.where((e) => e.trim().isNotEmpty).toList();
     if (list.isEmpty) {
       return '(none)';

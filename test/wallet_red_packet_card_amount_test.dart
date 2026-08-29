@@ -4,6 +4,11 @@ import 'package:tencent_cloud_chat_demo/src/pages/wallet/wallet_repository.dart'
 import 'package:tencent_cloud_chat_demo/src/pages/wallet/wallet_store.dart';
 
 void main() {
+  test('formatWalletAmount uses two decimal places for USDT', () {
+    expect(formatWalletAmount(WalletCurrency.usdt, 1000000), '1.00');
+    expect(formatWalletAmount(WalletCurrency.usdt, 1299999), '1.30');
+  });
+
   test('local red packet card uses the same amount format as the API card', () {
     const fen = 8800;
     final local = WalletStore.buildLocalOrderCard(
@@ -20,7 +25,7 @@ void main() {
     expect(local.coin, walletDisplayCoin(WalletCurrency.platform));
   });
 
-  test('local USDT card matches formatUsdtMicro', () {
+  test('local USDT card uses the global two-decimal format', () {
     const micro = 1234000;
     final local = WalletStore.buildLocalOrderCard(
       type: 'wallet_red_packet',
@@ -31,7 +36,7 @@ void main() {
 
     expect(local, isNotNull);
     expect(local!.amount, formatWalletAmount(WalletCurrency.usdt, micro));
-    expect(local.amount, '1.234');
+    expect(local.amount, '1.23');
   });
 
   test('retainWalletCardDisplayAmount keeps previous amount over empty refresh', () {

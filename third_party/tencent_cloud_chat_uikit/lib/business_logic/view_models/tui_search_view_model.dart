@@ -24,6 +24,10 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_search_param.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_search_param.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_search_result_item.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_search_result_item.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_search_result.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_search_result.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_value_callback.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_value_callback.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_conversation_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_friendship_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_self_info_view_model.dart';
@@ -38,12 +42,17 @@ import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitSearch/conversation_se
 import 'package:tencent_cloud_chat_uikit/ui/utils/picker_user_filter.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
 
-enum KeywordListMatchType { V2TIM_KEYWORD_LIST_MATCH_TYPE_OR, V2TIM_KEYWORD_LIST_MATCH_TYPE_AND }
+enum KeywordListMatchType {
+  V2TIM_KEYWORD_LIST_MATCH_TYPE_OR,
+  V2TIM_KEYWORD_LIST_MATCH_TYPE_AND
+}
 
 class TUISearchViewModel extends ChangeNotifier {
-  final FriendshipServices _friendshipServices = serviceLocator<FriendshipServices>();
+  final FriendshipServices _friendshipServices =
+      serviceLocator<FriendshipServices>();
   final MessageService _messageService = serviceLocator<MessageService>();
-  final ConversationService _conversationService = serviceLocator<ConversationService>();
+  final ConversationService _conversationService =
+      serviceLocator<ConversationService>();
   final GroupServices _groupServices = serviceLocator<GroupServices>();
 
   List<V2TimFriendInfoResult>? friendList = [];
@@ -51,15 +60,30 @@ class TUISearchViewModel extends ChangeNotifier {
   List<V2TimMessageSearchResultItem>? msgList = [];
   int msgPage = 0;
   int totalMsgCount = 0;
+  String _globalMessageSearchCursor = '';
+  bool _globalMessageSearchCloudEnabled = true;
+  bool _globalMessageSearchInFlight = false;
+  bool get hasMoreGlobalMessageResults => _globalMessageSearchCloudEnabled
+      ? _globalMessageSearchCursor.isNotEmpty
+      : totalMsgCount > (msgList?.length ?? 0);
 
   int totalMsgInConversationCount = 0;
   List<V2TimMessage> currentMsgListForConversation = [];
+  String _conversationTextSearchCursor = '';
+  bool _conversationTextSearchCloudEnabled = true;
+  bool get hasMoreConversationTextResults => _conversationTextSearchCloudEnabled
+      ? _conversationTextSearchCursor.isNotEmpty
+      : totalMsgInConversationCount > currentMsgListForConversation.length;
 
   /// 会话内图片/文件消息（用于文件名关键词搜索）。
   List<V2TimMessage> mediaFileMsgListForConversation = [];
   bool mediaFileHasMore = true;
   bool mediaFileLoading = false;
   String? _mediaFileLastMsgID;
+  String _mediaFileCloudCursor = '';
+  bool _mediaFileCloudEnabled = true;
+  String _mediaFileContextKey = '';
+  int _mediaFileGeneration = 0;
 
   /// 媒体/文件专用浏览页数据。
   List<V2TimMessage> conversationMediaMessages = [];
@@ -67,6 +91,10 @@ class TUISearchViewModel extends ChangeNotifier {
   bool conversationAssetLoading = false;
   bool conversationAssetHasMore = true;
   String? _conversationAssetLastMsgID;
+  String _conversationAssetCloudCursor = '';
+  bool _conversationAssetCloudEnabled = true;
+  String _conversationAssetContextKey = '';
+  int _conversationAssetGeneration = 0;
 
   List<V2TimGroupInfo>? groupList = [];
 
@@ -120,8 +148,8 @@ class TUISearchViewModel extends ChangeNotifier {
       return conversationList;
     }
 
-    final conversationResult =
-        await _conversationService.getConversationList(nextSeq: "0", count: 500);
+    final conversationResult = await _conversationService.getConversationList(
+        nextSeq: "0", count: 500);
     final conversationListData = conversationResult?.conversationList;
     conversationList = (conversationListData ?? [])
         .where((item) => !shouldHideConversationFromPickers(item))
@@ -267,7 +295,8 @@ class TUISearchViewModel extends ChangeNotifier {
   String _currentLoginUserId() {
     try {
       final fromSelf =
-          serviceLocator<TUISelfInfoViewModel>().loginInfo?.userID?.trim() ?? '';
+          serviceLocator<TUISelfInfoViewModel>().loginInfo?.userID?.trim() ??
+              '';
       if (fromSelf.isNotEmpty) {
         return fromSelf;
       }
@@ -290,6 +319,11 @@ class TUISearchViewModel extends ChangeNotifier {
         msgList = [];
         groupList = [];
         totalMsgCount = 0;
+        _globalMessageSearchCursor = '';
+        _globalMessageSearchCloudEnabled = true;
+        _conversationTextSearchCursor = '';
+        _conversationTextSearchCloudEnabled = true;
+        _resetConversationFilterState();
         _completedGlobalSearchKey = '';
       }
       if (current.isNotEmpty) {
@@ -305,7 +339,7 @@ class TUISearchViewModel extends ChangeNotifier {
     return false;
   }
 
-  /// 本地消息搜索前：当前 IM 用户必须已绑定且可用。
+  /// 消息搜索前：当前 IM 用户必须已绑定且可用。
   bool _canSearchLocalMessagesForCurrentUser() {
     final current = _currentLoginUserId();
     if (current.isEmpty) {
@@ -316,6 +350,53 @@ class TUISearchViewModel extends ChangeNotifier {
     }
     _boundLoginUserId = current;
     return true;
+  }
+
+  String _messageSearchIdentity(V2TimMessage message) {
+    final id = (message.msgID ?? message.id ?? '').trim();
+    if (id.isNotEmpty) return id;
+    return '${message.sender ?? ''}|${message.timestamp ?? 0}|${message.seq ?? 0}|${message.elemType ?? 0}';
+  }
+
+  List<V2TimMessage> _mergeMessageLists(
+    Iterable<V2TimMessage> current,
+    Iterable<V2TimMessage> incoming,
+  ) {
+    final byId = <String, V2TimMessage>{};
+    for (final message in [...current, ...incoming]) {
+      byId.putIfAbsent(_messageSearchIdentity(message), () => message);
+    }
+    return byId.values.toList(growable: false);
+  }
+
+  List<V2TimMessageSearchResultItem> _mergeSearchResultItems(
+    Iterable<V2TimMessageSearchResultItem> current,
+    Iterable<V2TimMessageSearchResultItem> incoming,
+  ) {
+    final byConversation = <String, V2TimMessageSearchResultItem>{};
+    for (final item in [...current, ...incoming]) {
+      final conversationId = item.conversationID?.trim() ?? '';
+      if (conversationId.isEmpty) continue;
+      final previous = byConversation[conversationId];
+      if (previous == null) {
+        byConversation[conversationId] = V2TimMessageSearchResultItem(
+          conversationID: conversationId,
+          messageCount: item.messageCount,
+          messageList:
+              _mergeMessageLists(const [], item.messageList ?? const []),
+        );
+      } else {
+        previous.messageCount = [
+          previous.messageCount ?? 0,
+          item.messageCount ?? 0
+        ].reduce((a, b) => a > b ? a : b);
+        previous.messageList = _mergeMessageLists(
+          previous.messageList ?? const [],
+          item.messageList ?? const [],
+        );
+      }
+    }
+    return byConversation.values.toList(growable: false);
   }
 
   void initSearch({bool notify = true}) {
@@ -329,13 +410,28 @@ class TUISearchViewModel extends ChangeNotifier {
     msgList = [];
     groupList = [];
     totalMsgCount = 0;
+    _globalMessageSearchCursor = '';
+    _globalMessageSearchCloudEnabled = true;
+    _conversationTextSearchCursor = '';
+    _conversationTextSearchCloudEnabled = true;
+    _resetConversationFilterState();
     mediaFileMsgListForConversation = [];
+    mediaFileLoading = false;
     mediaFileHasMore = true;
     _mediaFileLastMsgID = null;
+    _mediaFileCloudCursor = '';
+    _mediaFileCloudEnabled = true;
+    _mediaFileContextKey = '';
+    _mediaFileGeneration++;
     conversationMediaMessages = [];
     conversationFileMessages = [];
+    conversationAssetLoading = false;
     conversationAssetHasMore = true;
     _conversationAssetLastMsgID = null;
+    _conversationAssetCloudCursor = '';
+    _conversationAssetCloudEnabled = true;
+    _conversationAssetContextKey = '';
+    _conversationAssetGeneration++;
     globalSearchLoading = false;
     _completedGlobalSearchKey = '';
     _joinedGroupIdsForSearch = null;
@@ -362,13 +458,28 @@ class TUISearchViewModel extends ChangeNotifier {
     totalMsgCount = 0;
     totalMsgInConversationCount = 0;
     currentMsgListForConversation = [];
+    _globalMessageSearchCursor = '';
+    _globalMessageSearchCloudEnabled = true;
+    _conversationTextSearchCursor = '';
+    _conversationTextSearchCloudEnabled = true;
+    _resetConversationFilterState();
     mediaFileMsgListForConversation = [];
+    mediaFileLoading = false;
     mediaFileHasMore = true;
     _mediaFileLastMsgID = null;
+    _mediaFileCloudCursor = '';
+    _mediaFileCloudEnabled = true;
+    _mediaFileContextKey = '';
+    _mediaFileGeneration++;
     conversationMediaMessages = [];
     conversationFileMessages = [];
+    conversationAssetLoading = false;
     conversationAssetHasMore = true;
     _conversationAssetLastMsgID = null;
+    _conversationAssetCloudCursor = '';
+    _conversationAssetCloudEnabled = true;
+    _conversationAssetContextKey = '';
+    _conversationAssetGeneration++;
     globalSearchLoading = false;
     _completedGlobalSearchKey = '';
     _joinedGroupIdsForSearch = null;
@@ -444,7 +555,8 @@ class TUISearchViewModel extends ChangeNotifier {
         .cast<V2TimMessageSearchResultItem>();
   }
 
-  ({String? userID, String? groupID})? _conversationTargets(String conversationId) {
+  ({String? userID, String? groupID})? _conversationTargets(
+      String conversationId) {
     if (conversationId.startsWith('c2c_')) {
       final userID = conversationId.substring(4).trim();
       return userID.isEmpty ? null : (userID: userID, groupID: null);
@@ -476,7 +588,8 @@ class TUISearchViewModel extends ChangeNotifier {
     return null;
   }
 
-  bool _messageMatchesSenderFilter(V2TimMessage message, Set<String> senderSet) {
+  bool _messageMatchesSenderFilter(
+      V2TimMessage message, Set<String> senderSet) {
     final sender = (message.sender ?? message.userID ?? '').trim();
     final senderAlt = (message.userID ?? message.sender ?? '').trim();
     if (senderSet.contains(sender) || senderSet.contains(senderAlt)) {
@@ -484,7 +597,8 @@ class TUISearchViewModel extends ChangeNotifier {
     }
     if (message.isSelf == true) {
       final loginUserId =
-          serviceLocator<TUISelfInfoViewModel>().loginInfo?.userID?.trim() ?? '';
+          serviceLocator<TUISelfInfoViewModel>().loginInfo?.userID?.trim() ??
+              '';
       if (loginUserId.isNotEmpty && senderSet.contains(loginUserId)) {
         return true;
       }
@@ -540,13 +654,20 @@ class TUISearchViewModel extends ChangeNotifier {
     required bool reset,
     String keyword = '',
   }) async {
-    if (mediaFileLoading) {
-      return;
-    }
     if (reset) {
+      _mediaFileGeneration++;
+      mediaFileLoading = false;
       mediaFileMsgListForConversation = [];
       mediaFileHasMore = true;
       _mediaFileLastMsgID = null;
+      _mediaFileCloudCursor = '';
+      _mediaFileCloudEnabled = true;
+      _mediaFileContextKey = '$conversationId|${keyword.trim()}';
+    } else if (_mediaFileContextKey != '$conversationId|${keyword.trim()}') {
+      return;
+    }
+    if (mediaFileLoading) {
+      return;
     }
     if (!mediaFileHasMore) {
       return;
@@ -559,8 +680,51 @@ class TUISearchViewModel extends ChangeNotifier {
     }
 
     mediaFileLoading = true;
+    final generation = _mediaFileGeneration;
     notifyListeners();
     try {
+      if (_mediaFileCloudEnabled && _canSearchLocalMessagesForCurrentUser()) {
+        try {
+          final result = await _messageService.searchCloudMessages(
+            searchParam: V2TimMessageSearchParam(
+              conversationID: conversationId,
+              keywordList: keyword.trim().isEmpty ? const [] : [keyword.trim()],
+              messageTypeList: const [
+                MessageElemType.V2TIM_ELEM_TYPE_IMAGE,
+                MessageElemType.V2TIM_ELEM_TYPE_FILE,
+              ],
+              searchCount: 30,
+              searchCursor: _mediaFileCloudCursor,
+              type: KeywordListMatchType.V2TIM_KEYWORD_LIST_MATCH_TYPE_OR.index,
+            ),
+          );
+          if (generation != _mediaFileGeneration) return;
+          if (result.code == 0 && result.data != null) {
+            final item =
+                result.data!.messageSearchResultItems?.firstWhereOrNull(
+                      (element) => element.conversationID == conversationId,
+                    ) ??
+                    (result.data!.messageSearchResultItems?.length == 1
+                        ? result.data!.messageSearchResultItems!.first
+                        : null);
+            mediaFileMsgListForConversation = _mergeMessageLists(
+              mediaFileMsgListForConversation,
+              (item?.messageList ?? const []).where(
+                (message) =>
+                    _isImageOrFileMessage(message) &&
+                    _mediaFileMatchesKeyword(message, keyword),
+              ),
+            );
+            _mediaFileCloudCursor = result.data!.searchCursor ?? '';
+            mediaFileHasMore = _mediaFileCloudCursor.isNotEmpty;
+            return;
+          }
+          _mediaFileCloudEnabled = false;
+        } catch (_) {
+          _mediaFileCloudEnabled = false;
+        }
+      }
+
       final seen = mediaFileMsgListForConversation
           .map((m) => m.msgID ?? m.id ?? '')
           .where((id) => id.isNotEmpty)
@@ -574,6 +738,7 @@ class TUISearchViewModel extends ChangeNotifier {
           count: 50,
           lastMsgID: _mediaFileLastMsgID,
         );
+        if (generation != _mediaFileGeneration) return;
         if (batch.isEmpty) {
           mediaFileHasMore = false;
           break;
@@ -610,12 +775,15 @@ class TUISearchViewModel extends ChangeNotifier {
         keepLoading = appendedCount == 0;
       }
     } finally {
-      mediaFileLoading = false;
-      notifyListeners();
+      if (generation == _mediaFileGeneration) {
+        mediaFileLoading = false;
+        notifyListeners();
+      }
     }
   }
 
-  List<V2TimMessage> mergedConversationSearchResults({required String keyword}) {
+  List<V2TimMessage> mergedConversationSearchResults(
+      {required String keyword}) {
     final trimmed = keyword.trim();
     if (trimmed.isEmpty) {
       return const [];
@@ -663,14 +831,21 @@ class TUISearchViewModel extends ChangeNotifier {
     String? userID,
     String? groupID,
   }) async {
-    if (conversationAssetLoading) {
-      return;
-    }
     if (reset) {
+      _conversationAssetGeneration++;
+      conversationAssetLoading = false;
       conversationMediaMessages = [];
       conversationFileMessages = [];
       conversationAssetHasMore = true;
       _conversationAssetLastMsgID = null;
+      _conversationAssetCloudCursor = '';
+      _conversationAssetCloudEnabled = true;
+      _conversationAssetContextKey = conversationId;
+    } else if (_conversationAssetContextKey != conversationId) {
+      return;
+    }
+    if (conversationAssetLoading) {
+      return;
     }
     if (!conversationAssetHasMore) {
       return;
@@ -687,8 +862,50 @@ class TUISearchViewModel extends ChangeNotifier {
     }
 
     conversationAssetLoading = true;
+    final generation = _conversationAssetGeneration;
     notifyListeners();
     try {
+      if (_conversationAssetCloudEnabled &&
+          _canSearchLocalMessagesForCurrentUser()) {
+        try {
+          final result = await _messageService.searchCloudMessages(
+            searchParam: V2TimMessageSearchParam(
+              conversationID: conversationId,
+              keywordList: const [],
+              messageTypeList: _conversationAssetSearchMessageTypes,
+              searchCount: 50,
+              searchCursor: _conversationAssetCloudCursor,
+              type: KeywordListMatchType.V2TIM_KEYWORD_LIST_MATCH_TYPE_OR.index,
+            ),
+          );
+          if (generation != _conversationAssetGeneration) return;
+          if (result.code == 0 && result.data != null) {
+            final item =
+                result.data!.messageSearchResultItems?.firstWhereOrNull(
+                      (element) => element.conversationID == conversationId,
+                    ) ??
+                    (result.data!.messageSearchResultItems?.length == 1
+                        ? result.data!.messageSearchResultItems!.first
+                        : null);
+            final page = item?.messageList ?? const <V2TimMessage>[];
+            conversationMediaMessages = _mergeMessageLists(
+              conversationMediaMessages,
+              page.where(_isMediaMessage),
+            );
+            conversationFileMessages = _mergeMessageLists(
+              conversationFileMessages,
+              page.where(_isFileMessage),
+            );
+            _conversationAssetCloudCursor = result.data!.searchCursor ?? '';
+            conversationAssetHasMore = _conversationAssetCloudCursor.isNotEmpty;
+            return;
+          }
+          _conversationAssetCloudEnabled = false;
+        } catch (_) {
+          _conversationAssetCloudEnabled = false;
+        }
+      }
+
       final seenMedia = conversationMediaMessages
           .map((m) => m.msgID ?? m.id ?? '')
           .where((id) => id.isNotEmpty)
@@ -706,6 +923,7 @@ class TUISearchViewModel extends ChangeNotifier {
           count: 50,
           lastMsgID: _conversationAssetLastMsgID,
         );
+        if (generation != _conversationAssetGeneration) return;
         if (batch.isEmpty) {
           conversationAssetHasMore = false;
           break;
@@ -746,8 +964,10 @@ class TUISearchViewModel extends ChangeNotifier {
         keepLoading = appendedCount == 0;
       }
     } finally {
-      conversationAssetLoading = false;
-      notifyListeners();
+      if (generation == _conversationAssetGeneration) {
+        conversationAssetLoading = false;
+        notifyListeners();
+      }
     }
   }
 
@@ -1065,6 +1285,8 @@ class TUISearchViewModel extends ChangeNotifier {
   void clearConversationTextResults() {
     currentMsgListForConversation = [];
     totalMsgInConversationCount = 0;
+    _conversationTextSearchCursor = '';
+    _conversationTextSearchCloudEnabled = true;
     notifyListeners();
   }
 
@@ -1073,18 +1295,47 @@ class TUISearchViewModel extends ChangeNotifier {
   bool conversationFilterHasMore = true;
   String? _conversationFilterLastMsgID;
   int _conversationFilterSearchPageIndex = 0;
+  String _conversationFilterCloudCursor = '';
+  bool _conversationFilterCloudEnabled = true;
+  String _conversationFilterContextKey = '';
+  int _conversationFilterGeneration = 0;
+
   /// Once local search fails (e.g. non-premium), stick to history scan for
   /// this filter session so "load more" stays consistent.
   bool _conversationFilterPreferHistoryScan = false;
 
+  static const List<int> _conversationAssetSearchMessageTypes = [
+    MessageElemType.V2TIM_ELEM_TYPE_IMAGE,
+    MessageElemType.V2TIM_ELEM_TYPE_VIDEO,
+    MessageElemType.V2TIM_ELEM_TYPE_FILE,
+  ];
+
+  String _conversationFilterKey({
+    required String conversationId,
+    required int searchTimePosition,
+    required int searchTimePeriod,
+    required List<String> senderList,
+  }) {
+    return '$conversationId|$searchTimePosition|$searchTimePeriod|'
+        '${senderList.join(',')}';
+  }
+
   void clearConversationFilterResults() {
+    _resetConversationFilterState();
+    notifyListeners();
+  }
+
+  void _resetConversationFilterState() {
     conversationFilterMessages = [];
     conversationFilterLoading = false;
     conversationFilterHasMore = true;
     _conversationFilterLastMsgID = null;
     _conversationFilterSearchPageIndex = 0;
+    _conversationFilterCloudCursor = '';
+    _conversationFilterCloudEnabled = true;
+    _conversationFilterContextKey = '';
+    _conversationFilterGeneration++;
     _conversationFilterPreferHistoryScan = false;
-    notifyListeners();
   }
 
   /// Searchable elem types so date-only queries may omit keywords
@@ -1143,12 +1394,39 @@ class TUISearchViewModel extends ChangeNotifier {
       return;
     }
 
+    final contextKey = _conversationFilterKey(
+      conversationId: conversationId,
+      searchTimePosition: searchTimePosition,
+      searchTimePeriod: searchTimePeriod,
+      senderList: senderList,
+    );
+    if (reset || contextKey != _conversationFilterContextKey) {
+      _conversationFilterGeneration++;
+      _conversationFilterContextKey = contextKey;
+      _conversationFilterCloudCursor = '';
+      _conversationFilterCloudEnabled = true;
+      _conversationFilterPreferHistoryScan = false;
+    }
+    final generation = _conversationFilterGeneration;
+
     conversationFilterLoading = true;
     notifyListeners();
     try {
       final useLocalSearch = !_conversationFilterPreferHistoryScan &&
           _canSearchLocalMessagesForCurrentUser();
-      if (useLocalSearch) {
+      if (_conversationFilterCloudEnabled &&
+          _canSearchLocalMessagesForCurrentUser()) {
+        final cloudHandled = await _searchConversationFilterViaCloudMessages(
+          conversationId: conversationId,
+          searchTimePosition: hasDateFilter ? searchTimePosition : 0,
+          searchTimePeriod: hasDateFilter ? searchTimePeriod : 0,
+          senderList: senderList,
+          generation: generation,
+        );
+        if (generation != _conversationFilterGeneration) return;
+        if (cloudHandled) return;
+      }
+      if (useLocalSearch && generation == _conversationFilterGeneration) {
         final ok = await _searchConversationFilterViaLocalMessages(
           conversationId: conversationId,
           searchTimePosition: hasDateFilter ? searchTimePosition : 0,
@@ -1177,6 +1455,60 @@ class TUISearchViewModel extends ChangeNotifier {
     } finally {
       conversationFilterLoading = false;
       notifyListeners();
+    }
+  }
+
+  Future<bool> _searchConversationFilterViaCloudMessages({
+    required String conversationId,
+    required int searchTimePosition,
+    required int searchTimePeriod,
+    required List<String> senderList,
+    required int generation,
+  }) async {
+    try {
+      final result = await _messageService.searchCloudMessages(
+        searchParam: V2TimMessageSearchParam(
+          conversationID: conversationId,
+          keywordList: const <String>[],
+          userIDList: senderList,
+          messageTypeList: senderList.isEmpty
+              ? _conversationFilterSearchMessageTypes
+              : const <int>[],
+          searchTimePosition: searchTimePosition,
+          searchTimePeriod: searchTimePeriod,
+          searchCount: 30,
+          searchCursor: _conversationFilterCloudCursor,
+          type: KeywordListMatchType.V2TIM_KEYWORD_LIST_MATCH_TYPE_OR.index,
+        ),
+      );
+      if (generation != _conversationFilterGeneration) {
+        return false;
+      }
+      if (result.code != 0) {
+        _conversationFilterCloudEnabled = false;
+        return false;
+      }
+      final item = result.data?.messageSearchResultItems?.firstWhereOrNull(
+            (element) => element.conversationID == conversationId,
+          ) ??
+          (result.data?.messageSearchResultItems?.length == 1
+              ? result.data!.messageSearchResultItems!.first
+              : null);
+      final incoming = item?.messageList ?? const <V2TimMessage>[];
+      final seen =
+          conversationFilterMessages.map(_messageSearchIdentity).toSet();
+      for (final message in incoming) {
+        final identity = _messageSearchIdentity(message);
+        if (seen.add(identity)) {
+          conversationFilterMessages.add(message);
+        }
+      }
+      _conversationFilterCloudCursor = result.data?.searchCursor ?? '';
+      conversationFilterHasMore = _conversationFilterCloudCursor.isNotEmpty;
+      return true;
+    } catch (_) {
+      _conversationFilterCloudEnabled = false;
+      return false;
     }
   }
 
@@ -1327,13 +1659,16 @@ class TUISearchViewModel extends ChangeNotifier {
     _conversationFilterLastMsgID = lastMsgID;
   }
 
-  void getMsgForConversation(String keyword, String conversationId, int page) async {
+  void getMsgForConversation(
+      String keyword, String conversationId, int page) async {
     void clearData() {
       clearConversationTextResults();
     }
 
     if (page == 0) {
       clearData();
+      _conversationTextSearchCursor = '';
+      _conversationTextSearchCloudEnabled = true;
     }
     if (keyword.isEmpty) {
       clearData();
@@ -1346,16 +1681,43 @@ class TUISearchViewModel extends ChangeNotifier {
       return;
     }
     final generation = ++_conversationTextSearchGeneration;
-    final searchResult = await _messageService.searchLocalMessages(
+    late V2TimValueCallback<V2TimMessageSearchResult> searchResult;
+    if (_conversationTextSearchCloudEnabled) {
+      try {
+        searchResult = await _messageService.searchCloudMessages(
+          searchParam: V2TimMessageSearchParam(
+            keywordList: [keyword],
+            pageSize: 30,
+            searchCount: 30,
+            searchTimePeriod: 0,
+            searchTimePosition: 0,
+            conversationID: conversationId,
+            searchCursor: _conversationTextSearchCursor,
+            type: KeywordListMatchType.V2TIM_KEYWORD_LIST_MATCH_TYPE_OR.index,
+          ),
+        );
+        if (searchResult.code != 0) {
+          _conversationTextSearchCloudEnabled = false;
+        }
+      } catch (_) {
+        _conversationTextSearchCloudEnabled = false;
+      }
+    }
+    if (!_conversationTextSearchCloudEnabled) {
+      if (generation != _conversationTextSearchGeneration) return;
+      searchResult = await _messageService.searchLocalMessages(
         searchParam: V2TimMessageSearchParam(
-      keywordList: [keyword],
-      pageIndex: page,
-      pageSize: 30,
-      searchTimePeriod: 0,
-      searchTimePosition: 0,
-      conversationID: conversationId,
-      type: KeywordListMatchType.V2TIM_KEYWORD_LIST_MATCH_TYPE_OR.index,
-    ));
+          keywordList: [keyword],
+          pageIndex: page,
+          pageSize: 30,
+          searchCount: 30,
+          searchTimePeriod: 0,
+          searchTimePosition: 0,
+          conversationID: conversationId,
+          type: KeywordListMatchType.V2TIM_KEYWORD_LIST_MATCH_TYPE_OR.index,
+        ),
+      );
+    }
     if (generation != _conversationTextSearchGeneration) {
       return;
     }
@@ -1365,13 +1727,19 @@ class TUISearchViewModel extends ChangeNotifier {
       return;
     }
     if (searchResult.code == 0 && searchResult.data != null) {
-      final messageSearchResultItems = searchResult.data!.messageSearchResultItems!
-          .firstWhereOrNull((element) => element.conversationID == conversationId);
+      final messageSearchResultItems =
+          searchResult.data!.messageSearchResultItems!.firstWhereOrNull(
+              (element) => element.conversationID == conversationId);
       totalMsgInConversationCount = messageSearchResultItems?.messageCount ?? 0;
       currentMsgListForConversation = [
-        ...currentMsgListForConversation,
-        ...(messageSearchResultItems?.messageList ?? [])
+        ..._mergeMessageLists(
+          currentMsgListForConversation,
+          messageSearchResultItems?.messageList ?? const [],
+        ),
       ];
+      if (_conversationTextSearchCloudEnabled) {
+        _conversationTextSearchCursor = searchResult.data!.searchCursor ?? '';
+      }
     }
     notifyListeners();
   }
@@ -1390,6 +1758,7 @@ class TUISearchViewModel extends ChangeNotifier {
       return;
     }
     if (reset) {
+      _conversationTextSearchGeneration++;
       clearConversationTextResults();
     }
     _conversationTextSearchDebounce = Timer(
@@ -1434,42 +1803,82 @@ class TUISearchViewModel extends ChangeNotifier {
   }
 
   void searchMsgByKey(String searchKey, bool isFirst) async {
-    if (!_canSearchLocalMessagesForCurrentUser()) {
-      msgList = [];
-      totalMsgCount = 0;
+    if (_globalMessageSearchInFlight) return;
+    _globalMessageSearchInFlight = true;
+    try {
+      if (!_canSearchLocalMessagesForCurrentUser()) {
+        msgList = [];
+        totalMsgCount = 0;
+        notifyListeners();
+        return;
+      }
+      if (_joinedGroupIdsForSearch == null && SelfHostedGroupBridge.enabled) {
+        _joinedGroupIdsForSearch = await _loadJoinedGroupIdsForSearch();
+      }
+      if (isFirst == true) {
+        msgPage = 0;
+        msgList = [];
+        totalMsgCount = 0;
+        _globalMessageSearchCursor = '';
+        _globalMessageSearchCloudEnabled = true;
+      }
+      late V2TimValueCallback<V2TimMessageSearchResult> searchResult;
+      if (_globalMessageSearchCloudEnabled) {
+        try {
+          searchResult = await _messageService.searchCloudMessages(
+            searchParam: V2TimMessageSearchParam(
+              keywordList: [searchKey],
+              pageSize: 5,
+              searchTimePeriod: 0,
+              searchTimePosition: 0,
+              searchCursor: _globalMessageSearchCursor,
+              searchCount: 5,
+              type: KeywordListMatchType.V2TIM_KEYWORD_LIST_MATCH_TYPE_OR.index,
+            ),
+          );
+          if (searchResult.code != 0) {
+            _globalMessageSearchCloudEnabled = false;
+          }
+        } catch (_) {
+          _globalMessageSearchCloudEnabled = false;
+        }
+      }
+      if (!_globalMessageSearchCloudEnabled) {
+        if (!_canSearchLocalMessagesForCurrentUser()) return;
+        searchResult = await _messageService.searchLocalMessages(
+          searchParam: V2TimMessageSearchParam(
+            keywordList: [searchKey],
+            pageIndex: msgPage,
+            pageSize: 5,
+            searchCount: 5,
+            searchTimePeriod: 0,
+            searchTimePosition: 0,
+            type: KeywordListMatchType.V2TIM_KEYWORD_LIST_MATCH_TYPE_OR.index,
+          ),
+        );
+      }
+      if (!_canSearchLocalMessagesForCurrentUser()) {
+        msgList = [];
+        totalMsgCount = 0;
+        notifyListeners();
+        return;
+      }
+      if (searchResult.code == 0 && searchResult.data != null) {
+        msgPage++;
+        msgList = _mergeSearchResultItems(
+          msgList ?? const [],
+          searchResult.data!.messageSearchResultItems ?? const [],
+        );
+        msgList = _filterMsgListForJoinedGroups(msgList);
+        totalMsgCount = searchResult.data!.totalCount ?? 0;
+        if (_globalMessageSearchCloudEnabled) {
+          _globalMessageSearchCursor = searchResult.data!.searchCursor ?? '';
+        }
+      }
       notifyListeners();
-      return;
+    } finally {
+      _globalMessageSearchInFlight = false;
     }
-    if (_joinedGroupIdsForSearch == null && SelfHostedGroupBridge.enabled) {
-      _joinedGroupIdsForSearch = await _loadJoinedGroupIdsForSearch();
-    }
-    if (isFirst == true) {
-      msgPage = 0;
-      msgList = [];
-      totalMsgCount = 0;
-    }
-    final searchResult = await _messageService.searchLocalMessages(
-        searchParam: V2TimMessageSearchParam(
-      keywordList: [searchKey],
-      pageIndex: msgPage,
-      pageSize: 5,
-      searchTimePeriod: 0,
-      searchTimePosition: 0,
-      type: KeywordListMatchType.V2TIM_KEYWORD_LIST_MATCH_TYPE_OR.index,
-    ));
-    if (!_canSearchLocalMessagesForCurrentUser()) {
-      msgList = [];
-      totalMsgCount = 0;
-      notifyListeners();
-      return;
-    }
-    if (searchResult.code == 0 && searchResult.data != null) {
-      msgPage++;
-      msgList = [...?msgList, ...?searchResult.data!.messageSearchResultItems];
-      msgList = _filterMsgListForJoinedGroups(msgList);
-      totalMsgCount = searchResult.data!.totalCount ?? 0;
-    }
-    notifyListeners();
   }
 
   Future<void> _searchMsgByKeyQuiet(
@@ -1491,16 +1900,41 @@ class TUISearchViewModel extends ChangeNotifier {
       notifyIfCurrent();
       return;
     }
-    final searchResult = await _messageService.searchLocalMessages(
-      searchParam: V2TimMessageSearchParam(
-        keywordList: [searchKey],
-        pageIndex: 0,
-        pageSize: 5,
-        searchTimePeriod: 0,
-        searchTimePosition: 0,
-        type: KeywordListMatchType.V2TIM_KEYWORD_LIST_MATCH_TYPE_OR.index,
-      ),
-    );
+    late V2TimValueCallback<V2TimMessageSearchResult> searchResult;
+    if (_globalMessageSearchCloudEnabled) {
+      try {
+        searchResult = await _messageService.searchCloudMessages(
+          searchParam: V2TimMessageSearchParam(
+            keywordList: [searchKey],
+            pageSize: 5,
+            searchCount: 5,
+            searchTimePeriod: 0,
+            searchTimePosition: 0,
+            searchCursor: _globalMessageSearchCursor,
+            type: KeywordListMatchType.V2TIM_KEYWORD_LIST_MATCH_TYPE_OR.index,
+          ),
+        );
+        if (searchResult.code != 0) {
+          _globalMessageSearchCloudEnabled = false;
+        }
+      } catch (_) {
+        _globalMessageSearchCloudEnabled = false;
+      }
+    }
+    if (!_globalMessageSearchCloudEnabled) {
+      if (generation != _globalSearchGeneration) return;
+      searchResult = await _messageService.searchLocalMessages(
+        searchParam: V2TimMessageSearchParam(
+          keywordList: [searchKey],
+          pageIndex: 0,
+          pageSize: 5,
+          searchCount: 5,
+          searchTimePeriod: 0,
+          searchTimePosition: 0,
+          type: KeywordListMatchType.V2TIM_KEYWORD_LIST_MATCH_TYPE_OR.index,
+        ),
+      );
+    }
     if (generation != _globalSearchGeneration) {
       return;
     }
@@ -1515,9 +1949,16 @@ class TUISearchViewModel extends ChangeNotifier {
     if (searchResult.code == 0 && searchResult.data != null) {
       final apiResults = searchResult.data!.messageSearchResultItems;
       final totalCount = searchResult.data!.totalCount ?? 0;
-      onApiResults?.call(apiResults, totalCount);
-      msgList = apiResults;
+      final mergedApiResults = _mergeSearchResultItems(
+        msgList ?? const [],
+        apiResults ?? const [],
+      );
+      onApiResults?.call(mergedApiResults, totalCount);
+      msgList = mergedApiResults;
       totalMsgCount = totalCount;
+      if (_globalMessageSearchCloudEnabled) {
+        _globalMessageSearchCursor = searchResult.data!.searchCursor ?? '';
+      }
     } else {
       onApiResults?.call(null, 0);
       msgList = [];
@@ -1586,6 +2027,8 @@ class TUISearchViewModel extends ChangeNotifier {
     msgList = [];
     totalMsgCount = 0;
     msgPage = 0;
+    _globalMessageSearchCursor = '';
+    _globalMessageSearchCloudEnabled = true;
     globalSearchLoading = true;
     _completedGlobalSearchKey = '';
     notifyListeners();
@@ -1602,7 +2045,8 @@ class TUISearchViewModel extends ChangeNotifier {
       List<V2TimMessageSearchResultItem>? msgApiResults;
       var msgTotalCount = 0;
 
-      final prepareFuture = _ensureGlobalSearchContext(generation).then((_) async {
+      final prepareFuture =
+          _ensureGlobalSearchContext(generation).then((_) async {
         await _refreshGlobalSearchWithContext(
           searchKey,
           generation: generation,

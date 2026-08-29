@@ -9,14 +9,14 @@ import 'package:tencent_cloud_chat_uikit/theme/tui_theme.dart';
 const String conversationArchivedEntryIconAsset = 'assets/img/archive_icon.png';
 const String conversationGroupNoticeEntryIconAsset =
     'assets/img/group_notice_icon.png';
-const double conversationSystemEntryAvatarSize = 52;
+const double conversationSystemEntryAvatarSize = 54;
 
 double conversationFeedAvatarSize(BuildContext context) =>
-    AppResponsive.isDesktop(context) ? 40.0 : 44.0;
+    AppResponsive.isDesktop(context) ? 40.0 : 54.0;
 
 double conversationFeedRowExtent(BuildContext context) {
   final isDesktop = AppResponsive.isDesktop(context);
-  final base = conversationFeedAvatarSize(context) + (isDesktop ? 20.0 : 22.0);
+  final base = conversationFeedAvatarSize(context) + (isDesktop ? 20.0 : 18.0);
   final scaleExtra = math.min(
     8.0,
     math.max(0.0, AppResponsive.textScale(context) - 1.0) *
@@ -43,19 +43,20 @@ double conversationFeedDividerInset(
 }
 
 double conversationFeedTitleFontSize(BuildContext context) =>
-    AppResponsive.isDesktop(context) ? 13.0 : 15.0;
+    AppResponsive.isDesktop(context) ? 13.0 : 16.0;
 
 double conversationFeedSubtitleFontSize(BuildContext context) =>
-    AppResponsive.isDesktop(context) ? 12.0 : 13.0;
+    AppResponsive.isDesktop(context) ? 12.0 : 14.0;
 
-double conversationFeedTimestampFontSize(BuildContext context) => 11.0;
+double conversationFeedTimestampFontSize(BuildContext context) =>
+    AppResponsive.isDesktop(context) ? 11.0 : 12.0;
 
 /// 会话行槽缓存是否需要因数据指纹或主题令牌失效而重建。
 ///
 /// `DefTheme.darkTheme` / `blueTheme` 为稳定常量，[identical] 可区分深浅切换。
 bool conversationFeedRowSlotNeedsRebuild({
-  required String nextFingerprint,
-  required String currentFingerprint,
+  required int nextFingerprint,
+  required int currentFingerprint,
   required Object? nextThemeToken,
   required Object? currentThemeToken,
 }) {

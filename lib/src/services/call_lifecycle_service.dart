@@ -66,6 +66,12 @@ class CallLifecycleService {
 
   void onLifecycleChanged(AppLifecycleState state) {
     unawaited(LiveKitCallSystemUi.instance.onLifecycleChanged(state));
+    if (state == AppLifecycleState.resumed) {
+      final id = LiveKitCallSession.instance.callId.trim();
+      if (id.isNotEmpty) {
+        unawaited(CallResultEnrichmentService.instance.reconcileStatus(id));
+      }
+    }
   }
 
   void _onCallEnded({

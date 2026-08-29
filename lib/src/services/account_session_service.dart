@@ -13,7 +13,6 @@ import 'package:tencent_cloud_chat_demo/src/services/auth_bootstrap_service.dart
 import 'package:tencent_cloud_chat_demo/src/services/auth_session_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/agent_identity_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_background_service.dart';
-import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_local/friend_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_game/privileged_game_user_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_game/sangong_my_config_service.dart';
@@ -27,7 +26,9 @@ import 'package:tencent_cloud_chat_demo/src/services/group_notice_bootstrap.dart
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_unread_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_system_notice_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_unread_clear_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_preview_text_cache.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_preview_cache.dart';
 import 'package:tencent_cloud_chat_demo/src/services/archived_conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_folder_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_sync_service.dart';
@@ -39,12 +40,14 @@ import 'package:tencent_cloud_chat_demo/src/services/local_account_data_purge.da
 import 'package:tencent_cloud_chat_demo/src/services/local_system_notification_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/platform_official_account_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/push_registration_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_diagnostics.dart';
+import 'package:tencent_cloud_chat_demo/src/services/native_post_home_bootstrap_queue.dart';
+import 'package:tencent_cloud_chat_demo/src/provider/login_user_Info.dart';
 import 'package:tencent_cloud_chat_demo/src/services/biometric_pay_service.dart';
-import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_demo/utils/constant.dart';
 import 'package:tencent_cloud_chat_demo/src/services/call_lifecycle_service.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_demo/src/services/call_lifecycle_service_web.dart';
-import 'package:tencent_cloud_chat_sdk/tencent_im_sdk_plugin.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/services/display_name_store.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/services/group_member_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_history_peek_bootstrap.dart';
@@ -54,26 +57,32 @@ import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_conversa
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_friendship_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_search_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
-import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 
 class AccountSessionService {
   AccountSessionService._();
 
-  static const bool _sessionLogEnabled = false;
-
   void _sessionLog(String message) {
-    if (!_sessionLogEnabled) return;
-    print(message);
+    SessionDiagnostics.log(message);
   }
 
   static final AccountSessionService instance = AccountSessionService._();
 
   Future<void>? _clearTask;
 
+  /// Login transitions wait here so an already-running logout cannot overlap
+  /// the new account's credential and IM installation.
+  Future<void> waitForPendingClear() async {
+    final running = _clearTask;
+    if (running != null) {
+      await running;
+    }
+  }
+
   Future<void> clearForLogout({
     String reason = 'logout',
     bool logoutIm = true,
-    bool purgeOwnerDisk = false,
+    bool purgeOwnerDisk = true,
+    SessionIdentity? expectedIdentity,
   }) {
     final running = _clearTask;
     if (running != null) {
@@ -89,29 +98,63 @@ class AccountSessionService {
       'reason=$reason logoutIm=$logoutIm purgeOwnerDisk=$purgeOwnerDisk',
     );
 
-    final task = _clear(
-      reason: reason,
-      logoutIm: logoutIm,
-      purgeOwnerDisk: purgeOwnerDisk,
+    return _startClearTask(
+      () => _clear(
+        reason: reason,
+        logoutIm: logoutIm,
+        purgeOwnerDisk: purgeOwnerDisk,
+        expectedIdentity: expectedIdentity,
+      ),
     );
-    _clearTask = task.whenComplete(() {
-      if (identical(_clearTask, task)) {
+  }
+
+  Future<void> _startClearTask(Future<void> Function() action) {
+    final running = _clearTask;
+    if (running != null) {
+      return running;
+    }
+    late final Future<void> trackedTask;
+    trackedTask = action().whenComplete(() {
+      if (identical(_clearTask, trackedTask)) {
         _clearTask = null;
       }
     });
-    return _clearTask!;
+    _clearTask = trackedTask;
+    return trackedTask;
   }
+
+  @visibleForTesting
+  Future<void> runClearTaskForTest(Future<void> Function() action) =>
+      _startClearTask(action);
 
   Future<void> _clear({
     required String reason,
     required bool logoutIm,
     required bool purgeOwnerDisk,
+    SessionIdentity? expectedIdentity,
   }) async {
+    if (expectedIdentity != null &&
+        !SessionIdentityService.instance.isCurrent(expectedIdentity)) {
+      return;
+    }
     final token = ApiClient.instance.token;
+    final clearGeneration =
+        SessionIdentityService.instance.invalidate(reason: reason);
+    ConversationUnreadClearService.clearSession();
+    bool isCurrentClear() =>
+        SessionIdentityService.instance.isGenerationCurrent(clearGeneration);
+    NativePostHomeBootstrapQueue.instance.reset(reason: reason);
     final tokenValid = ApiClient.isValidJwt(token);
     // IM logout / clearToken 前固定 owner：注销清盘 + push 本地按号隔离共用。
     final logoutOwner =
-        ChatIdFormat.rawUserUid(ContactSocialCacheStore.safeLoginUserId());
+        await SessionIdentityService.instance.resolveCurrentOwnerUserId();
+    if (!isCurrentClear()) {
+      _sessionLog(
+        'SESSION_LOG clear abort stale generation reason=$reason '
+        'generation=$clearGeneration',
+      );
+      return;
+    }
     final ownerForPurge = purgeOwnerDisk ? logoutOwner : '';
     PushRegistrationService.instance.rememberLogoutOwner(logoutOwner);
     _sessionLog(
@@ -122,6 +165,18 @@ class AccountSessionService {
     );
     ApiClient.instance.setLogoutInProgress(true);
     try {
+      AuthSessionService.instance.resetAuthFlow();
+      await _safe(
+        () => AuthBootstrapService.instance
+            .uninitializeImSdkForAccountBoundary(reason: reason),
+      );
+      PlatformOfficialAccountService.resetSessionState();
+
+      // 11.3：先 DELETE /me/push-token，再退出 IM，最后停前台服务。
+      await _safe(ConversationSyncService.instance.detachRealtimeListeners);
+      await _safe(
+        PushRegistrationService.instance.deletePushTokenBeforeImLogout,
+      );
       if (purgeOwnerDisk) {
         if (ownerForPurge.isEmpty) {
           _sessionLog(
@@ -135,29 +190,12 @@ class AccountSessionService {
         }
       }
 
-      AuthSessionService.instance.resetAuthFlow();
-      AuthBootstrapService.instance.resetImLoginState();
-      AuthBootstrapService.instance.resetImSdkInitializationState(
-        reason: reason,
-      );
-      PlatformOfficialAccountService.resetSessionState();
-
-      // 11.3：先 DELETE /me/push-token，再退出 IM，最后停前台服务。
-      await _safe(
-        PushRegistrationService.instance.deletePushTokenBeforeImLogout,
-      );
+      if (!isCurrentClear()) {
+        _sessionLog('SESSION_LOG clear abort before IM logout reason=$reason');
+        return;
+      }
 
       if (logoutIm) {
-        await _safe(() async {
-          await TIMUIKitCore.getInstance().logout().timeout(
-                const Duration(seconds: 6),
-              );
-        });
-        await _safe(() async {
-          await TencentImSDKPlugin.v2TIMManager.logout().timeout(
-                const Duration(seconds: 6),
-              );
-        });
         await _safe(() async {
           await CallLifecycleService.instance.teardown().timeout(
                 const Duration(seconds: 6),
@@ -169,6 +207,13 @@ class AccountSessionService {
         PushRegistrationService.instance.stopForegroundServiceOnLogout,
       );
 
+      if (!isCurrentClear()) {
+        _sessionLog(
+          'SESSION_LOG clear abort before credential delete reason=$reason',
+        );
+        return;
+      }
+
       await _safe(
         () => ListenerStore.beforeLogout().timeout(
           const Duration(seconds: 5),
@@ -176,8 +221,28 @@ class AccountSessionService {
         ),
       );
 
-      await _safe(ApiClient.instance.clearToken);
-      await _safe(ImSessionCache.instance.clear);
+      if (!isCurrentClear()) {
+        return;
+      }
+      var tokenCleared = false;
+      await _safe(() async {
+        tokenCleared = await ApiClient.instance.clearTokenIfCurrent(token);
+      });
+      if (!isCurrentClear()) {
+        return;
+      }
+      if (tokenCleared) {
+        if (logoutOwner.isNotEmpty) {
+          await _safe(
+            () => ImSessionCache.instance.clearForUser(logoutOwner),
+          );
+        } else {
+          await _safe(ImSessionCache.instance.clear);
+        }
+      }
+      if (!isCurrentClear()) {
+        return;
+      }
       await _safe(() => BiometricPayService.instance.disableAndClear());
       await _safe(_clearLegacyLoginPrefs);
       await _safe(LocalSystemNotificationService.instance.cancelAll);
@@ -213,7 +278,9 @@ class AccountSessionService {
         GroupNoticeEntrySettingsService.instance.clearSession();
       } catch (_) {}
       try {
-        await ConversationSyncService.instance.clearSession();
+        await ConversationSyncService.instance.clearSession(
+          ownerUserId: logoutOwner,
+        );
       } catch (_) {}
       try {
         DesktopLoginSessionService.instance.clear();
@@ -253,6 +320,11 @@ class AccountSessionService {
         DisplayNameStore.instance.clear(notify: false);
         GroupMemberStore.instance.clear(notify: false);
         ConversationPreviewTextCache.instance.clear();
+        LoginUserInfo.clearAllSessions();
+      } catch (_) {}
+
+      try {
+        await ConversationPreviewCache.clearLegacyKeys();
       } catch (_) {}
 
       try {

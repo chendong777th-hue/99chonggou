@@ -53,6 +53,9 @@ class TIMUIKitConversationItem extends TIMUIKitStatelessWidget {
   final bool isCurrent;
   final BorderRadius? avatarBorderRadius;
   final double? avatarSize;
+  final double? titleFontSize;
+  final double? subtitleFontSize;
+  final double? timestampFontSize;
 
   final Widget? nickNameWidget;
 
@@ -80,6 +83,9 @@ class TIMUIKitConversationItem extends TIMUIKitStatelessWidget {
     this.convType,
     this.avatarBorderRadius,
     this.avatarSize,
+    this.titleFontSize,
+    this.subtitleFontSize,
+    this.timestampFontSize,
     this.nickNameWidget,
     this.avatarWidget,
     this.customEmojiStickerList = const [],
@@ -88,6 +94,8 @@ class TIMUIKitConversationItem extends TIMUIKitStatelessWidget {
   Widget _getShowMsgWidget(BuildContext context) {
     final isDesktopScreen =
         TUIKitScreenUtils.getFormFactor(context) == DeviceType.Desktop;
+    final resolvedSubtitleFontSize =
+        subtitleFontSize ?? (isDesktopScreen ? 12.0 : 14.0);
     final hasDraft = draftText != null && draftText!.trim().isNotEmpty;
     // Draft or string abstract path must go through TIMUIKitLastMsg so CUSTOM
     // previews cannot bypass draft priority via Widget lastMessageBuilder.
@@ -110,7 +118,7 @@ class TIMUIKitConversationItem extends TIMUIKitStatelessWidget {
         child: TIMUIKitLastMsg(
           key: ValueKey<String>('last_msg_${conversationID ?? ''}'),
           conversationID: conversationID,
-          fontSize: isDesktopScreen ? 12 : 14,
+          fontSize: resolvedSubtitleFontSize,
           groupAtInfoList: groupAtInfoList,
           lastMsg: lastMsg,
           isDisturb: isDisturb,
@@ -129,7 +137,7 @@ class TIMUIKitConversationItem extends TIMUIKitStatelessWidget {
       " ",
       maxLines: 1,
       style: TextStyle(
-        fontSize: isDesktopScreen ? 12 : 14,
+        fontSize: resolvedSubtitleFontSize,
         height: 1.2,
       ),
     );
@@ -152,39 +160,40 @@ class TIMUIKitConversationItem extends TIMUIKitStatelessWidget {
       );
     }
     final chatModel = serviceLocator<TUIChatGlobalModel>();
-    return ListenableBuilder(
-      listenable: chatModel,
-      builder: (context, _) {
-        final convId = conversationID?.trim() ?? '';
-        final liveStatus = convId.isEmpty
-            ? null
-            : chatModel.messageStatusInConversation(
-                convId,
-                clientId: message.id,
-                msgID: message.msgID,
-                fallback: snapshotStatus,
-                elemType: message.elemType,
-              );
-        final status = ConversationListMessageStatus.resolve(
-          isSelf: true,
-          lastMessageStatus: snapshotStatus,
-          liveStatus: liveStatus,
-        );
-        final isPeerRead =
-            ConversationListMessageStatus.showsReceipt(
-              isSelf: true,
-              status: status,
-            ) &&
-            _resolveLastMessagePeerRead(chatModel, message);
-        return _statusIcon(
-              theme: theme,
-              status: status,
-              isSelf: true,
-              isPeerRead: isPeerRead,
-            ) ??
-            const SizedBox.shrink();
-      },
+    // Read status synchronously without ListenableBuilder. Per-row
+    // ListenableBuilder on the entire ChatGlobalModel caused all
+    // visible rows to rebuild on every message status change across
+    // the app. The feed-level fingerprint already includes
+    // lastMessage.status, so status changes propagate through the
+    // ConversationListNotifier rebuild cycle without a per-row
+    // listener.
+    final convId = conversationID?.trim() ?? '';
+    final liveStatus = convId.isEmpty
+        ? null
+        : chatModel.messageStatusInConversation(
+            convId,
+            clientId: message.id,
+            msgID: message.msgID,
+            fallback: snapshotStatus,
+            elemType: message.elemType,
+          );
+    final status = ConversationListMessageStatus.resolve(
+      isSelf: true,
+      lastMessageStatus: snapshotStatus,
+      liveStatus: liveStatus,
     );
+    final isPeerRead = ConversationListMessageStatus.showsReceipt(
+          isSelf: true,
+          status: status,
+        ) &&
+        _resolveLastMessagePeerRead(chatModel, message);
+    return _statusIcon(
+          theme: theme,
+          status: status,
+          isSelf: true,
+          isPeerRead: isPeerRead,
+        ) ??
+        const SizedBox.shrink();
   }
 
   Widget? _statusIcon({
@@ -263,21 +272,21 @@ class TIMUIKitConversationItem extends TIMUIKitStatelessWidget {
       if (draftTimestamp != null && draftTimestamp != 0) {
         return Text(TimeAgo().getTimeStringForChat(draftTimestamp as int) ?? "",
             style: TextStyle(
-              fontSize: 12,
+              fontSize: timestampFontSize ?? 12,
               color: theme.conversationItemTitmeTextColor,
             ));
       } else if (lastMsg != null) {
         return Text(
             TimeAgo().getTimeStringForChat(lastMsg!.timestamp as int) ?? "",
             style: TextStyle(
-              fontSize: 11,
+              fontSize: timestampFontSize ?? 11,
               color: theme.conversationItemTitmeTextColor,
             ));
       } else if (lastActiveTimestamp != null && lastActiveTimestamp != 0) {
         return Text(
             TimeAgo().getTimeStringForChat(lastActiveTimestamp as int) ?? "",
             style: TextStyle(
-              fontSize: 11,
+              fontSize: timestampFontSize ?? 11,
               color: theme.conversationItemTitmeTextColor,
             ));
       }
@@ -308,10 +317,7 @@ class TIMUIKitConversationItem extends TIMUIKitStatelessWidget {
     final isDesktopScreen =
         TUIKitScreenUtils.getFormFactor(context) == DeviceType.Desktop;
     final resolvedAvatarSize = avatarSize ?? (isDesktopScreen ? 40 : 44);
-    final dividerInset = resolvedAvatarSize + (isDesktopScreen ? 10.0 : 12.0);
     final messageStatusIcon = _buildMessageStatusIcon(theme);
-    final dividerColor =
-        theme.weakDividerColor ?? CommonColor.weakDividerColor;
     final contentRow = Padding(
       padding: const EdgeInsets.only(right: 16),
       child: Row(
@@ -404,7 +410,7 @@ class TIMUIKitConversationItem extends TIMUIKitStatelessWidget {
                                             height: 1.2,
                                             color: theme
                                                 .conversationItemTitleTextColor,
-                                            fontSize: 16,
+                                            fontSize: titleFontSize ?? 16,
                                             fontWeight: FontWeight.w500,
                                           ),
                                         ),
@@ -461,29 +467,12 @@ class TIMUIKitConversationItem extends TIMUIKitStatelessWidget {
         ],
       ),
     );
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final tightHeight =
-            constraints.maxHeight.isFinite ? constraints.maxHeight : null;
-        return Container(
-          height: tightHeight,
-          padding: const EdgeInsets.only(top: 8, left: 16),
-          child: Stack(
-            children: [
-              contentRow,
-              Positioned(
-                left: dividerInset,
-                right: 0,
-                bottom: 0,
-                child: ColoredBox(
-                  color: dividerColor,
-                  child: const SizedBox(height: 0.6),
-                ),
-              ),
-            ],
-          ),
-        );
-      },
+    // No LayoutBuilder: with itemExtent set on ListView, the row height
+    // is always finite and known at build time. LayoutBuilder forces a
+    // deferred rebuild during layout phase and prevents widget caching.
+    return Container(
+      padding: const EdgeInsets.only(top: 8, left: 16),
+      child: contentRow,
     );
   }
 }

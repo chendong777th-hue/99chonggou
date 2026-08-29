@@ -2,10 +2,10 @@ package vip.ninechat.pro.push
 
 import android.content.Context
 import android.content.pm.PackageManager
-import android.util.Log
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import vip.ninechat.pro.logging.SilentLog as Log
 
 class AppJPushConfigPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private lateinit var appContext: Context

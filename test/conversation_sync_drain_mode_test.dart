@@ -73,7 +73,7 @@ void main() {
     test('locked constants match plan', () {
       expect(ConversationPerfFlags.bootstrapForegroundPages, 2);
       expect(ConversationPerfFlags.backgroundPageYield.inMilliseconds, 80);
-      expect(ConversationPerfFlags.backgroundUiRefreshEveryPages, 0);
+      expect(ConversationPerfFlags.backgroundUiRefreshEveryPages, 1);
       expect(ConversationPerfFlags.uiWindowHardCap, lessThanOrEqualTo(0));
       expect(ConversationPerfFlags.uiWindowHardCapEnabled, isFalse);
       expect(ConversationPerfFlags.uiSlidingWindowEnabled, isTrue);

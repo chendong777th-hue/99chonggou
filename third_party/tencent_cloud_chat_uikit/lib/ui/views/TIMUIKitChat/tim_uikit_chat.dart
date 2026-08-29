@@ -43,10 +43,10 @@ import 'package:tencent_cloud_chat_uikit/ui/utils/first_unread_jump.dart';
 import 'package:tencent_cloud_chat_uikit/ui/constants/history_message_constant.dart';
 import 'package:tencent_cloud_chat_uikit/ui/controller/tim_uikit_chat_controller.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_history_trace.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_main_thread_perf.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/outgoing_visible_probe.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/frame.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/history_pagination_anchor.dart';
-import 'package:tencent_cloud_chat_uikit/ui/utils/logger.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/message_anchor.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/tim_uikit_local_image_provider.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/platform.dart';
@@ -72,9 +72,6 @@ import 'package:tencent_cloud_chat_uikit/ui/utils/chat_jitter_diag.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_list_stable_keys.dart';
 
 class TIMUIKitChat extends StatefulWidget {
-  int startTime = 0;
-  int endTime = 0;
-
   /// The chat controller you tend to used.
   /// You have to provide this before using it since tencent_cloud_chat_uikit 0.1.4.
   final TIMUIKitChatController? controller;
@@ -270,9 +267,7 @@ class TIMUIKitChat extends StatefulWidget {
       this.onLongPressForOthersHeadPortrait,
       this.customMessageHoverBarOnDesktop,
       this.entryUnreadCount})
-      : super(key: key) {
-    startTime = DateTime.now().millisecondsSinceEpoch;
-  }
+      : super(key: key);
 
   @override
   State<StatefulWidget> createState() => _TUIChatState();
@@ -448,13 +443,11 @@ class _TUIChatState extends TIMUIKitState<TIMUIKitChat>
     if (kProfileMode) {
       Frame.init();
     }
+    ChatMainThreadPerf.retainFrameTimingProbe();
     _addGroupListener();
     model.abstractMessageBuilder = widget.abstractMessageBuilder;
     model.onTapAvatar = widget.onTapAvatar;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      widget.endTime = DateTime.now().millisecondsSinceEpoch;
-      final timeSpend = widget.endTime - widget.startTime;
-      outputLogger.i("Page render time:$timeSpend ms");
       if (!mounted) {
         return;
       }
@@ -585,6 +578,7 @@ class _TUIChatState extends TIMUIKitState<TIMUIKitChat>
         .removeListener(_onChatBackgroundRegistryChanged);
     GroupMemberStore.instance.removeListener(_onGroupMemberStoreChanged);
     DisplayNameStore.instance.removeListener(_onDisplayNameStoreChanged);
+    ChatMainThreadPerf.releaseFrameTimingProbe();
     super.dispose();
     if (kProfileMode) {
       Frame.destroy();
@@ -675,7 +669,7 @@ class _TUIChatState extends TIMUIKitState<TIMUIKitChat>
       final topicInfo = topicInfoList.data?.first.topicInfo;
       final draftText = topicInfo?.draftText;
       if (TencentUtils.checkString(draftText) != null) {
-        textFieldController.setTextField(draftText!);
+        textFieldController.setTextField(draftText!, notifyChanged: false);
       }
     }
   }
@@ -1985,7 +1979,11 @@ class TIMUIKitChatProviderScope extends StatelessWidget {
             localMessages != null &&
             localMessages.isNotEmpty &&
             localCount >= fetchCount;
-        if (localWindowComplete && localChanged) {
+        final memoryWindowNeedsReconciliation =
+            globalModel.memoryWindowNeedsReconciliation(conversationID);
+        if (localWindowComplete &&
+            localChanged &&
+            !memoryWindowNeedsReconciliation) {
           globalModel.markInitialHistoryLoaded(conversationID);
           shouldMarkRead = true;
           return;
@@ -1996,8 +1994,14 @@ class TIMUIKitChatProviderScope extends StatelessWidget {
             getType: HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_OLDER_MSG,
           );
           final cloudMessages = globalModel.getMessageList(conversationID);
-          if (cloudLoaded && (cloudMessages?.isNotEmpty ?? false)) {
+          if (cloudLoaded &&
+              (!globalModel.memoryWindowNeedsReconciliation(conversationID) ||
+                  globalModel.memoryWindowReconciliationCovered(
+                    conversationID,
+                    cloudMessages,
+                  ))) {
             globalModel.markInitialHistoryLoaded(conversationID);
+            globalModel.clearMemoryWindowReconciliation(conversationID);
           }
           shouldMarkRead = cloudMessages != null && cloudMessages.isNotEmpty;
           return;
@@ -2007,8 +2011,14 @@ class TIMUIKitChatProviderScope extends StatelessWidget {
           getType: HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_OLDER_MSG,
         );
         final cloudMessages = globalModel.getMessageList(conversationID);
-        if (cloudLoaded && (cloudMessages?.isNotEmpty ?? false)) {
+        if (cloudLoaded &&
+            (!globalModel.memoryWindowNeedsReconciliation(conversationID) ||
+                globalModel.memoryWindowReconciliationCovered(
+                  conversationID,
+                  cloudMessages,
+                ))) {
           globalModel.markInitialHistoryLoaded(conversationID);
+          globalModel.clearMemoryWindowReconciliation(conversationID);
         }
         if (cloudLoaded && cloudMessages != null && cloudMessages.isNotEmpty) {
           shouldMarkRead = true;

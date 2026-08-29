@@ -59,4 +59,53 @@ void main() {
       );
     });
   });
+
+  group('ApiClient explicit session expiry classification', () {
+    test('403 unauthorized is a permission failure, not global logout', () {
+      expect(
+        ApiClient.isExplicitSessionExpiryResponse(
+          statusCode: 403,
+          responseCode: 'UNAUTHORIZED',
+        ),
+        isFalse,
+      );
+    });
+
+    test('401 unauthorized still expires the current session', () {
+      expect(
+        ApiClient.isExplicitSessionExpiryResponse(
+          statusCode: 401,
+          responseCode: 'UNAUTHORIZED',
+        ),
+        isTrue,
+      );
+    });
+
+    test('explicit token invalid remains authoritative on 403', () {
+      expect(
+        ApiClient.isExplicitSessionExpiryResponse(
+          statusCode: 403,
+          responseCode: 'TOKEN_INVALID',
+        ),
+        isTrue,
+      );
+    });
+
+    test('server and empty codes never expire a session explicitly', () {
+      expect(
+        ApiClient.isExplicitSessionExpiryResponse(
+          statusCode: 403,
+          responseCode: '',
+        ),
+        isFalse,
+      );
+      expect(
+        ApiClient.isExplicitSessionExpiryResponse(
+          statusCode: 500,
+          responseCode: 'TOKEN_INVALID',
+        ),
+        isFalse,
+      );
+    });
+  });
 }

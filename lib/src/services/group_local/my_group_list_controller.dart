@@ -8,7 +8,9 @@ import 'package:tencent_cloud_chat_uikit/ui/widgets/az_list_view.dart';
 
 /// 「我的群聊」专用：轻量 AZ 骨架 + revision 缓存，不经 Friendship 全量灌表。
 class MyGroupListController extends ChangeNotifier {
-  MyGroupListController._();
+  MyGroupListController._() {
+    _store.commitListenable.addListener(_onStoreCommit);
+  }
 
   static final MyGroupListController instance = MyGroupListController._();
 
@@ -41,6 +43,73 @@ class MyGroupListController extends ChangeNotifier {
   bool get isLoading => _loading;
 
   bool get isEmpty => _skeletons.isEmpty;
+
+  void _onStoreCommit() {
+    final commit = _store.commitListenable.value;
+    if (commit.version <= _boundRevision) {
+      return;
+    }
+    final ownerMatches = commit.ownerUserId.isEmpty ||
+        (_boundOwner.isNotEmpty && commit.ownerUserId == _boundOwner);
+    if (!ownerMatches) {
+      return;
+    }
+    if (commit.kind == GroupStoreMutationKind.reset) {
+      _loadGen++;
+      _skeletons = const <MyGroupAzSkeleton>[];
+      _azShowList = const <ISuspensionBeanImpl<MyGroupAzSkeleton>>[];
+      _totalCount = 0;
+      _boundRevision = commit.version;
+      notifyListeners();
+      return;
+    }
+    // A controller that has not loaded an owner yet will consume the latest
+    // Store snapshot on entry. Once bound, every row change is projected from
+    // the immutable Store commit without another full-table query.
+    if (_boundOwner.isEmpty || _boundRevision < 0) {
+      return;
+    }
+
+    final byKey = <String, MyGroupAzSkeleton>{
+      for (final item in _skeletons)
+        GroupLocalStore.groupEquivalenceKey(item.groupId): item,
+    };
+    for (final id in commit.deletedGroupIds) {
+      byKey.remove(GroupLocalStore.groupEquivalenceKey(id));
+    }
+    final needle = _keyword.trim().toLowerCase();
+    for (final record in commit.upserted) {
+      final key = GroupLocalStore.groupEquivalenceKey(record.groupId);
+      byKey.remove(key);
+      final matchesSearch = needle.isEmpty ||
+          record.groupName.toLowerCase().contains(needle) ||
+          record.groupId.toLowerCase().contains(needle) ||
+          record.displayAlias.toLowerCase().contains(needle);
+      if (!matchesSearch || _isDiscussGroup(record.groupId)) {
+        continue;
+      }
+      byKey[key] = MyGroupAzSkeleton(
+        groupId: record.groupId,
+        groupType: record.groupType,
+        groupName: record.groupName,
+        avatarUrl: record.avatarUrl,
+        memberCount: record.memberCount,
+        myRole: record.myRole,
+        indexTag: MyGroupAzSkeleton.computeIndexTag(
+          groupName: record.groupName,
+          groupId: record.groupId,
+        ),
+      );
+    }
+    final next = byKey.values.toList(growable: false)..sort(_compareSkeletons);
+    _skeletons = List<MyGroupAzSkeleton>.unmodifiable(next);
+    _azShowList = _buildAzBeans(_skeletons);
+    if (needle.isEmpty) {
+      _totalCount = _skeletons.length;
+    }
+    _boundRevision = commit.version;
+    notifyListeners();
+  }
 
   void clearSession() {
     _loadGen++;
@@ -122,9 +191,8 @@ class MyGroupListController extends ChangeNotifier {
         return;
       }
 
-      final filtered = raw
-          .where((e) => !_isDiscussGroup(e.groupId))
-          .toList(growable: false);
+      final filtered =
+          raw.where((e) => !_isDiscussGroup(e.groupId)).toList(growable: false);
       _skeletons = filtered;
       _azShowList = _buildAzBeans(filtered);
       if (needle.isEmpty) {
@@ -154,6 +222,17 @@ class MyGroupListController extends ChangeNotifier {
 
   static bool _isDiscussGroup(String groupId) {
     return groupId.contains(_discussNeedle);
+  }
+
+  static int _compareSkeletons(
+    MyGroupAzSkeleton left,
+    MyGroupAzSkeleton right,
+  ) {
+    final tag = left.indexTag.compareTo(right.indexTag);
+    if (tag != 0) return tag;
+    final name = left.groupName.compareTo(right.groupName);
+    if (name != 0) return name;
+    return left.groupId.compareTo(right.groupId);
   }
 
   static List<ISuspensionBeanImpl<MyGroupAzSkeleton>> _buildAzBeans(

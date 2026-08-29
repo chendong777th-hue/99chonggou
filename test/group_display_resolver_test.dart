@@ -138,6 +138,20 @@ void main() {
       '群库新名',
     );
     expect(
+      GroupDisplayResolver.resolveMemberCount(
+        groupId: groupId,
+        groupList: [
+          V2TimGroupInfo(
+            groupID: groupId,
+            groupType: 'Work',
+            groupName: '列表旧名',
+            memberCount: 99,
+          ),
+        ],
+      ),
+      1,
+    );
+    expect(
       GroupDisplayResolver.resolveFaceUrl(
         conversation: conversation,
         groupList: [group],
@@ -153,6 +167,52 @@ void main() {
         groupId: groupId,
       ),
       'https://example.com/new.png',
+    );
+  });
+
+  test('local group record blocks stale SDK name when local name is empty', () {
+    const owner = 'test_owner_group_display_empty';
+    const groupId = 'group_display_empty_name';
+    final store = GroupLocalStore.instance;
+    store.debugOwnerUserIdOverride = owner;
+    store.debugPutCachedRecord(
+      ownerUserId: owner,
+      record: MeGroupRecord(
+        groupId: groupId,
+        groupType: 'Work',
+        groupName: '',
+        displayAlias: '',
+        avatarUrl: '',
+        notice: '',
+        memberCount: 0,
+        myRole: 200,
+        myNameCard: '',
+        joinedAt: 1,
+        updatedAt: 1,
+      ),
+    );
+    addTearDown(() {
+      store.debugRemoveCachedRecord(ownerUserId: owner, groupId: groupId);
+      store.debugClearOwnerOverride();
+    });
+
+    final conversation = V2TimConversation(
+      conversationID: 'group_$groupId',
+      type: 2,
+      groupID: groupId,
+      showName: 'SDK旧名',
+    );
+    final group = V2TimGroupInfo(
+      groupID: groupId,
+      groupType: 'Work',
+      groupName: 'SDK列表旧名',
+    );
+    expect(
+      GroupDisplayResolver.resolveShowName(
+        conversation: conversation,
+        groupList: [group],
+      ),
+      groupId,
     );
   });
 }

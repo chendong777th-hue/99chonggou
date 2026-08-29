@@ -5,20 +5,16 @@ import 'package:tencent_cloud_chat_uikit/theme/tui_theme.dart';
 class MessageBubbleTextColor {
   MessageBubbleTextColor._();
 
-  /// 聊天正文统一使用支持 wght 轴的中文可变字体。
-  static const String variableCjkFontFamily = 'NotoSansSCVariable';
+  /// 聊天正文使用 Flutter 当前平台的系统默认字体。
 
   /// Web 旧组件仍使用的简中字体族。
   static const String webCjkFontFamily = 'NotoSansSC';
 
-  /// 聊天气泡正文（收发双方）精确字重。
-  static const double messageBodyFontVariationWeight = 450;
-
-  /// 兼容仍直接读取该常量的旧组件；正文实际以 fontVariations 为准。
+  /// 系统默认字体使用常规字重。
   static const FontWeight messageBodyFontWeight = FontWeight.w400;
 
-  /// 消息正文：16 / wght 450 / height 1.20。
-  static const double messageBodyFontSize = 16;
+  /// 消息正文：15.5 / 常规字重 / height 1.20。
+  static const double messageBodyFontSize = 15.5;
 
   /// 与气泡正文默认行高一致。
   static const double messageBodyLineHeight = 1.20;
@@ -72,8 +68,6 @@ class MessageBubbleTextColor {
     );
   }
 
-  /// 聊天正文使用可变中文字体，保证 iOS/Android/Web 均能解析 wght=450。
-
   /// 气泡正文基础样式（字号、字体、行高），不含颜色与字重。
   static TextStyle messageBodyBaseStyle({
     required double fontSize,
@@ -84,10 +78,7 @@ class MessageBubbleTextColor {
       inherit: false,
       textBaseline: TextBaseline.alphabetic,
       height: lineHeight,
-      fontFamily: variableCjkFontFamily,
-      fontVariations: const [
-        FontVariation('wght', messageBodyFontVariationWeight),
-      ],
+      fontWeight: messageBodyFontWeight,
     );
   }
 
@@ -102,10 +93,7 @@ class MessageBubbleTextColor {
       lineHeight: lineHeight ?? messageBodyLineHeight,
     ).copyWith(
       color: color,
-      fontWeight: null,
-      fontVariations: const [
-        FontVariation('wght', messageBodyFontVariationWeight),
-      ],
+      fontWeight: messageBodyFontWeight,
       inherit: false,
     );
   }
@@ -121,7 +109,6 @@ class MessageBubbleTextColor {
     ).copyWith(
       color: color,
       fontWeight: FontWeight.w400,
-      fontVariations: const [FontVariation('wght', 400)],
       inherit: false,
     );
   }
@@ -167,26 +154,8 @@ class MessageBubbleTextColor {
       lineHeight: lineHeight ?? fontStyle?.height,
     ).copyWith(
       color: bodyColor,
-      fontWeight: null,
-      fontVariations: [
-        FontVariation(
-          'wght',
-          _resolveBodyFontVariationWeight(fontStyle?.fontWeight),
-        ),
-      ],
+      fontWeight: fontStyle?.fontWeight ?? messageBodyFontWeight,
     );
-  }
-
-  static double _resolveBodyFontVariationWeight(FontWeight? existing) {
-    if (existing == null ||
-        existing == FontWeight.w400 ||
-        existing == FontWeight.normal) {
-      return messageBodyFontVariationWeight;
-    }
-    if (existing.value < messageBodyFontVariationWeight) {
-      return messageBodyFontVariationWeight;
-    }
-    return existing.value.toDouble();
   }
 
   static Color secondaryText({

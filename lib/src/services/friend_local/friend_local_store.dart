@@ -22,7 +22,7 @@ class FriendLocalStore {
   static const _table = 'friends';
   static const _searchTable = 'friend_search_index';
   static const _ftsTable = 'contact_fts';
-  static const int _dbVersion = 2;
+  static const int _dbVersion = 3;
   static const int defaultSearchPageSize = 80;
 
   Database? _db;
@@ -51,6 +51,7 @@ class FriendLocalStore {
         friend_user_id TEXT NOT NULL,
         friend_nickname TEXT NOT NULL DEFAULT '',
         friend_avatar_url TEXT NOT NULL DEFAULT '',
+        friend_avatar_version INTEGER,
         remark TEXT NOT NULL DEFAULT '',
         added_at INTEGER NOT NULL DEFAULT 0,
         peer_deleted_me INTEGER NOT NULL DEFAULT 0,
@@ -135,6 +136,11 @@ class FriendLocalStore {
           await _createSearchIndexTable(db);
           _ftsAvailable = await _tryCreateFts(db);
           await _rebuildSearchIndexForAllOwners(db);
+        }
+        if (oldVersion < 3) {
+          await db.execute(
+            'ALTER TABLE $_table ADD COLUMN friend_avatar_version INTEGER',
+          );
         }
       },
       onOpen: (db) async {
@@ -354,20 +360,21 @@ class FriendLocalStore {
     final out = <MeFriendRecord>[];
     const chunk = 200;
     for (var i = 0; i < ids.length; i += chunk) {
-      final slice = ids.sublist(i, i + chunk > ids.length ? ids.length : i + chunk);
+      final slice =
+          ids.sublist(i, i + chunk > ids.length ? ids.length : i + chunk);
       final placeholders = List.filled(slice.length, '?').join(',');
       final rows = await db.rawQuery(
         'SELECT * FROM $_table WHERE owner_user_id = ? '
-        'AND friend_user_id IN ($placeholders)',
+        'AND friend_user_id COLLATE NOCASE IN ($placeholders)',
         <Object?>[owner, ...slice],
       );
       final byId = <String, MeFriendRecord>{};
       for (final row in rows) {
         final record = _recordFromRow(row);
-        byId[record.friendUserId] = record;
+        byId[record.friendUserId.toLowerCase()] = record;
       }
       for (final id in slice) {
-        final hit = byId[id];
+        final hit = byId[id.toLowerCase()];
         if (hit != null) {
           out.add(hit);
         }
@@ -441,16 +448,14 @@ class FriendLocalStore {
 
     final ids = <String>[];
     for (final row in rows) {
-      final id = row['friend_user_id']?.toString() ??
-          row['user_id']?.toString() ??
-          '';
+      final id =
+          row['friend_user_id']?.toString() ?? row['user_id']?.toString() ?? '';
       if (id.isNotEmpty) {
         ids.add(id);
       }
     }
     final hasMore = ids.length > pageSize;
-    final pageIds =
-        hasMore ? ids.sublist(0, pageSize) : List<String>.from(ids);
+    final pageIds = hasMore ? ids.sublist(0, pageSize) : List<String>.from(ids);
     return SearchIdPage(
       ids: pageIds,
       nextCursor: pageIds.isEmpty ? null : pageIds.last,
@@ -755,6 +760,7 @@ class FriendLocalStore {
       remark: row['remark']?.toString() ?? '',
       friendNickname: row['friend_nickname']?.toString() ?? '',
       friendAvatarUrl: row['friend_avatar_url']?.toString() ?? '',
+      friendAvatarVersion: row['friend_avatar_version'] as int?,
       addedAt: (row['added_at'] as int?) ?? 0,
       peerDeletedMe: (row['peer_deleted_me'] as int? ?? 0) != 0,
       canMessage: (row['can_message'] as int? ?? 1) != 0,
@@ -773,6 +779,7 @@ class FriendLocalStore {
       'friend_user_id': record.friendUserId,
       'friend_nickname': record.friendNickname,
       'friend_avatar_url': record.friendAvatarUrl,
+      'friend_avatar_version': record.friendAvatarVersion,
       'remark': record.remark,
       'added_at': record.addedAt,
       'peer_deleted_me': record.peerDeletedMe ? 1 : 0,

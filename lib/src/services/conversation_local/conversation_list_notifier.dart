@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
-import 'package:tencent_cloud_chat_sdk/enum/message_elem_type.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
@@ -9,6 +8,8 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
 import 'package:tencent_cloud_chat_demo/src/services/active_chat_registry.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/outgoing_visible_probe.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_mutation_coordinator.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_mutation_event.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_flags.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_gate_log.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_pin_hydrate_policy.dart';
@@ -31,8 +32,22 @@ import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_demo/utils/conversation_c2c_show_name_prefer.dart';
 import 'package:tencent_cloud_chat_demo/utils/conversation_last_message_prefer.dart';
 import 'package:tencent_cloud_chat_demo/utils/custom_message/custom_last_message.dart';
+import 'package:tencent_cloud_chat_demo/utils/group_tips_message_helper.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/services/display_name_store.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitConversation/archived_conversation_store.dart';
+
+enum ConversationStoreProjectionReason {
+  coldStart,
+  authBootstrap,
+  accountSwitch,
+  pinHydration,
+  snapshotBootstrap,
+  backgroundDrain,
+  sdkCompatibilityRecovery,
+  archiveRestore,
+  chatLeaveRecovery,
+  testOnly,
+}
 
 /// append/prepend 滑动窗结果：供列表校正滚动偏移。
 class ConversationWindowSlideResult {
@@ -67,6 +82,10 @@ class ConversationListNotifier extends ChangeNotifier {
   bool Function()? isFeedScrolling;
 
   List<V2TimConversation> _conversations = const [];
+  final Map<String, int> _conversationIndexByCanonical = <String, int>{};
+  final Map<int, Map<String, int>> _typeHydrateIndexByCanonical =
+      <int, Map<String, int>>{1: <String, int>{}, 2: <String, int>{}};
+  int _canonicalLookupFallbacks = 0;
   bool _storeHasAnyRow = false;
   int _structureRevision = 0;
   int _contentRevision = 0;
@@ -76,13 +95,30 @@ class ConversationListNotifier extends ChangeNotifier {
 
   Future<void>? _reloadInFlight;
   bool _reloadDirty = false;
+  ConversationStoreProjectionReason? _reloadDirtyReason;
+  int _sessionGeneration = 0;
   Future<void>? _uiPageLoadInFlight;
+
+  String _currentOwnerUserId() =>
+      ConversationLocalStore.instance.resolvedOwnerUserId();
+
+  bool _isCurrentSession(String ownerUserId, int generation) {
+    return generation == _sessionGeneration &&
+        ownerUserId == _currentOwnerUserId();
+  }
 
   /// 用户触底/近顶翻页扩展过 UI 列表：禁止 loadUiWindow 热快照整窗覆盖。
   bool _slidingWindowUserExpanded = false;
 
   /// 按类型记录已消费的库序 OFFSET（只增不减）。裁窗后不能再用窗内 typedCount 当 offset。
   final Map<int, int> _typeAppendConsumed = <int, int>{};
+  final Map<int, ConversationTypePageCursor> _typePageCursors =
+      <int, ConversationTypePageCursor>{};
+  final Map<int, Map<int, ConversationTypePageCursor>> _typePageAnchors =
+      <int, Map<int, ConversationTypePageCursor>>{
+    1: <int, ConversationTypePageCursor>{},
+    2: <int, ConversationTypePageCursor>{}
+  };
 
   /// 虚拟列表：库内该类型总数（可滚长度）。
   final Map<int, int> _typeTotalCount = <int, int>{1: 0, 2: 0};
@@ -141,8 +177,12 @@ class ConversationListNotifier extends ChangeNotifier {
     if (!ConversationPerfFlags.conversationListSdkPrimary) {
       return;
     }
+    final structureChanged =
+        ConversationTabStore.instance.lastNotificationStructureChanged;
     _adoptTabStoreIntoNotifierWindows();
-    _bumpRevisionsForChange(orderOrMembershipChanged: true);
+    _bumpRevisionsForChange(
+      orderOrMembershipChanged: structureChanged,
+    );
     ConversationPerfGateLog.log(
       'ui_source',
       extras: <String, Object?>{
@@ -151,7 +191,7 @@ class ConversationListNotifier extends ChangeNotifier {
         'group': ConversationTabStore.instance.countForType(2),
       },
     );
-    _notifyIfAllowed(reason: 'tab_store');
+    _notifyIfAllowed(reason: 'tab_store', contentOnly: !structureChanged);
   }
 
   void _adoptTabStoreIntoNotifierWindows() {
@@ -160,8 +200,11 @@ class ConversationListNotifier extends ChangeNotifier {
     final merged = ConversationLocalStore.mergeConversationsForUi(c2c, group);
     _clearTypeIndexSnapshotCache();
     _conversations = merged;
+    _rebuildConversationIndex();
     _typeHydrate[1] = List<V2TimConversation>.from(c2c);
     _typeHydrate[2] = List<V2TimConversation>.from(group);
+    _rebuildTypeHydrateIndex(1);
+    _rebuildTypeHydrateIndex(2);
     _typeHydrateStart[1] = 0;
     _typeHydrateStart[2] = 0;
     _cacheTypeIndexPage(1, 0, c2c);
@@ -180,6 +223,78 @@ class ConversationListNotifier extends ChangeNotifier {
 
   List<V2TimConversation> get conversations =>
       List.unmodifiable(_conversations);
+
+  String _canonicalKeyForConversation(V2TimConversation conversation) {
+    final isGroup = _isGroupConversation(conversation);
+    return canonicalizeConversationMutationId(
+      conversation.conversationID,
+      isGroup
+          ? ConversationMutationConversationType.group
+          : ConversationMutationConversationType.c2c,
+    );
+  }
+
+  String _canonicalKeyForId(String conversationID, {int? convType}) {
+    final id = conversationID.trim();
+    if (id.isEmpty) {
+      return '';
+    }
+    final isGroup = convType == 2 ||
+        (convType == null &&
+            MessageConversationId.looksLikeGroupConversationId(id));
+    return canonicalizeConversationMutationId(
+      id,
+      isGroup
+          ? ConversationMutationConversationType.group
+          : ConversationMutationConversationType.c2c,
+    );
+  }
+
+  void _rebuildConversationIndex() {
+    _conversationIndexByCanonical.clear();
+    for (var i = 0; i < _conversations.length; i++) {
+      final key = _canonicalKeyForConversation(_conversations[i]);
+      if (key.isNotEmpty) {
+        _conversationIndexByCanonical[key] = i;
+      }
+    }
+  }
+
+  void _rebuildTypeHydrateIndex(int convType) {
+    final index = _typeHydrateIndexByCanonical[convType] ??= <String, int>{};
+    index.clear();
+    final page = _typeHydrate[convType] ?? const <V2TimConversation>[];
+    for (var i = 0; i < page.length; i++) {
+      final key = _canonicalKeyForConversation(page[i]);
+      if (key.isNotEmpty) {
+        index[key] = i;
+      }
+    }
+  }
+
+  int _indexedConversationPosition(String conversationID) {
+    final key = _canonicalKeyForId(conversationID);
+    final position = _conversationIndexByCanonical[key];
+    if (position != null &&
+        position >= 0 &&
+        position < _conversations.length &&
+        MessageConversationId.sameConversation(
+          _conversations[position].conversationID,
+          conversationID,
+        )) {
+      return position;
+    }
+    _canonicalLookupFallbacks++;
+    return _conversations.indexWhere(
+      (current) => MessageConversationId.sameConversation(
+        current.conversationID,
+        conversationID,
+      ),
+    );
+  }
+
+  @visibleForTesting
+  int get canonicalLookupFallbacksForTest => _canonicalLookupFallbacks;
 
   /// 虚拟列表：该类型已水合窗的起始 offset。
   int hydratedStartOffsetForType(int convType) {
@@ -234,6 +349,100 @@ class ConversationListNotifier extends ChangeNotifier {
     }
   }
 
+  void _recordTypePageAnchor(
+    int convType,
+    int start,
+    List<V2TimConversation> page,
+  ) {
+    if (page.isEmpty) return;
+    final tail = ConversationLocalStore.oldestPagingCursor(page);
+    if (tail == null) return;
+    final anchors =
+        _typePageAnchors[convType] ??= <int, ConversationTypePageCursor>{};
+    anchors[start + page.length] = ConversationTypePageCursor(
+      pinned: _isPinnedConversation(tail),
+      activeTime: ConversationLocalStore.pagingAnchorMs(tail),
+      orderKey: tail.orderkey ?? 0,
+      conversationID: tail.conversationID,
+    );
+    final owner = ConversationLocalStore.instance.resolvedOwnerUserId();
+    if (owner.isNotEmpty) {
+      final first = page.isEmpty ? null : page.first;
+      final firstCursor = first == null
+          ? null
+          : ConversationTypePageCursor(
+              pinned: _isPinnedConversation(first),
+              activeTime: ConversationLocalStore.pagingAnchorMs(first),
+              orderKey: first.orderkey ?? 0,
+              conversationID: first.conversationID,
+            );
+      unawaited(() async {
+        final version =
+            await ConversationLocalStore.instance.nextConversationViewVersion(
+          ownerUserId: owner,
+          convType: convType,
+        );
+        await ConversationLocalStore.instance.upsertConversationPageAnchor(
+          ownerUserId: owner,
+          convType: convType,
+          pageStart: start,
+          cursor: _typePageAnchors[convType]![start + page.length]!,
+          pageEnd: start + page.length,
+          pageVersion: version,
+          firstCursor: firstCursor,
+        );
+      }());
+    }
+  }
+
+  void _clearTypePageAnchors() {
+    _typePageAnchors[1]?.clear();
+    _typePageAnchors[2]?.clear();
+  }
+
+  void invalidateConversationViewPages({
+    required String conversationID,
+    int? convType,
+    bool structureChanged = true,
+  }) {
+    final id = conversationID.trim();
+    if (id.isEmpty) return;
+    final types =
+        convType == 1 || convType == 2 ? <int>[convType!] : const [1, 2];
+    for (final type in types) {
+      final cache = _typeIndexSnapshotCache[type];
+      final affectedIndex = cache?.entries
+          .where((entry) => MessageConversationId.sameConversation(
+              entry.value.conversationID, id))
+          .map((entry) => entry.key)
+          .fold<int?>(
+              null, (min, value) => min == null || value < min ? value : min);
+      cache?.removeWhere(
+        (_, row) =>
+            MessageConversationId.sameConversation(row.conversationID, id),
+      );
+      if (structureChanged) {
+        _typePageCursors.remove(type);
+        _typePageAnchors[type]?.clear();
+        unawaited(
+          affectedIndex == null
+              ? ConversationLocalStore.instance.deleteConversationPageAnchors(
+                  ownerUserId:
+                      ConversationLocalStore.instance.resolvedOwnerUserId(),
+                  convType: type,
+                )
+              : ConversationLocalStore.instance
+                  .deleteConversationPageAnchorsFrom(
+                  ownerUserId:
+                      ConversationLocalStore.instance.resolvedOwnerUserId(),
+                  convType: type,
+                  pageStart: affectedIndex,
+                ),
+        );
+      }
+    }
+  }
+
   void _cacheTypeIndexConversation(
     int convType,
     int index,
@@ -267,9 +476,11 @@ class ConversationListNotifier extends ChangeNotifier {
     if (id.isEmpty || (convType != 1 && convType != 2)) {
       return null;
     }
-    if (ConversationPerfFlags.conversationListSdkPrimary) {
+    final tabStore = ConversationTabStore.instance;
+    if (ConversationPerfFlags.conversationListSdkPrimary ||
+        tabStore.countForType(convType) > 0) {
       ensureTabStoreBridgeAttached();
-      return ConversationTabStore.instance.typeIndexOf(convType, id);
+      return tabStore.typeIndexOf(convType, id);
     }
     final start = _typeHydrateStart[convType] ?? 0;
     final page = _typeHydrate[convType] ?? const <V2TimConversation>[];
@@ -287,14 +498,15 @@ class ConversationListNotifier extends ChangeNotifier {
     if (convType != 1 && convType != 2) {
       return 0;
     }
-    if (ConversationPerfFlags.conversationListSdkPrimary) {
+    final tabStore = ConversationTabStore.instance;
+    if (ConversationPerfFlags.conversationListSdkPrimary ||
+        tabStore.countForType(convType) > 0) {
       ensureTabStoreBridgeAttached();
-      final store = ConversationTabStore.instance;
-      final n = store.countForType(convType);
+      final n = tabStore.countForType(convType);
       if (n <= 0) {
         return 0;
       }
-      if (store.finishedForType(convType)) {
+      if (tabStore.finishedForType(convType)) {
         return n;
       }
       // 未拉完：多留一页余量，便于触底继续 loadMore。
@@ -308,9 +520,11 @@ class ConversationListNotifier extends ChangeNotifier {
     if ((convType != 1 && convType != 2) || index < 0) {
       return null;
     }
-    if (ConversationPerfFlags.conversationListSdkPrimary) {
+    final tabStore = ConversationTabStore.instance;
+    if (ConversationPerfFlags.conversationListSdkPrimary ||
+        tabStore.countForType(convType) > 0) {
       ensureTabStoreBridgeAttached();
-      return ConversationTabStore.instance.atTypeIndex(convType, index);
+      return tabStore.atTypeIndex(convType, index);
     }
     final start = _typeHydrateStart[convType] ?? 0;
     final page = _typeHydrate[convType] ?? const <V2TimConversation>[];
@@ -349,19 +563,28 @@ class ConversationListNotifier extends ChangeNotifier {
         continue;
       }
       final start = _typeHydrateStart[type] ?? 0;
-      for (var i = 0; i < page.length; i++) {
-        if (!MessageConversationId.sameConversation(
-          page[i].conversationID,
-          id,
-        )) {
-          continue;
-        }
+      final canonical = _canonicalKeyForId(id, convType: type);
+      var i = _typeHydrateIndexByCanonical[type]?[canonical];
+      if (i == null ||
+          i < 0 ||
+          i >= page.length ||
+          !MessageConversationId.sameConversation(page[i].conversationID, id)) {
+        _canonicalLookupFallbacks++;
+        i = page.indexWhere(
+          (row) => MessageConversationId.sameConversation(
+            row.conversationID,
+            id,
+          ),
+        );
+      }
+      if (i >= 0) {
         final nextPage = List<V2TimConversation>.from(page);
         nextPage[i] = update(page[i]);
         if (reorder && nextPage.length > 1) {
           nextPage.sort(ConversationLocalStore.compareConversationsForUi);
         }
         _typeHydrate[type] = nextPage;
+        _rebuildTypeHydrateIndex(type);
         if (reorder) {
           _clearTypeIndexSnapshotCache();
         }
@@ -446,6 +669,7 @@ class ConversationListNotifier extends ChangeNotifier {
     }
     _clearTypeIndexSnapshotCache();
     _typeHydrate[type] = page;
+    _rebuildTypeHydrateIndex(type);
     _cacheTypeIndexPage(type, 0, page);
     ConversationPerfGateLog.log(
       'type_hydrate_inserted',
@@ -479,6 +703,7 @@ class ConversationListNotifier extends ChangeNotifier {
       if (next.length != page.length) {
         _clearTypeIndexSnapshotCache();
         _typeHydrate[type] = next;
+        _rebuildTypeHydrateIndex(type);
       }
     }
   }
@@ -494,6 +719,7 @@ class ConversationListNotifier extends ChangeNotifier {
           .where((c) => _isGroupConversation(c) == preferGroups)
           .toList(growable: false);
       _typeHydrate[type] = typed;
+      _rebuildTypeHydrateIndex(type);
       _typeHydrateStart[type] = 0;
       _cacheTypeIndexPage(type, 0, typed);
       final total = _typeTotalCount[type] ?? 0;
@@ -514,6 +740,7 @@ class ConversationListNotifier extends ChangeNotifier {
       return;
     }
     _typeHydrate[convType] = List<V2TimConversation>.from(page);
+    _rebuildTypeHydrateIndex(convType);
     _typeHydrateStart[convType] = start;
     _cacheTypeIndexPage(convType, start, page);
     if (total != null) {
@@ -559,6 +786,8 @@ class ConversationListNotifier extends ChangeNotifier {
 
   /// 刷新单聊/群库内条数（可选排除归档）。
   Future<void> refreshTypeTotals() async {
+    final owner = _currentOwnerUserId();
+    final generation = _sessionGeneration;
     if (ConversationPerfFlags.conversationListSdkPrimary) {
       ensureTabStoreBridgeAttached();
       ConversationTabStore.instance.purgeArchived(notify: false);
@@ -594,12 +823,20 @@ class ConversationListNotifier extends ChangeNotifier {
     }
     final c2c = await ConversationLocalStore.instance.countByConvType(
       convType: 1,
+      ownerUserId: owner,
       excludeConversationIds: _excludeArchivedIdsForType(1),
     );
+    if (!_isCurrentSession(owner, generation)) {
+      return;
+    }
     final group = await ConversationLocalStore.instance.countByConvType(
       convType: 2,
+      ownerUserId: owner,
       excludeConversationIds: _excludeArchivedIdsForType(2),
     );
+    if (!_isCurrentSession(owner, generation)) {
+      return;
+    }
     final changed =
         (_typeTotalCount[1] ?? 0) != c2c || (_typeTotalCount[2] ?? 0) != group;
     _typeTotalCount[1] = c2c;
@@ -777,7 +1014,7 @@ class ConversationListNotifier extends ChangeNotifier {
               for (final c in admit)
                 if (c.conversationID.trim().isNotEmpty) c.conversationID.trim(),
             };
-            await applyConversationsFromStore(
+            await _applyConversationsFromStore(
               upserted: admit,
               forceAdmitIds: forceAdmitIds,
             );
@@ -872,7 +1109,11 @@ class ConversationListNotifier extends ChangeNotifier {
 
     var purgedAny = false;
     final beforeWindowLen = _conversations.length;
-    _conversations.removeWhere(isArchived);
+    // 部分加载/合并链路会提供 List.unmodifiable。归档状态变化（包括退出
+    // 登录清理）必须以新 growable window 提交，不能原地修改来源列表。
+    _conversations = _conversations
+        .where((conversation) => !isArchived(conversation))
+        .toList(growable: true);
     purgedAny = purgedAny || beforeWindowLen != _conversations.length;
     for (final type in const [1, 2]) {
       final page = _typeHydrate[type];
@@ -884,6 +1125,7 @@ class ConversationListNotifier extends ChangeNotifier {
         purgedAny = true;
       }
       _typeHydrate[type] = next;
+      _rebuildTypeHydrateIndex(type);
     }
     if (purgedAny) {
       _clearTypeIndexSnapshotCache();
@@ -917,15 +1159,63 @@ class ConversationListNotifier extends ChangeNotifier {
     bool allowWindowJump = false,
     bool forceNotify = false,
   }) async {
-    if (ConversationPerfFlags.conversationListSdkPrimary) {
+    final tabStore = ConversationTabStore.instance;
+    if (ConversationPerfFlags.conversationListSdkPrimary ||
+        tabStore.countForType(convType) > 0) {
       ensureTabStoreBridgeAttached();
-      await ConversationTabStore.instance.ensurePrimed(convType: convType);
-      final store = ConversationTabStore.instance;
+      ConversationPerfGateLog.log(
+        'conversation_hydrate_start',
+        extras: <String, Object?>{
+          'convType': convType,
+          'centerIndex': centerIndex,
+          'forceReload': forceReload,
+          'allowWindowJump': allowWindowJump,
+          'forceNotify': forceNotify,
+        },
+      );
+      await tabStore.ensurePrimed(convType: convType);
+      final store = tabStore;
       final n = store.countForType(convType);
+      ConversationPerfGateLog.log(
+        'conversation_hydrate_state',
+        extras: <String, Object?>{
+          'convType': convType,
+          'centerIndex': centerIndex,
+          'tabCount': n,
+          'targetHit': store.atTypeIndex(convType, centerIndex) != null,
+          'finished': store.finishedForType(convType),
+        },
+      );
+      // SQLite count can be ahead of the in-memory committed view after a
+      // session switch, archive purge, or a coalesced batch. Keep advancing
+      // committed pages until the requested row is present; one page may only
+      // contribute a subset when realtime patches overlap the fetched page.
+      var pageAttempts = 0;
+      while (store.atTypeIndex(convType, centerIndex) == null &&
+          !store.finishedForType(convType) &&
+          pageAttempts < 3) {
+        pageAttempts++;
+        if (store.countForType(convType) == 0) {
+          await store.loadFirstPage(convType: convType);
+        } else {
+          await store.loadMore(convType: convType);
+        }
+      }
+      final loaded = store.countForType(convType);
       if (!store.finishedForType(convType) &&
-          (forceReload || centerIndex >= (n - 8).clamp(0, 1 << 30))) {
+          (forceReload || centerIndex >= (loaded - 8).clamp(0, 1 << 30))) {
         await store.loadMore(convType: convType);
       }
+      ConversationPerfGateLog.log(
+        'conversation_hydrate_end',
+        extras: <String, Object?>{
+          'convType': convType,
+          'centerIndex': centerIndex,
+          'tabCount': store.countForType(convType),
+          'targetHit': store.atTypeIndex(convType, centerIndex) != null,
+          'finished': store.finishedForType(convType),
+        },
+      );
       return;
     }
     if (!ConversationPerfFlags.conversationVirtualListEnabled) {
@@ -1049,14 +1339,95 @@ class ConversationListNotifier extends ChangeNotifier {
         return;
       }
     }
-    final page = await ConversationLocalStore.instance.loadConvTypePage(
-      convType: convType,
-      offset: start,
-      limit: limit,
-      excludeConversationIds: _excludeArchivedIdsForType(convType),
-    );
+    final cachedPage = _typeIndexSnapshotCache[convType];
+    if (!forceReload && cachedPage != null && cachedPage.isNotEmpty) {
+      final cached = <V2TimConversation>[];
+      var complete = true;
+      for (var index = start; index < start + limit; index++) {
+        final row = cachedPage[index];
+        if (row == null) {
+          complete = false;
+          break;
+        }
+        cached.add(row);
+      }
+      if (complete && cached.length == limit) {
+        _typeHydrateStart[convType] = start;
+        _typeHydrate[convType] = cached;
+        _rebuildTypeHydrateIndex(convType);
+        ConversationPerfGateLog.log(
+          'hydrate_page_cache_hit',
+          extras: <String, Object?>{
+            'convType': convType,
+            'start': start,
+            'limit': limit,
+            'center': center,
+          },
+        );
+        if (_isFeedScrollingNow && !forceNotify) {
+          return;
+        }
+        await _rebuildConversationsFromTypeHydrates();
+        return;
+      }
+    }
+    var page = <V2TimConversation>[];
+    final anchors =
+        _typePageAnchors[convType] ??= <int, ConversationTypePageCursor>{};
+    if (anchors.isEmpty) {
+      final persisted =
+          await ConversationLocalStore.instance.loadConversationPageAnchors(
+        ownerUserId: ConversationLocalStore.instance.resolvedOwnerUserId(),
+        convType: convType,
+        maxPageStart: start,
+      );
+      anchors.addAll(persisted);
+    }
+    final candidates = anchors.keys.where((index) => index <= start).toList()
+      ..sort();
+    final anchorStart = candidates.isEmpty ? null : candidates.last;
+    if (anchorStart != null) {
+      var cursor = anchors[anchorStart]!;
+      var position = anchorStart;
+      while (position < start + limit) {
+        final chunk =
+            await ConversationLocalStore.instance.loadConvTypePageAfterCursor(
+          convType: convType,
+          cursor: cursor,
+          limit: (start + limit - position).clamp(1, budget),
+          excludeConversationIds: _excludeArchivedIdsForType(convType),
+        );
+        if (chunk.isEmpty) break;
+        if (position + chunk.length <= start) {
+          final tail = ConversationLocalStore.oldestPagingCursor(chunk);
+          if (tail == null) break;
+          cursor = ConversationTypePageCursor(
+            pinned: _isPinnedConversation(tail),
+            activeTime: ConversationLocalStore.pagingAnchorMs(tail),
+            orderKey: tail.orderkey ?? 0,
+            conversationID: tail.conversationID,
+          );
+          position += chunk.length;
+          continue;
+        }
+        page = chunk.skip(start - position).take(limit).toList(growable: false);
+        break;
+      }
+    }
+    if (page.isEmpty) {
+      page = await ConversationLocalStore.instance.loadConvTypePage(
+        convType: convType,
+        offset: start,
+        limit: limit,
+        excludeConversationIds: _excludeArchivedIdsForType(convType),
+      );
+    }
+    // Rows are already committed Store projections; hydrate only loads and
+    // indexes them. Preview/unread authority must not be re-decided here.
     _typeHydrateStart[convType] = start;
     _typeHydrate[convType] = page;
+    _recordTypePageAnchor(convType, start, page);
+    _rebuildTypeHydrateIndex(convType);
     _cacheTypeIndexPage(convType, start, page);
     final cacheOnlyWhileScrolling =
         _isFeedScrollingNow && !forceReload && !allowWindowJump;
@@ -1091,11 +1462,53 @@ class ConversationListNotifier extends ChangeNotifier {
     );
   }
 
+  void _preserveHotPreviewsDuringHydrate(
+    List<V2TimConversation> page,
+  ) {
+    if (page.isEmpty || _conversations.isEmpty) {
+      return;
+    }
+    _rebuildConversationIndex();
+    for (final hydrated in page) {
+      final hotIndex = _indexedConversationPosition(hydrated.conversationID);
+      if (hotIndex < 0) {
+        continue;
+      }
+      final hot = _conversations[hotIndex];
+      final hydratedMessage = hydrated.lastMessage;
+      final preferred = ConversationLastMessagePrefer.preferLastMessage(
+        existing: hydratedMessage,
+        incoming: hot.lastMessage,
+      );
+      if (preferred == null || identical(preferred, hydratedMessage)) {
+        continue;
+      }
+      hydrated.lastMessage = preferred;
+      final preferredTimestamp = preferred.timestamp ?? 0;
+      if (preferredTimestamp > (hydrated.orderkey ?? 0)) {
+        hydrated.orderkey = preferredTimestamp;
+      }
+      ConversationPerfGateLog.traceConversationProjection(
+        stage: 'hydrate_merge',
+        conversationId: hydrated.conversationID,
+        messageId: preferred.msgID ?? preferred.id ?? '',
+        timestamp: preferredTimestamp,
+        orderkey: hydrated.orderkey ?? 0,
+        source: 'hot_projection',
+        sequence: 0,
+        decision: 'preserve_newer_preview',
+      );
+    }
+  }
+
   Future<void> _rebuildConversationsFromTypeHydrates() async {
     // Phase4：禁止 hydrate→整窗覆盖（sdkPrimary 由 TabStore adopt）。
     if (ConversationPerfFlags.conversationListSdkPrimary) {
       return;
     }
+
+    _rebuildTypeHydrateIndex(1);
+    _rebuildTypeHydrateIndex(2);
     final c2c = _typeHydrate[1] ?? const <V2TimConversation>[];
     final group = _typeHydrate[2] ?? const <V2TimConversation>[];
     final merged = ConversationLocalStore.mergeConversationsForUi(c2c, group);
@@ -1110,6 +1523,7 @@ class ConversationListNotifier extends ChangeNotifier {
       return;
     }
     _conversations = withPins;
+    _rebuildConversationIndex();
     _slidingWindowUserExpanded = true;
     _storeHasAnyRow = true;
     _bumpRevisionsForChange(orderOrMembershipChanged: true);
@@ -1198,35 +1612,71 @@ class ConversationListNotifier extends ChangeNotifier {
     return hint;
   }
 
-  Future<void> reloadFromLocal() async {
+  Future<void> restoreStoreProjection({
+    required ConversationStoreProjectionReason reason,
+  }) {
+    ConversationPerfGateLog.log(
+      'store_projection_reload_allowlist',
+      extras: <String, Object?>{'reason': reason.name},
+    );
+    return _reloadFromLocal(reason: reason);
+  }
+
+  @visibleForTesting
+  Future<void> reloadFromLocal() {
+    return restoreStoreProjection(
+      reason: ConversationStoreProjectionReason.testOnly,
+    );
+  }
+
+  Future<void> _reloadFromLocal({
+    ConversationStoreProjectionReason reason =
+        ConversationStoreProjectionReason.sdkCompatibilityRecovery,
+  }) async {
     if (_reloadInFlight != null) {
       _reloadDirty = true;
+      _reloadDirtyReason = reason;
       return _reloadInFlight!;
     }
-    final task = _reloadFromLocalOnce();
+    final owner = _currentOwnerUserId();
+    final generation = _sessionGeneration;
+    final task = _reloadFromLocalOnce(
+      ownerUserId: owner,
+      generation: generation,
+      reason: reason,
+    );
     _reloadInFlight = task;
     try {
       await task;
     } finally {
-      _reloadInFlight = null;
-      if (_reloadDirty) {
-        _reloadDirty = false;
-        await reloadFromLocal();
+      if (identical(_reloadInFlight, task)) {
+        _reloadInFlight = null;
+        if (_isCurrentSession(owner, generation) && _reloadDirty) {
+          _reloadDirty = false;
+          final dirtyReason = _reloadDirtyReason ?? reason;
+          _reloadDirtyReason = null;
+          await _reloadFromLocal(reason: dirtyReason);
+        }
       }
     }
   }
 
   /// loadUiWindow 撞上后台关库闸门时：等 resume/关库结束后再试一次。
-  Future<List<V2TimConversation>> _loadUiWindowSoft() async {
+  Future<List<V2TimConversation>> _loadUiWindowSoft({
+    required String ownerUserId,
+    required int generation,
+  }) async {
     try {
-      return await ConversationLocalStore.instance.loadUiWindow();
+      return await ConversationLocalStore.instance.loadUiWindow(
+        ownerUserId: ownerUserId,
+      );
     } on SqfliteClosedForBackground {
       debugPrint(
         'ConversationListNotifier: loadUiWindow closed for background; '
         'waiting for open gate',
       );
       final allowed = await SqfliteLifecycleHost.waitUntilOpenAllowed();
-      if (!allowed) {
+      if (!allowed || !_isCurrentSession(ownerUserId, generation)) {
         debugPrint(
           'ConversationListNotifier: loadUiWindow soft-skip '
           '(still closed after wait)',
@@ -1234,7 +1684,9 @@ class ConversationListNotifier extends ChangeNotifier {
         return const <V2TimConversation>[];
       }
       try {
-        return await ConversationLocalStore.instance.loadUiWindow();
+        return await ConversationLocalStore.instance.loadUiWindow(
+          ownerUserId: ownerUserId,
+        );
       } on SqfliteClosedForBackground {
         debugPrint(
           'ConversationListNotifier: loadUiWindow soft-skip '
@@ -1245,15 +1697,39 @@ class ConversationListNotifier extends ChangeNotifier {
     }
   }
 
-  Future<void> _reloadFromLocalOnce() async {
+  Future<void> _reloadFromLocalOnce({
+    required String ownerUserId,
+    required int generation,
+    required ConversationStoreProjectionReason reason,
+  }) async {
     if (ConversationPerfFlags.conversationListSdkPrimary) {
       ensureTabStoreBridgeAttached();
-      await ConversationTabStore.instance.loadFirstPage(convType: 1);
-      await ConversationTabStore.instance.loadFirstPage(convType: 2);
-      await _reconcileLocalOnlyC2cAfterSdkReload();
+      await _ensureSdkPrimaryViewReady(
+        convType: 1,
+        generation: generation,
+        ownerUserId: ownerUserId,
+        reason: reason,
+      );
+      if (!_isCurrentSession(ownerUserId, generation)) return;
+      await _ensureSdkPrimaryViewReady(
+        convType: 2,
+        generation: generation,
+        ownerUserId: ownerUserId,
+        reason: reason,
+      );
+      if (!_isCurrentSession(ownerUserId, generation)) return;
+      await _reconcileLocalOnlyC2cAfterSdkReload(
+        ownerUserId: ownerUserId,
+        generation: generation,
+      );
+      if (!_isCurrentSession(ownerUserId, generation)) return;
       ConversationPerfGateLog.log(
         'ui_source',
-        extras: <String, Object?>{'source': 'sdk_store', 'via': 'reload'},
+        extras: <String, Object?>{
+          'source': 'sdk_store',
+          'via': 'reload',
+          'reason': reason.name,
+        },
       );
       return;
     }
@@ -1265,12 +1741,27 @@ class ConversationListNotifier extends ChangeNotifier {
         '(expanded=$_slidingWindowUserExpanded '
         'pageLoad=$isUiPageLoadInFlight)',
       );
-      await _mergeReloadPreservingExpanded();
+      await _mergeReloadPreservingExpanded(
+        ownerUserId: ownerUserId,
+        generation: generation,
+      );
       return;
     }
-    final list = await _loadUiWindowSoft();
+    final list = await _loadUiWindowSoft(
+      ownerUserId: ownerUserId,
+      generation: generation,
+    );
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return;
+    }
     _storeHasAnyRow = list.isNotEmpty ||
-        await ConversationLocalStore.instance.countRows() > 0;
+        await ConversationLocalStore.instance.countRows(
+              ownerUserId: ownerUserId,
+            ) >
+            0;
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return;
+    }
     if (_isDeferringPinReorder) {
       ConversationPinFlickerLog.log(
         'reload_during_pin_defer',
@@ -1287,6 +1778,7 @@ class ConversationListNotifier extends ChangeNotifier {
       if (ConversationPerfFlags.conversationVirtualListEnabled) {
         _seedHydratesFromConversations();
         await refreshTypeTotals();
+        if (!_isCurrentSession(ownerUserId, generation)) return;
       }
       return;
     }
@@ -1304,15 +1796,115 @@ class ConversationListNotifier extends ChangeNotifier {
     if (ConversationPerfFlags.conversationVirtualListEnabled) {
       _seedHydratesFromConversations();
       await refreshTypeTotals();
+      if (!_isCurrentSession(ownerUserId, generation)) return;
     }
     _bumpRevisionsForChange(orderOrMembershipChanged: orderChanged);
     _notifyIfAllowed(reason: 'reload_from_local');
     ConversationUnreadAggregate.instance.scheduleRefresh(reason: 'reload');
   }
 
-  /// SDK-primary 全量 reload 会 reset TabStore；IM 尚未建会话的 C2C 需从本地库补回。
+  /// A compatibility recovery must not reset a populated TabStore window.
+  /// Resetting replaces a deep virtual-list window with page one and causes
+  /// Flutter to clamp the current ScrollPosition to the smaller extent.
+  Future<void> _ensureSdkPrimaryViewReady({
+    required int convType,
+    required int generation,
+    required String ownerUserId,
+    required ConversationStoreProjectionReason reason,
+  }) async {
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return;
+    }
+    final store = ConversationTabStore.instance;
+    final loadedBefore = store.countForType(convType);
+    final finishedBefore = store.finishedForType(convType);
+    final cursorBefore = store.pageCursorForType(convType)?.conversationID;
+    final action = loadedBefore == 0 && !finishedBefore ? 'prime' : 'preserve';
+
+    await store.ensurePrimed(convType: convType);
+
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return;
+    }
+
+    ConversationPerfGateLog.log(
+      'sdk_primary_restore_preserve_view',
+      extras: <String, Object?>{
+        'reason': reason.name,
+        'convType': convType,
+        'generation': generation,
+        'currentGeneration': _sessionGeneration,
+        'action': action,
+        'loadedBefore': loadedBefore,
+        'loadedAfter': store.countForType(convType),
+        'finishedBefore': finishedBefore,
+        'finishedAfter': store.finishedForType(convType),
+        'cursorBefore': cursorBefore,
+        'cursorAfter': store.pageCursorForType(convType)?.conversationID,
+      },
+    );
+  }
+
+  /// A cold-start restore can finish against an empty SQLite view before the
+  /// first typed SDK page commits. Re-prime only an empty type after that
+  /// commit; populated windows and their pagination frontier are untouched.
+  Future<void> refreshEmptySdkPrimaryTypeProjection({
+    required int convType,
+    String reason = 'sdk_commit',
+  }) async {
+    if (!ConversationPerfFlags.conversationListSdkPrimary) {
+      return;
+    }
+    final type = convType == 2 ? 2 : 1;
+    final tabStore = ConversationTabStore.instance;
+    if (tabStore.countForType(type) > 0) {
+      return;
+    }
+    final owner = _currentOwnerUserId();
+    final generation = _sessionGeneration;
+    if (owner.isEmpty) {
+      return;
+    }
+    final total = await ConversationLocalStore.instance.countByConvType(
+      convType: type,
+      ownerUserId: owner,
+    );
+    if (!_isCurrentSession(owner, generation) || total <= 0) {
+      return;
+    }
+    await tabStore.ensurePrimed(convType: type);
+    if (!_isCurrentSession(owner, generation)) {
+      return;
+    }
+    ConversationPerfGateLog.log(
+      'sdk_primary_empty_type_recovered',
+      extras: <String, Object?>{
+        'convType': type,
+        'reason': reason,
+        'owner': owner,
+        'total': total,
+        'loaded': tabStore.countForType(type),
+      },
+    );
+  }
+
+  @visibleForTesting
+  Future<void> refreshEmptySdkPrimaryTypeProjectionForTest({
+    required int convType,
+    String reason = 'test',
+  }) {
+    return refreshEmptySdkPrimaryTypeProjection(
+      convType: convType,
+      reason: reason,
+    );
+  }
+
+  /// SDK-primary 恢复后，IM 尚未建会话的 C2C 需从本地库补回。
   /// 仅补 UI 列表行，不调用 deleteConversation / clearHistory，不改动 IM 消息库与漫游。
-  Future<void> _reconcileLocalOnlyC2cAfterSdkReload() async {
+  Future<void> _reconcileLocalOnlyC2cAfterSdkReload({
+    required String ownerUserId,
+    required int generation,
+  }) async {
     if (!ConversationPerfFlags.conversationListSdkPrimary) {
       return;
     }
@@ -1322,7 +1914,13 @@ class ConversationListNotifier extends ChangeNotifier {
         for (final c in sdkC2c)
           if (c.conversationID.trim().isNotEmpty) c.conversationID.trim(),
       };
-      final localWindow = await _loadUiWindowSoft();
+      final localWindow = await _loadUiWindowSoft(
+        ownerUserId: ownerUserId,
+        generation: generation,
+      );
+      if (!_isCurrentSession(ownerUserId, generation)) {
+        return;
+      }
       final missing = <V2TimConversation>[];
       final forceAdmitIds = <String>{};
       for (final conversation in localWindow) {
@@ -1352,7 +1950,7 @@ class ConversationListNotifier extends ChangeNotifier {
       if (missing.isEmpty) {
         return;
       }
-      await applyConversationsFromStore(
+      await _applyConversationsFromStore(
         upserted: missing,
         forceAdmitIds: forceAdmitIds,
       );
@@ -1434,10 +2032,16 @@ class ConversationListNotifier extends ChangeNotifier {
 
   /// 保留已追加列表长度与成员：热快照合并字段/热准入。
   /// **禁止**整窗 `conversationsByIds`（无条数上限下列表可很长，整窗读会卡死）。
-  Future<void> _mergeReloadPreservingExpanded() async {
+  Future<void> _mergeReloadPreservingExpanded({
+    required String ownerUserId,
+    required int generation,
+  }) async {
     if (_conversations.isEmpty) {
-      final list = await _loadUiWindowSoft();
-      if (list.isEmpty) {
+      final list = await _loadUiWindowSoft(
+        ownerUserId: ownerUserId,
+        generation: generation,
+      );
+      if (list.isEmpty || !_isCurrentSession(ownerUserId, generation)) {
         return;
       }
       _conversations = list;
@@ -1447,7 +2051,13 @@ class ConversationListNotifier extends ChangeNotifier {
       ConversationUnreadAggregate.instance.scheduleRefresh(reason: 'reload');
       return;
     }
-    final hot = await _loadUiWindowSoft();
+    final hot = await _loadUiWindowSoft(
+      ownerUserId: ownerUserId,
+      generation: generation,
+    );
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return;
+    }
     _storeHasAnyRow = hot.isNotEmpty || _storeHasAnyRow;
     if (_isDeferringPinReorder) {
       _mergePreservingUiOrder(hot);
@@ -1456,7 +2066,7 @@ class ConversationListNotifier extends ChangeNotifier {
     if (hot.isEmpty) {
       return;
     }
-    await applyConversationsFromStore(upserted: hot);
+    await _applyConversationsFromStore(upserted: hot);
   }
 
   /// soft 辅助：按条数帽选取 ID。`maxIds<=0` 返回窗内全部 ID（外加 extra）。
@@ -1563,18 +2173,50 @@ class ConversationListNotifier extends ChangeNotifier {
 
   Future<ConversationWindowSlideResult> appendOlderFromLocal({
     int? convType,
+    bool protectVirtualViewport = false,
   }) async {
+    if (protectVirtualViewport &&
+        ConversationPerfFlags.conversationVirtualListEnabled &&
+        (convType == 1 || convType == 2)) {
+      // 真虚拟列表的 typeIndex 只能由 ensureTypeIndexHydrated 维护。
+      // 旧 append 使用独立的 consumed offset；视口已经跳到尾窗后再 append，
+      // 会把中间页和尾页拼成非连续数组，却按连续 typeIndex 登记，最终把
+      // 屏幕上的真实尾部行投影成 skeleton。
+      await refreshTypeTotals();
+      ConversationPerfGateLog.log(
+        'append_older_skip_virtual_viewport',
+        extras: <String, Object?>{
+          'convType': convType,
+          'hydrateStart': _typeHydrateStart[convType],
+          'hydrateLength': _typeHydrate[convType]?.length ?? 0,
+          'virtualTotal': _typeTotalCount[convType],
+        },
+      );
+      return ConversationWindowSlideResult.empty;
+    }
     if (_uiPageLoadInFlight != null) {
       return ConversationWindowSlideResult.empty;
     }
     // 取消进行中的回顶 Phase2，避免与触底互踩。
     _hotHeadPhase2Generation++;
+    final owner = _currentOwnerUserId();
+    final generation = _sessionGeneration;
+    if (owner.isEmpty || !_isCurrentSession(owner, generation)) {
+      return ConversationWindowSlideResult.empty;
+    }
     final gate = Completer<void>();
-    _uiPageLoadInFlight = gate.future;
+    final pageTask = gate.future;
+    _uiPageLoadInFlight = pageTask;
     try {
-      return await _appendOlderFromLocalImpl(convType: convType);
+      return await _appendOlderFromLocalImpl(
+        convType: convType,
+        ownerUserId: owner,
+        generation: generation,
+      );
     } finally {
-      _uiPageLoadInFlight = null;
+      if (identical(_uiPageLoadInFlight, pageTask)) {
+        _uiPageLoadInFlight = null;
+      }
       if (!gate.isCompleted) {
         gate.complete();
       }
@@ -1583,7 +2225,12 @@ class ConversationListNotifier extends ChangeNotifier {
 
   Future<ConversationWindowSlideResult> _appendOlderFromLocalImpl({
     int? convType,
+    required String ownerUserId,
+    required int generation,
   }) async {
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return ConversationWindowSlideResult.empty;
+    }
     if (ConversationPerfFlags.conversationListSdkPrimary) {
       ensureTabStoreBridgeAttached();
       final typeFilter = convType == 1 || convType == 2 ? convType! : null;
@@ -1591,7 +2238,13 @@ class ConversationListNotifier extends ChangeNotifier {
         final before1 = ConversationTabStore.instance.countForType(1);
         final before2 = ConversationTabStore.instance.countForType(2);
         await ConversationTabStore.instance.loadMore(convType: 1);
+        if (!_isCurrentSession(ownerUserId, generation)) {
+          return ConversationWindowSlideResult.empty;
+        }
         await ConversationTabStore.instance.loadMore(convType: 2);
+        if (!_isCurrentSession(ownerUserId, generation)) {
+          return ConversationWindowSlideResult.empty;
+        }
         final added =
             (ConversationTabStore.instance.countForType(1) - before1) +
                 (ConversationTabStore.instance.countForType(2) - before2);
@@ -1602,6 +2255,9 @@ class ConversationListNotifier extends ChangeNotifier {
       if (ConversationTabStore.instance.countForType(typeFilter) == 0 &&
           !ConversationTabStore.instance.finishedForType(typeFilter)) {
         await ConversationTabStore.instance.loadFirstPage(convType: typeFilter);
+        if (!_isCurrentSession(ownerUserId, generation)) {
+          return ConversationWindowSlideResult.empty;
+        }
         final n = ConversationTabStore.instance.countForType(typeFilter);
         return n > 0
             ? ConversationWindowSlideResult(added: n)
@@ -1609,6 +2265,9 @@ class ConversationListNotifier extends ChangeNotifier {
       }
       final before = ConversationTabStore.instance.countForType(typeFilter);
       await ConversationTabStore.instance.loadMore(convType: typeFilter);
+      if (!_isCurrentSession(ownerUserId, generation)) {
+        return ConversationWindowSlideResult.empty;
+      }
       final added =
           ConversationTabStore.instance.countForType(typeFilter) - before;
       return added > 0
@@ -1616,7 +2275,7 @@ class ConversationListNotifier extends ChangeNotifier {
           : ConversationWindowSlideResult.empty;
     }
     if (_conversations.isEmpty) {
-      await reloadFromLocal();
+      await _reloadFromLocal();
       return ConversationWindowSlideResult.empty;
     }
     if (!ConversationPerfFlags.uiSlidingWindowActive &&
@@ -1639,8 +2298,12 @@ class ConversationListNotifier extends ChangeNotifier {
       final dbTypeCountRaw =
           await ConversationLocalStore.instance.countByConvType(
         convType: typeFilter,
+        ownerUserId: ownerUserId,
         excludeConversationIds: _excludeArchivedIdsForType(typeFilter),
       );
+      if (!_isCurrentSession(ownerUserId, generation)) {
+        return ConversationWindowSlideResult.empty;
+      }
       // 计数异常偏低时（锁/切换 owner）勿误判耗尽，至少不低于窗内已有类型数。
       final dbTypeCount =
           dbTypeCountRaw < typedCount ? typedCount : dbTypeCountRaw;
@@ -1660,12 +2323,33 @@ class ConversationListNotifier extends ChangeNotifier {
         );
         return ConversationWindowSlideResult.empty;
       }
-      final older = await ConversationLocalStore.instance.loadConvTypePage(
-        convType: typeFilter,
-        offset: consumed,
-        limit: ConversationPerfFlags.uiScrollPageSize,
-        excludeConversationIds: _excludeArchivedIdsForType(typeFilter),
-      );
+      final typedRows = _conversations
+          .where((c) => _isGroupConversation(c) == (typeFilter == 2))
+          .toList(growable: false);
+      final tail = ConversationLocalStore.oldestPagingCursor(typedRows);
+      final older = tail == null
+          ? await ConversationLocalStore.instance.loadConvTypePage(
+              convType: typeFilter,
+              offset: consumed,
+              limit: ConversationPerfFlags.uiScrollPageSize,
+              ownerUserId: ownerUserId,
+              excludeConversationIds: _excludeArchivedIdsForType(typeFilter),
+            )
+          : await ConversationLocalStore.instance.loadConvTypePageAfterCursor(
+              convType: typeFilter,
+              cursor: ConversationTypePageCursor(
+                pinned: _isPinnedConversation(tail),
+                activeTime: ConversationLocalStore.pagingAnchorMs(tail),
+                orderKey: tail.orderkey ?? 0,
+                conversationID: tail.conversationID,
+              ),
+              limit: ConversationPerfFlags.uiScrollPageSize,
+              ownerUserId: ownerUserId,
+              excludeConversationIds: _excludeArchivedIdsForType(typeFilter),
+            );
+      if (!_isCurrentSession(ownerUserId, generation)) {
+        return ConversationWindowSlideResult.empty;
+      }
       if (older.isEmpty) {
         ConversationPerfGateLog.log(
           'append_older_empty',
@@ -1679,6 +2363,17 @@ class ConversationListNotifier extends ChangeNotifier {
           },
         );
         return ConversationWindowSlideResult.empty;
+      }
+      final nextCursor = ConversationLocalStore.oldestPagingCursor(
+        <V2TimConversation>[...typedRows, ...older],
+      );
+      if (nextCursor != null) {
+        _typePageCursors[typeFilter] = ConversationTypePageCursor(
+          pinned: _isPinnedConversation(nextCursor),
+          activeTime: ConversationLocalStore.pagingAnchorMs(nextCursor),
+          orderKey: nextCursor.orderkey ?? 0,
+          conversationID: nextCursor.conversationID,
+        );
       }
       _typeAppendConsumed[typeFilter] = consumed + older.length;
       final next = List<V2TimConversation>.from(_conversations);
@@ -1761,7 +2456,13 @@ class ConversationListNotifier extends ChangeNotifier {
       }
       final beforeWindow = _conversations;
       _conversations = trimmed;
-      final pinRestored = await _restorePinnedIntoWindowIfMissing();
+      final pinRestored = await _restorePinnedIntoWindowIfMissing(
+        ownerUserId: ownerUserId,
+        generation: generation,
+      );
+      if (!_isCurrentSession(ownerUserId, generation)) {
+        return ConversationWindowSlideResult.empty;
+      }
       if (!pinRestored &&
           listsEqualForUi(beforeWindow, _conversations) &&
           _sameConversationOrder(beforeWindow, _conversations)) {
@@ -1813,29 +2514,41 @@ class ConversationListNotifier extends ChangeNotifier {
       if (ConversationPerfFlags.uiSlidingWindowActive) {
         return ConversationWindowSlideResult.empty;
       }
-      await reloadFromLocal();
+      await _reloadFromLocal();
       return ConversationWindowSlideResult.empty;
     }
     var older = await ConversationLocalStore.instance.loadOlderPage(
       beforeActiveTime: ConversationLocalStore.pagingAnchorMs(cursor),
       beforeConversationId: cursor.conversationID,
       limit: ConversationPerfFlags.uiScrollPageSize,
+      ownerUserId: ownerUserId,
       convType: typeFilter,
     );
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return ConversationWindowSlideResult.empty;
+    }
     var usedOffsetFallback = false;
     // 游标与库列漂移时（lastMessage≠active_time）会空翻，但库里其实还有未进窗行。
     if (older.isEmpty && typeFilter != null) {
       final dbTypeCount = await ConversationLocalStore.instance.countByConvType(
         convType: typeFilter,
+        ownerUserId: ownerUserId,
         excludeConversationIds: _excludeArchivedIdsForType(typeFilter),
       );
+      if (!_isCurrentSession(ownerUserId, generation)) {
+        return ConversationWindowSlideResult.empty;
+      }
       if (dbTypeCount > typedCount) {
         older = await ConversationLocalStore.instance.loadConvTypePage(
           convType: typeFilter,
           offset: typedCount,
           limit: ConversationPerfFlags.uiScrollPageSize,
+          ownerUserId: ownerUserId,
           excludeConversationIds: _excludeArchivedIdsForType(typeFilter),
         );
+        if (!_isCurrentSession(ownerUserId, generation)) {
+          return ConversationWindowSlideResult.empty;
+        }
         usedOffsetFallback = older.isNotEmpty;
         ConversationPerfGateLog.log(
           'append_older_offset_fallback',
@@ -1889,8 +2602,12 @@ class ConversationListNotifier extends ChangeNotifier {
           beforeActiveTime: ConversationLocalStore.pagingAnchorMs(cursor),
           beforeConversationId: cursor.conversationID,
           limit: ConversationPerfFlags.uiScrollPageSize,
+          ownerUserId: ownerUserId,
           convType: typeFilter,
         );
+        if (!_isCurrentSession(ownerUserId, generation)) {
+          return ConversationWindowSlideResult.empty;
+        }
         if (older.isNotEmpty) {
           absorb(older);
         }
@@ -1900,15 +2617,23 @@ class ConversationListNotifier extends ChangeNotifier {
     if (added == 0 && typeFilter != null) {
       final dbTypeCount = await ConversationLocalStore.instance.countByConvType(
         convType: typeFilter,
+        ownerUserId: ownerUserId,
         excludeConversationIds: _excludeArchivedIdsForType(typeFilter),
       );
+      if (!_isCurrentSession(ownerUserId, generation)) {
+        return ConversationWindowSlideResult.empty;
+      }
       if (dbTypeCount > typedCount) {
         older = await ConversationLocalStore.instance.loadConvTypePage(
           convType: typeFilter,
           offset: typedCount,
           limit: ConversationPerfFlags.uiScrollPageSize,
+          ownerUserId: ownerUserId,
           excludeConversationIds: _excludeArchivedIdsForType(typeFilter),
         );
+        if (!_isCurrentSession(ownerUserId, generation)) {
+          return ConversationWindowSlideResult.empty;
+        }
         ConversationPerfGateLog.log(
           'append_older_offset_fallback',
           extras: <String, Object?>{
@@ -1997,15 +2722,25 @@ class ConversationListNotifier extends ChangeNotifier {
     if (_uiPageLoadInFlight != null) {
       return ConversationWindowSlideResult.empty;
     }
+    final owner = _currentOwnerUserId();
+    final generation = _sessionGeneration;
+    if (owner.isEmpty || !_isCurrentSession(owner, generation)) {
+      return ConversationWindowSlideResult.empty;
+    }
     final gate = Completer<void>();
-    _uiPageLoadInFlight = gate.future;
+    final pageTask = gate.future;
+    _uiPageLoadInFlight = pageTask;
     try {
       return await _prependNewerFromLocalImpl(
         convType: convType,
         slideToHotPrefix: slideToHotPrefix,
+        ownerUserId: owner,
+        generation: generation,
       );
     } finally {
-      _uiPageLoadInFlight = null;
+      if (identical(_uiPageLoadInFlight, pageTask)) {
+        _uiPageLoadInFlight = null;
+      }
       if (!gate.isCompleted) {
         gate.complete();
       }
@@ -2015,16 +2750,34 @@ class ConversationListNotifier extends ChangeNotifier {
   Future<ConversationWindowSlideResult> _prependNewerFromLocalImpl({
     int? convType,
     bool slideToHotPrefix = false,
+    required String ownerUserId,
+    required int generation,
   }) async {
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return ConversationWindowSlideResult.empty;
+    }
     if (_conversations.isEmpty) {
-      await reloadFromLocal();
+      await _reloadFromLocal();
       return ConversationWindowSlideResult.empty;
     }
     // 置顶始终补齐；整窗滑回热前缀仅「回到顶部」显式触发，避免上拉时闪跳。
-    final pinRestored = await _restorePinnedIntoWindowIfMissing();
+    final pinRestored = await _restorePinnedIntoWindowIfMissing(
+      ownerUserId: ownerUserId,
+      generation: generation,
+    );
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return ConversationWindowSlideResult.empty;
+    }
     var hotRestored = false;
     if (slideToHotPrefix) {
-      hotRestored = await _restoreHotHeadIntoWindow(convType: convType);
+      hotRestored = await _restoreHotHeadIntoWindow(
+        convType: convType,
+        ownerUserId: ownerUserId,
+        generation: generation,
+      );
+      if (!_isCurrentSession(ownerUserId, generation)) {
+        return ConversationWindowSlideResult.empty;
+      }
     }
     final typeFilter = convType == 1 || convType == 2 ? convType : null;
     final typed = _conversations.where((conversation) {
@@ -2043,8 +2796,12 @@ class ConversationListNotifier extends ChangeNotifier {
       afterActiveTime: ConversationLocalStore.pagingAnchorMs(cursor),
       afterConversationId: cursor.conversationID,
       limit: ConversationPerfFlags.uiScrollPageSize,
+      ownerUserId: ownerUserId,
       convType: typeFilter,
     );
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return ConversationWindowSlideResult.empty;
+    }
     if (newer.isEmpty) {
       return (pinRestored || hotRestored)
           ? const ConversationWindowSlideResult(added: 1)
@@ -2109,7 +2866,13 @@ class ConversationListNotifier extends ChangeNotifier {
           : ConversationWindowSlideResult.empty;
     }
     _conversations = trimmed;
-    await _restorePinnedIntoWindowIfMissing();
+    await _restorePinnedIntoWindowIfMissing(
+      ownerUserId: ownerUserId,
+      generation: generation,
+    );
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return ConversationWindowSlideResult.empty;
+    }
     _bumpRevisionsForChange(orderOrMembershipChanged: true);
     _notifyIfAllowed(reason: 'prepend_newer');
     ConversationUnreadAggregate.instance.scheduleRefresh(reason: 'prepend');
@@ -2136,7 +2899,16 @@ class ConversationListNotifier extends ChangeNotifier {
 
   /// 「回到顶部」：将该类型滑窗重置为库序热前缀并重置游标。
   Future<bool> slideToHotPrefix({int? convType}) {
-    return _restoreHotHeadIntoWindow(convType: convType);
+    final owner = _currentOwnerUserId();
+    final generation = _sessionGeneration;
+    if (owner.isEmpty || !_isCurrentSession(owner, generation)) {
+      return Future<bool>.value(false);
+    }
+    return _restoreHotHeadIntoWindow(
+      convType: convType,
+      ownerUserId: owner,
+      generation: generation,
+    );
   }
 
   int _hotHeadPhase2Generation = 0;
@@ -2144,7 +2916,14 @@ class ConversationListNotifier extends ChangeNotifier {
   /// 方案 C：回顶时把该类型滑窗重置为库序连续前缀，并重置 consumed，
   /// 再下滑才能从热头之后连续加载（不会跳到很旧的已消费游标）。
   /// 两阶段开启时：先热头 reserve，再后台补满 soft-cap。
-  Future<bool> _restoreHotHeadIntoWindow({int? convType}) async {
+  Future<bool> _restoreHotHeadIntoWindow({
+    int? convType,
+    required String ownerUserId,
+    required int generation,
+  }) async {
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return false;
+    }
     final typeFilter = convType == 1 || convType == 2 ? convType : null;
     if (typeFilter == null) {
       return false;
@@ -2170,7 +2949,12 @@ class ConversationListNotifier extends ChangeNotifier {
       prefixLimit: phase1Limit,
       maxPerType: maxPerType,
       phase: twoPhase ? 1 : 0,
+      ownerUserId: ownerUserId,
+      sessionGeneration: generation,
     );
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return false;
+    }
 
     if (twoPhase) {
       final gen = ++_hotHeadPhase2Generation;
@@ -2180,6 +2964,8 @@ class ConversationListNotifier extends ChangeNotifier {
           prefixLimit: fullLimit,
           maxPerType: maxPerType,
           generation: gen,
+          ownerUserId: ownerUserId,
+          sessionGeneration: generation,
         ),
       );
     }
@@ -2191,10 +2977,13 @@ class ConversationListNotifier extends ChangeNotifier {
     required int prefixLimit,
     required int maxPerType,
     required int generation,
+    required String ownerUserId,
+    required int sessionGeneration,
   }) async {
     // 让出一帧，保证 Phase1 notify / jumpTo(0) 先落地。
     await Future<void>.delayed(Duration.zero);
-    if (generation != _hotHeadPhase2Generation) {
+    if (generation != _hotHeadPhase2Generation ||
+        !_isCurrentSession(ownerUserId, sessionGeneration)) {
       return;
     }
     if (_uiPageLoadInFlight != null) {
@@ -2219,6 +3008,8 @@ class ConversationListNotifier extends ChangeNotifier {
       prefixLimit: prefixLimit,
       maxPerType: maxPerType,
       phase: 2,
+      ownerUserId: ownerUserId,
+      sessionGeneration: sessionGeneration,
     );
   }
 
@@ -2227,17 +3018,21 @@ class ConversationListNotifier extends ChangeNotifier {
     required int prefixLimit,
     required int maxPerType,
     required int phase,
+    required String ownerUserId,
+    required int sessionGeneration,
   }) async {
-    if (prefixLimit <= 0) {
+    if (prefixLimit <= 0 ||
+        !_isCurrentSession(ownerUserId, sessionGeneration)) {
       return false;
     }
     final prefix = await ConversationLocalStore.instance.loadConvTypePage(
       convType: typeFilter,
       offset: 0,
       limit: prefixLimit,
+      ownerUserId: ownerUserId,
       excludeConversationIds: _excludeArchivedIdsForType(typeFilter),
     );
-    if (prefix.isEmpty) {
+    if (prefix.isEmpty || !_isCurrentSession(ownerUserId, sessionGeneration)) {
       return false;
     }
 
@@ -2263,7 +3058,13 @@ class ConversationListNotifier extends ChangeNotifier {
     final next = <V2TimConversation>[...keptOpposite, ...prefix];
     next.sort(ConversationLocalStore.compareConversationsForUi);
     final withPins =
-        await ConversationLocalStore.instance.ensurePinnedPresentInWindow(next);
+        await ConversationLocalStore.instance.ensurePinnedPresentInWindow(
+      next,
+      ownerUserId: ownerUserId,
+    );
+    if (!_isCurrentSession(ownerUserId, sessionGeneration)) {
+      return false;
+    }
     withPins.sort(ConversationLocalStore.compareConversationsForUi);
 
     final preferCount =
@@ -2317,11 +3118,23 @@ class ConversationListNotifier extends ChangeNotifier {
   }
 
   /// 把缺失的置顶会话补回当前窗（触底软裁曾误裁置顶时用）。
-  Future<bool> _restorePinnedIntoWindowIfMissing() async {
+  Future<bool> _restorePinnedIntoWindowIfMissing({
+    required String ownerUserId,
+    required int generation,
+  }) async {
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return false;
+    }
     final before = _conversations.length;
     final beforePinned = _conversations.where(_isPinnedConversation).length;
-    final withPins = await ConversationLocalStore.instance
-        .ensurePinnedPresentInWindow(_conversations);
+    final withPins =
+        await ConversationLocalStore.instance.ensurePinnedPresentInWindow(
+      _conversations,
+      ownerUserId: ownerUserId,
+    );
+    if (!_isCurrentSession(ownerUserId, generation)) {
+      return false;
+    }
     final afterPinned = withPins.where(_isPinnedConversation).length;
     if (withPins.length == before &&
         afterPinned == beforePinned &&
@@ -2795,6 +3608,7 @@ class ConversationListNotifier extends ChangeNotifier {
     if (id.isEmpty) {
       return;
     }
+    invalidateConversationViewPages(conversationID: id, structureChanged: true);
 
     // 二次调用（写库回写）且 pin+序已对齐：跳过再次 deferred，避免二次 structure bump。
     final alignedIdx = _conversations.indexWhere(
@@ -3066,8 +3880,9 @@ class ConversationListNotifier extends ChangeNotifier {
       seen.add(id);
       ConversationLocalStore.decorateConversationForUi(match);
       match.conversationID = existing.conversationID;
-      match.isPinned =
+      final localPinnedMatch =
           ConversationPinSyncService.instance.isPinnedConversationId(id);
+      match.isPinned = (match.isPinned == true) || localPinnedMatch;
       _applyRecvOptLocalGraceIfNeeded(match);
       if (conversationUiFingerprint(existing) !=
           conversationUiFingerprint(match)) {
@@ -3083,8 +3898,9 @@ class ConversationListNotifier extends ChangeNotifier {
         continue;
       }
       ConversationLocalStore.decorateConversationForUi(item);
-      item.isPinned =
+      final localPinnedItem =
           ConversationPinSyncService.instance.isPinnedConversationId(id);
+      item.isPinned = (item.isPinned == true) || localPinnedItem;
       next.add(item);
       changed = true;
     }
@@ -3110,48 +3926,190 @@ class ConversationListNotifier extends ChangeNotifier {
     _notifyIfAllowed(reason: 'merge_preserve_order');
   }
 
+  Future<void> applyCompatibilityStoreProjection({
+    required ConversationStoreProjectionReason reason,
+    required List<V2TimConversation> upserted,
+    List<String> deletedIds = const [],
+    Set<String> forceAdmitIds = const <String>{},
+    Map<String, Set<ConversationMutationField>> changedFieldMasks =
+        const <String, Set<ConversationMutationField>>{},
+  }) {
+    ConversationPerfGateLog.log(
+      'store_projection_patch_allowlist',
+      extras: <String, Object?>{
+        'reason': reason.name,
+        'upserted': upserted.length,
+        'deleted': deletedIds.length,
+      },
+    );
+    return _applyConversationsFromStore(
+      upserted: upserted,
+      deletedIds: deletedIds,
+      forceAdmitIds: forceAdmitIds,
+      changedFieldMasks: changedFieldMasks,
+    );
+  }
+
+  @visibleForTesting
   Future<void> applyWindowPatchesIfNeeded({
     required List<V2TimConversation> upserted,
     List<String> deletedIds = const [],
   }) {
-    return applyConversationsFromStore(
+    return _applyConversationsFromStore(
       upserted: upserted,
       deletedIds: deletedIds,
     );
   }
 
+  Future<void> applyCommittedBatch(
+    ConversationUiSnapshotBatch<V2TimConversation> batch, {
+    Set<String> forceAdmitIds = const <String>{},
+  }) {
+    if (batch.isEmpty) {
+      return Future<void>.value();
+    }
+    return _applyConversationsFromStore(
+      upserted: batch.upsertedSnapshots,
+      deletedIds: batch.deletedCanonicalIds,
+      forceAdmitIds: forceAdmitIds,
+      changedFieldMasks: batch.changedFieldMasks,
+      committedUnreadDeltas:
+          batch.unreadProjectionComplete == null ? null : batch.unreadDeltas,
+      unreadProjectionComplete: batch.unreadProjectionComplete,
+    );
+  }
+
+  /// Applies a committed single-row pin batch while preserving the existing
+  /// deferred reorder/viewport behavior. Business callers must pass the
+  /// Coordinator output instead of constructing a mutable row projection.
+  Future<void> applyCommittedPinBatch(
+    ConversationUiSnapshotBatch<V2TimConversation> batch, {
+    required String conversationID,
+    required bool isPinned,
+    double? listScrollOffset,
+  }) {
+    if (batch.isEmpty) {
+      return Future<void>.value();
+    }
+    final id = conversationID.trim();
+    V2TimConversation? snapshot;
+    for (final item in batch.upsertedSnapshots) {
+      if (MessageConversationId.sameConversation(item.conversationID, id)) {
+        snapshot = item;
+        break;
+      }
+    }
+    if (snapshot == null ||
+        batch.upsertedSnapshots.length != 1 ||
+        batch.deletedCanonicalIds.isNotEmpty) {
+      return applyCommittedBatch(batch);
+    }
+    applyPinnedWithDeferredReorder(
+      conversationID: id,
+      isPinned: isPinned,
+      snapshot: snapshot,
+      listScrollOffset: listScrollOffset,
+    );
+    return Future<void>.value();
+  }
+
+  @visibleForTesting
   Future<void> applyConversationsFromStore({
+    required List<V2TimConversation> upserted,
+    List<String> deletedIds = const [],
+    Set<String> forceAdmitIds = const <String>{},
+  }) {
+    return _applyConversationsFromStore(
+      upserted: upserted,
+      deletedIds: deletedIds,
+      forceAdmitIds: forceAdmitIds,
+    );
+  }
+
+  Future<void> _applyConversationsFromStore({
     required List<V2TimConversation> upserted,
     List<String> deletedIds = const [],
 
     /// 取消归档等：即使不满足热准入/地板，也必须进主列表窗。
     Set<String> forceAdmitIds = const <String>{},
+    Map<String, Set<ConversationMutationField>> changedFieldMasks =
+        const <String, Set<ConversationMutationField>>{},
+    List<ConversationUiUnreadDelta>? committedUnreadDeltas,
+    bool? unreadProjectionComplete,
   }) async {
-    if (upserted.isEmpty && deletedIds.isEmpty) {
+    if (upserted.isEmpty &&
+        deletedIds.isEmpty &&
+        (committedUnreadDeltas == null || committedUnreadDeltas.isEmpty)) {
       return;
     }
     if (ConversationPerfFlags.conversationListSdkPrimary) {
       ensureTabStoreBridgeAttached();
-      if (upserted.isNotEmpty) {
-        ConversationTabStore.instance.applyPatches(
-          upserted,
-          reason: 'apply_store',
-          forceAdmitIds: forceAdmitIds,
-        );
-      }
-      if (deletedIds.isNotEmpty) {
-        ConversationTabStore.instance.applyDeleted(deletedIds);
-      }
+      ConversationTabStore.instance.applyCommittedViewBatch(
+        ConversationUiSnapshotBatch<V2TimConversation>(
+          upsertedSnapshots: upserted,
+          deletedCanonicalIds: deletedIds,
+          structureChanged: deletedIds.isNotEmpty,
+          changedFieldMasks: changedFieldMasks,
+          commitGeneration: 0,
+          unreadDeltas:
+              committedUnreadDeltas ?? const <ConversationUiUnreadDelta>[],
+          unreadProjectionComplete: unreadProjectionComplete,
+        ),
+        forceAdmitIds: forceAdmitIds,
+      );
       // TabStore listener 已刷 UI；legacy hydrate 路径跳过。
       return;
     }
+
+    _rebuildTypeHydrateIndex(1);
+    _rebuildTypeHydrateIndex(2);
 
     final deletedSet =
         deletedIds.map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
     final archivedC2c = archivedConversationC2cIDsNotifier.value;
     final archivedGroup = archivedConversationGroupIDsNotifier.value;
+    final explicitLastMessageKeys = changedFieldMasks.entries
+        .where(
+          (entry) =>
+              entry.value.contains(ConversationMutationField.lastMessage),
+        )
+        .map((entry) => _canonicalKeyForId(entry.key))
+        .where((key) => key.isNotEmpty)
+        .toSet();
     final unreadDeltas = <ConversationUnreadDelta>[];
     var needsOutOfWindowUnreadRefresh = false;
+
+    void commitUnreadProjection() {
+      final committed = committedUnreadDeltas;
+      if (committed != null) {
+        ConversationUnreadAggregate.instance.applyNotifiableDeltas(
+          committed
+              .map(
+                (delta) => ConversationUnreadDelta(
+                  isGroup: delta.isGroup,
+                  oldNotifiable: delta.oldNotifiable,
+                  newNotifiable: delta.newNotifiable,
+                ),
+              )
+              .toList(growable: false),
+        );
+        if (unreadProjectionComplete == false) {
+          ConversationUnreadAggregate.instance.scheduleRefresh(
+            reason: 'committed_batch_incomplete',
+          );
+        }
+        return;
+      }
+      if (unreadDeltas.isNotEmpty) {
+        ConversationUnreadAggregate.instance
+            .applyNotifiableDeltas(unreadDeltas);
+      }
+      if (needsOutOfWindowUnreadRefresh) {
+        ConversationUnreadAggregate.instance.scheduleRefresh(
+          reason: 'apply_out_of_window',
+        );
+      }
+    }
 
     int notifiableOf(V2TimConversation conversation) {
       return ConversationUnreadUtils.notifiableUnreadForAggregate(
@@ -3162,6 +4120,18 @@ class ConversationListNotifier extends ChangeNotifier {
     }
 
     var next = List<V2TimConversation>.from(_conversations);
+    final nextIndex = <String, int>{};
+    void rebuildNextIndex() {
+      nextIndex.clear();
+      for (var i = 0; i < next.length; i++) {
+        final key = _canonicalKeyForConversation(next[i]);
+        if (key.isNotEmpty) {
+          nextIndex[key] = i;
+        }
+      }
+    }
+
+    rebuildNextIndex();
     final upsertIds = upserted
         .map((e) => e.conversationID.trim())
         .where((e) => e.isNotEmpty)
@@ -3201,6 +4171,7 @@ class ConversationListNotifier extends ChangeNotifier {
           ),
         ),
       );
+      rebuildNextIndex();
     }
 
     for (final incoming in upserted) {
@@ -3213,6 +4184,7 @@ class ConversationListNotifier extends ChangeNotifier {
         next.removeWhere(
           (c) => MessageConversationId.sameConversation(c.conversationID, id),
         );
+        rebuildNextIndex();
         if (_hasOpenChatNow || _uiNotifyPendingWhileActiveChat) {
           _activeChatDirtyIds.add(id);
         }
@@ -3222,12 +4194,33 @@ class ConversationListNotifier extends ChangeNotifier {
         _activeChatDirtyIds.add(id);
       }
       ConversationLocalStore.decorateConversationForUi(incoming);
-      incoming.isPinned =
+      // Pin 真值由 ConversationPinSyncService 维护，但 SDK 传入的 isPinned=true
+      // 不得被本地集合覆盖为 false：冷启动/tencent reconcile 期间本地集合可能
+      // 过时或为空，若用空集合把 SDK 的置顶会话标记为未置顶，会话会按时间
+      // 排序而非置顶在顶。只有本地集合确认未置顶且 SDK 也未置顶时才为 false。
+      final localPinned =
           ConversationPinSyncService.instance.isPinnedConversationId(id);
+      incoming.isPinned = (incoming.isPinned == true) || localPinned;
       _applyRecvOptLocalGraceIfNeeded(incoming);
-      final idx = next.indexWhere(
-        (c) => MessageConversationId.sameConversation(c.conversationID, id),
-      );
+      final canonical = _canonicalKeyForConversation(incoming);
+      var idx = nextIndex[canonical] ?? -1;
+      if (idx >= 0 &&
+          !MessageConversationId.sameConversation(
+            next[idx].conversationID,
+            id,
+          )) {
+        _canonicalLookupFallbacks++;
+        idx = next.indexWhere(
+          (c) => MessageConversationId.sameConversation(c.conversationID, id),
+        );
+      } else if (idx < 0 &&
+          canonical.isNotEmpty &&
+          nextIndex.containsKey(canonical)) {
+        _canonicalLookupFallbacks++;
+        idx = next.indexWhere(
+          (c) => MessageConversationId.sameConversation(c.conversationID, id),
+        );
+      }
       if (idx >= 0) {
         final existing = next[idx];
         final oldN = notifiableOf(existing);
@@ -3239,10 +4232,13 @@ class ConversationListNotifier extends ChangeNotifier {
           existingLastMessage: existing.lastMessage,
         );
         incoming.conversationID = existing.conversationID;
-        incoming.lastMessage = ConversationLastMessagePrefer.preferLastMessage(
-          existing: existing.lastMessage,
-          incoming: incoming.lastMessage,
-        );
+        if (!explicitLastMessageKeys.contains(canonical)) {
+          incoming.lastMessage =
+              ConversationLastMessagePrefer.preferLastMessage(
+            existing: existing.lastMessage,
+            incoming: incoming.lastMessage,
+          );
+        }
         if (id.startsWith('c2c_') ||
             (incoming.userID?.trim().isNotEmpty ?? false)) {
           incoming.showName =
@@ -3259,6 +4255,15 @@ class ConversationListNotifier extends ChangeNotifier {
           _putStrongPreviewCache(id, strongLast);
         }
         final newN = notifiableOf(incoming);
+        if (kDebugMode &&
+            (oldN != newN || existingUnread != (incoming.unreadCount ?? 0))) {
+          debugPrint(
+            '[ConversationUnreadOpen] source=list_merge '
+            'conv=$id oldUnread=$existingUnread incomingUnread=${incoming.unreadCount ?? 0} '
+            'oldNotifiable=$oldN newNotifiable=$newN '
+            'active=$_hasOpenChatNow deferred=$_uiNotifyPendingWhileActiveChat',
+          );
+        }
         if (oldN != newN) {
           unreadDeltas.add(
             ConversationUnreadDelta(
@@ -3271,6 +4276,7 @@ class ConversationListNotifier extends ChangeNotifier {
         if (conversationUiFingerprint(existing) !=
             conversationUiFingerprint(incoming)) {
           next[idx] = incoming;
+          nextIndex[canonical] = idx;
         }
       } else if (forceAdmitIds.any(
             (forced) => MessageConversationId.sameConversation(forced, id),
@@ -3292,6 +4298,7 @@ class ConversationListNotifier extends ChangeNotifier {
           );
         }
         next.add(incoming);
+        nextIndex[canonical] = next.length - 1;
       } else {
         // 未进 UI 窗但库已变：角标可能变，走 bulk 全量对账。
         needsOutOfWindowUnreadRefresh = true;
@@ -3367,18 +4374,11 @@ class ConversationListNotifier extends ChangeNotifier {
         _bumpRevisionsForChange(orderOrMembershipChanged: orderChanged);
         _notifyIfAllowed(
           reason: deferring ? 'apply_store_defer' : 'apply_store',
+          contentOnly: !orderChanged && deletedSet.isEmpty,
         );
       }
       // UI noop：指纹已含未读；不 schedule 全量聚合。
-      if (unreadDeltas.isNotEmpty) {
-        ConversationUnreadAggregate.instance
-            .applyNotifiableDeltas(unreadDeltas);
-      }
-      if (needsOutOfWindowUnreadRefresh) {
-        ConversationUnreadAggregate.instance.scheduleRefresh(
-          reason: 'apply_out_of_window',
-        );
-      }
+      commitUnreadProjection();
       return;
     }
     ConversationPinFlickerLog.log(
@@ -3394,16 +4394,13 @@ class ConversationListNotifier extends ChangeNotifier {
       },
     );
     _conversations = next;
+    _rebuildConversationIndex();
     _bumpRevisionsForChange(orderOrMembershipChanged: orderChanged);
-    _notifyIfAllowed(reason: deferring ? 'apply_store_defer' : 'apply_store');
-    if (unreadDeltas.isNotEmpty) {
-      ConversationUnreadAggregate.instance.applyNotifiableDeltas(unreadDeltas);
-    }
-    if (needsOutOfWindowUnreadRefresh) {
-      ConversationUnreadAggregate.instance.scheduleRefresh(
-        reason: 'apply_out_of_window',
-      );
-    }
+    _notifyIfAllowed(
+      reason: deferring ? 'apply_store_defer' : 'apply_store',
+      contentOnly: !orderChanged && deletedSet.isEmpty,
+    );
+    commitUnreadProjection();
   }
 
   static bool _sameConversationOrder(
@@ -3583,6 +4580,13 @@ class ConversationListNotifier extends ChangeNotifier {
     _activeChatUiNotifyMaxDeferTimer = null;
     _uiNotifyPendingWhileActiveChat = false;
 
+    // SQLite committed while Chat was foregrounded; only this in-memory list
+    // projection was deferred. The registry has already released the chat by
+    // this point, so publish its final rows once before the feed catch-up.
+    ConversationTabStore.instance.flushDeferredCommittedProjection(
+      reason: reason,
+    );
+
     if (!ConversationPerfFlags.chatLeavePatchLeftOnlyEnabled) {
       flushDeferredUiNotifyIfNeeded(reason: reason);
       return true;
@@ -3622,7 +4626,7 @@ class ConversationListNotifier extends ChangeNotifier {
       }
       if (local != null) {
         try {
-          await applyConversationsFromStore(upserted: [local]);
+          await _applyConversationsFromStore(upserted: [local]);
         } catch (e, st) {
           debugPrint('patchConversationAfterChatLeave apply failed: $e\n$st');
         }
@@ -3740,7 +4744,7 @@ class ConversationListNotifier extends ChangeNotifier {
           caller: 'active_chat_dirty_catch_up',
         );
         if (rows.isNotEmpty) {
-          await applyConversationsFromStore(upserted: rows);
+          await _applyConversationsFromStore(upserted: rows);
         }
         if (end < dirty.length) {
           await Future<void>.delayed(Duration.zero);
@@ -3816,6 +4820,7 @@ class ConversationListNotifier extends ChangeNotifier {
   void _emitUiNotifyOrDefer({
     required String reason,
     bool coalesced = false,
+    bool contentOnly = false,
   }) {
     if (ConversationPerfFlags.deferUiNotifyWhileFeedScrolling &&
         _isFeedScrollingNow) {
@@ -3830,7 +4835,9 @@ class ConversationListNotifier extends ChangeNotifier {
       );
       return;
     }
-    if (ConversationPerfFlags.deferUiNotifyWhileActiveChat && _hasOpenChatNow) {
+    if (!contentOnly &&
+        ConversationPerfFlags.deferUiNotifyWhileActiveChat &&
+        _hasOpenChatNow) {
       _uiNotifyPendingWhileActiveChat = true;
       _armActiveChatUiNotifyMaxDefer();
       ConversationPinFlickerLog.log(
@@ -3838,6 +4845,7 @@ class ConversationListNotifier extends ChangeNotifier {
         extras: <String, Object?>{
           'reason': reason,
           'coalesced': coalesced,
+          'contentOnly': contentOnly,
         },
       );
       ConversationPerfGateLog.log(
@@ -3860,7 +4868,7 @@ class ConversationListNotifier extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _notifyIfAllowed({String reason = 'unknown'}) {
+  void _notifyIfAllowed({String reason = 'unknown', bool contentOnly = false}) {
     if (_notifySuppressDepth > 0) {
       _notifyPendingWhileSuppressed = true;
       ConversationPinFlickerLog.log(
@@ -3873,26 +4881,36 @@ class ConversationListNotifier extends ChangeNotifier {
       return;
     }
     // 置顶重排需要即时反馈；其余写库路径合并到下一帧附近。
-    if (reason == 'apply_store' ||
-        reason == 'apply_store_defer' ||
-        reason == 'reload_from_local' ||
-        reason == 'end_suppress') {
+    if (!contentOnly &&
+        (reason == 'apply_store' ||
+            reason == 'apply_store_defer' ||
+            reason == 'reload_from_local' ||
+            reason == 'end_suppress')) {
       _scheduleCoalescedNotify(reason);
       return;
     }
     // 触底/近顶翻页：短窗合并 structure notify，压连滑风暴。
-    if (ConversationPerfFlags.appendUiNotifyCoalesceEnabled &&
+    if (!contentOnly &&
+        ConversationPerfFlags.appendUiNotifyCoalesceEnabled &&
         (reason == 'append_older' ||
             reason == 'prepend_newer' ||
             reason == 'restore_hot_head_phase2')) {
       _scheduleCoalescedNotify(reason);
       return;
     }
-    // hydrate / last_message 等也走 defer 出口，避免 Chat 页刷离屏 Feed。
-    _emitUiNotifyOrDefer(reason: reason, coalesced: false);
+    _emitUiNotifyOrDefer(
+      reason: reason,
+      coalesced: false,
+      contentOnly: contentOnly,
+    );
   }
 
   void clearSession() {
+    _sessionGeneration++;
+    _reloadInFlight = null;
+    _reloadDirty = false;
+    _reloadDirtyReason = null;
+    _uiPageLoadInFlight = null;
     if (_tabStoreBridgeAttached) {
       ConversationTabStore.instance.removeListener(_onTabStoreChanged);
       _tabStoreBridgeAttached = false;
@@ -3925,16 +4943,22 @@ class ConversationListNotifier extends ChangeNotifier {
     _storeHasAnyRow = false;
     _slidingWindowUserExpanded = false;
     _typeAppendConsumed.clear();
+    _typePageCursors.clear();
+    _clearTypePageAnchors();
     _typeTotalCount[1] = 0;
     _typeTotalCount[2] = 0;
     _typeHydrateStart[1] = 0;
     _typeHydrateStart[2] = 0;
     _typeHydrate[1] = const <V2TimConversation>[];
     _typeHydrate[2] = const <V2TimConversation>[];
+    _typeHydrateIndexByCanonical[1]?.clear();
+    _typeHydrateIndexByCanonical[2]?.clear();
+    _conversationIndexByCanonical.clear();
     _clearTypeIndexSnapshotCache();
     _hydrateRequestSerial++;
     _viewportAnchorConversationId = null;
     _hotHeadPhase2Generation++;
+    ConversationUnreadGuard.clearAllOptimisticUnread();
     ConversationUnreadAggregate.instance.clearSession();
     _structureRevision = 0;
     _contentRevision = 0;
@@ -3950,6 +4974,23 @@ class ConversationListNotifier extends ChangeNotifier {
   }
 
   void zeroUnreadLocally(String conversationID) {
+    ConversationUnreadGuard.clearOptimisticUnread(conversationID);
+    var sdkTabStoreCleared = false;
+    if (ConversationPerfFlags.conversationListSdkPrimary) {
+      final target = conversationID.trim();
+      sdkTabStoreCleared = const [1, 2].any(
+        (type) => ConversationTabStore.instance.itemsForType(type).any(
+              (row) =>
+                  MessageConversationId.sameConversation(
+                      row.conversationID, target) &&
+                  (row.unreadCount ?? 0) > 0,
+            ),
+      );
+      ConversationTabStore.instance.zeroUnreadLocallyMany([conversationID]);
+      // Keep the legacy mirror coherent for embedded/compatibility consumers.
+      // TabStore owns the aggregate delta when it actually contains the row;
+      // this mirror must not submit a second delta for the same conversation.
+    }
     final id = conversationID.trim();
     if (id.isEmpty || _conversations.isEmpty) {
       ConversationUnreadTrace.log(
@@ -3961,6 +5002,7 @@ class ConversationListNotifier extends ChangeNotifier {
     }
     var changed = false;
     var unreadBefore = 0;
+    ConversationUnreadDelta? unreadDelta;
     final next = List<V2TimConversation>.from(_conversations);
     for (var i = 0; i < next.length; i++) {
       if (!MessageConversationId.sameConversation(next[i].conversationID, id)) {
@@ -3970,6 +5012,18 @@ class ConversationListNotifier extends ChangeNotifier {
         continue;
       }
       unreadBefore = next[i].unreadCount ?? 0;
+      final oldNotifiable =
+          ConversationUnreadUtils.notifiableUnreadCount(next[i]);
+      if (!ConversationPerfFlags.conversationListSdkPrimary ||
+          !sdkTabStoreCleared) {
+        if (unreadDelta == null && oldNotifiable > 0) {
+          unreadDelta = ConversationUnreadDelta(
+            isGroup: _isGroupConversation(next[i]),
+            oldNotifiable: oldNotifiable,
+            newNotifiable: 0,
+          );
+        }
+      }
       next[i].unreadCount = 0;
       changed = true;
     }
@@ -4001,6 +5055,14 @@ class ConversationListNotifier extends ChangeNotifier {
       unreadBefore: unreadBefore,
       unreadAfter: 0,
     );
+    final delta = unreadDelta;
+    if (delta != null) {
+      // 与批量清零保持同一提交语义：会话行和底部 Tab 角标同帧更新，
+      // Store 扫描只承担最终校准，不能成为即时 UI 的第二套真相。
+      ConversationUnreadAggregate.instance.applyNotifiableDeltas(
+        <ConversationUnreadDelta>[delta],
+      );
+    }
     ConversationUnreadAggregate.instance.scheduleRefresh(reason: 'zero_unread');
   }
 
@@ -4009,8 +5071,19 @@ class ConversationListNotifier extends ChangeNotifier {
     Iterable<String> conversationIds, {
     bool forceAggregateRefresh = false,
   }) {
+    final idsToClear = conversationIds.toList(growable: false);
+    ConversationUnreadGuard.clearOptimisticUnreadMany(idsToClear);
+    if (ConversationPerfFlags.conversationListSdkPrimary) {
+      ConversationTabStore.instance.zeroUnreadLocallyMany(idsToClear);
+      if (forceAggregateRefresh) {
+        ConversationUnreadAggregate.instance.scheduleRefresh(
+          reason: 'zero_unread_many_sdk_primary',
+        );
+      }
+      return;
+    }
     final idSet =
-        conversationIds.map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
+        idsToClear.map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
     if (idSet.isEmpty) {
       if (forceAggregateRefresh) {
         ConversationUnreadAggregate.instance.scheduleRefresh(
@@ -4020,6 +5093,7 @@ class ConversationListNotifier extends ChangeNotifier {
       return;
     }
     var changed = false;
+    final unreadDeltas = <ConversationUnreadDelta>[];
     if (_conversations.isNotEmpty) {
       final next = List<V2TimConversation>.from(_conversations);
       for (var i = 0; i < next.length; i++) {
@@ -4034,8 +5108,19 @@ class ConversationListNotifier extends ChangeNotifier {
         if (!hit || (next[i].unreadCount ?? 0) == 0) {
           continue;
         }
+        final oldNotifiable =
+            ConversationUnreadUtils.notifiableUnreadCount(next[i]);
         next[i].unreadCount = 0;
         changed = true;
+        if (oldNotifiable > 0) {
+          unreadDeltas.add(
+            ConversationUnreadDelta(
+              isGroup: _isGroupConversation(next[i]),
+              oldNotifiable: oldNotifiable,
+              newNotifiable: 0,
+            ),
+          );
+        }
         _patchTypeHydrateConversation(
           id,
           update: (current) {
@@ -4053,6 +5138,11 @@ class ConversationListNotifier extends ChangeNotifier {
         _bumpRevisionsForChange(orderOrMembershipChanged: false);
         _notifyIfAllowed();
       }
+    }
+    if (unreadDeltas.isNotEmpty) {
+      // 列表行已经同步清零，底部 Tab 角标也必须同帧扣减；数据库刷新
+      // 仍保留作为最终校准，避免异步刷新窗口内显示旧气泡。
+      ConversationUnreadAggregate.instance.applyNotifiableDeltas(unreadDeltas);
     }
     if (changed || forceAggregateRefresh) {
       ConversationUnreadAggregate.instance.scheduleRefresh(
@@ -4091,6 +5181,69 @@ class ConversationListNotifier extends ChangeNotifier {
     _notifyIfAllowed();
   }
 
+  /// 删除当前预览消息后立即回退可见行，不等待 SQLite 查询与 SDK 回调。
+  /// 仅当当前 lastMessage 命中被删标识时修改，避免删除历史消息误伤预览。
+  bool replaceLastMessageAfterDeleteLocally({
+    required String conversationID,
+    required Set<String> deletedMessageIds,
+    V2TimMessage? replacement,
+  }) {
+    final id = conversationID.trim();
+    final targets = deletedMessageIds
+        .map((value) => value.trim())
+        .where((value) => value.isNotEmpty)
+        .toSet();
+    if (id.isEmpty || targets.isEmpty) {
+      return false;
+    }
+
+    V2TimConversation? source;
+    for (final target in targets) {
+      final match = findConversationByLastMessageId(target);
+      if (match != null &&
+          MessageConversationId.sameConversation(match.conversationID, id)) {
+        source = match;
+        break;
+      }
+    }
+    if (source == null) {
+      return false;
+    }
+
+    final patched = _cloneConversationWithPin(
+      source,
+      isPinned: source.isPinned == true,
+    )..lastMessage = replacement;
+    final next = List<V2TimConversation>.from(_conversations);
+    var legacyChanged = false;
+    for (var index = 0; index < next.length; index++) {
+      if (!MessageConversationId.sameConversation(
+        next[index].conversationID,
+        source.conversationID,
+      )) {
+        continue;
+      }
+      next[index] = patched;
+      legacyChanged = true;
+      break;
+    }
+    if (legacyChanged) {
+      _conversations = next;
+      _rebuildConversationIndex();
+      _syncTypeHydrateRowFromApplied(row: patched, reorder: false);
+      _bumpRevisionsForChange(orderOrMembershipChanged: false);
+      _notifyIfAllowed(reason: 'last_message_delete_optimistic');
+    }
+    if (ConversationPerfFlags.conversationListSdkPrimary) {
+      ConversationTabStore.instance.applyPatches(
+        <V2TimConversation>[patched],
+        reason: 'last_message_delete_optimistic',
+        explicitLastMessageIds: <String>{source.conversationID},
+      );
+    }
+    return legacyChanged || ConversationPerfFlags.conversationListSdkPrimary;
+  }
+
   /// 内存会话窗内按 lastMessage msgID/clientId 查找（撤回补偿：Store 可能滞后）。
   V2TimConversation? findConversationByLastMessageId(String msgID) {
     final target = msgID.trim();
@@ -4099,7 +5252,7 @@ class ConversationListNotifier extends ChangeNotifier {
     }
     for (final conversation in _conversations) {
       final last = conversation.lastMessage;
-      if (last != null && lastMessageMatchesRevokeTarget(last, target)) {
+      if (last != null && _messageMatchesAnyLocalId(last, target)) {
         return conversation;
       }
     }
@@ -4108,13 +5261,24 @@ class ConversationListNotifier extends ChangeNotifier {
         for (final conversation
             in ConversationTabStore.instance.itemsForType(type)) {
           final last = conversation.lastMessage;
-          if (last != null && lastMessageMatchesRevokeTarget(last, target)) {
+          if (last != null && _messageMatchesAnyLocalId(last, target)) {
             return conversation;
           }
         }
       }
     }
     return null;
+  }
+
+  static bool _messageMatchesAnyLocalId(
+    V2TimMessage message,
+    String target,
+  ) {
+    if (lastMessageMatchesRevokeTarget(message, target)) {
+      return true;
+    }
+    final localId = message.id?.toString().trim() ?? '';
+    return localId.isNotEmpty && localId == target;
   }
 
   /// True if [index] must move under [ConversationLocalStore.compareConversationsForUi].
@@ -4155,14 +5319,81 @@ class ConversationListNotifier extends ChangeNotifier {
     bool bumpUnread = false,
   }) {
     final id = conversationID.trim();
-    if (id.isEmpty || _conversations.isEmpty) {
+    if (id.isEmpty) {
       OutgoingVisibleProbe.log(
         'preview_apply_skip',
         conversationID: id,
         message: message,
         extras: <String, Object?>{
-          'reason': id.isEmpty ? 'empty_id' : 'empty_list',
+          'reason': 'empty_id',
         },
+      );
+      return;
+    }
+    if (_conversations.isEmpty &&
+        ConversationPerfFlags.conversationListSdkPrimary) {
+      for (final type in const [1, 2]) {
+        final row = ConversationTabStore.instance.itemsForType(type).where(
+              (candidate) => MessageConversationId.sameConversation(
+                  candidate.conversationID, id),
+            );
+        if (row.isEmpty) continue;
+        final existing = row.first;
+        final preferred = ConversationLastMessagePrefer.preferLastMessage(
+          existing: existing.lastMessage,
+          incoming: message,
+        );
+        if (preferred == null ||
+            !ConversationUnreadGuard.lastMessageAdvanced(
+              before: existing.lastMessage,
+              after: preferred,
+            )) {
+          return;
+        }
+        final patched = _cloneConversationWithPin(
+          existing,
+          isPinned: existing.isPinned == true,
+          orderkey: (preferred.timestamp ?? 0) > 0
+              ? preferred.timestamp
+              : existing.orderkey,
+        );
+        patched.lastMessage = preferred;
+        final oldNotifiable = _notifiableUnreadForRow(existing);
+        if (bumpUnread &&
+            ConversationUnreadGuard.shouldOptimisticBumpUnread(
+              conversationId: id,
+              message: message,
+            )) {
+          patched.unreadCount = (patched.unreadCount ?? 0) + 1;
+          ConversationUnreadGuard.recordOptimisticUnread(
+            conversationId: id,
+            message: message,
+            unreadCount: patched.unreadCount ?? 0,
+          );
+        }
+        ConversationTabStore.instance.applyPatches(
+          <V2TimConversation>[patched],
+          reason: 'last_message_local',
+        );
+        final newNotifiable = _notifiableUnreadForRow(patched);
+        if (oldNotifiable != newNotifiable) {
+          ConversationUnreadAggregate.instance.applyNotifiableDeltas(
+            <ConversationUnreadDelta>[
+              ConversationUnreadDelta(
+                isGroup: type == 2,
+                oldNotifiable: oldNotifiable,
+                newNotifiable: newNotifiable,
+              ),
+            ],
+          );
+        }
+        return;
+      }
+      OutgoingVisibleProbe.log(
+        'preview_apply_skip',
+        conversationID: id,
+        message: message,
+        extras: <String, Object?>{'reason': 'empty_legacy_list'},
       );
       return;
     }
@@ -4211,6 +5442,11 @@ class ConversationListNotifier extends ChangeNotifier {
             message: message,
           )) {
         next[i].unreadCount = (next[i].unreadCount ?? 0) + 1;
+        ConversationUnreadGuard.recordOptimisticUnread(
+          conversationId: id,
+          message: message,
+          unreadCount: next[i].unreadCount ?? 0,
+        );
         final newNotifiable = _notifiableUnreadForRow(next[i]);
         if (oldNotifiable != newNotifiable) {
           unreadDelta = ConversationUnreadDelta(
@@ -4249,7 +5485,8 @@ class ConversationListNotifier extends ChangeNotifier {
     final patchedUnread = unreadDelta != null
         ? next
             .firstWhere(
-              (c) => MessageConversationId.sameConversation(c.conversationID, id),
+              (c) =>
+                  MessageConversationId.sameConversation(c.conversationID, id),
             )
             .unreadCount
         : null;
@@ -4292,7 +5529,10 @@ class ConversationListNotifier extends ChangeNotifier {
           .applyNotifiableDeltas(<ConversationUnreadDelta>[unreadDelta]);
     }
     _bumpRevisionsForChange(orderOrMembershipChanged: needsReorder);
-    _notifyIfAllowed(reason: 'last_message_local');
+    _notifyIfAllowed(
+      reason: 'last_message_local',
+      contentOnly: !needsReorder,
+    );
   }
 
   int _notifiableUnreadForRow(V2TimConversation conversation) {
@@ -4320,7 +5560,25 @@ class ConversationListNotifier extends ChangeNotifier {
 
   @visibleForTesting
   void setConversationsForTest(List<V2TimConversation> conversations) {
+    _coalescedNotifyTimer?.cancel();
+    _coalescedNotifyTimer = null;
+    _coalescedNotifyReason = null;
+    _scrollUiNotifyMaxDeferTimer?.cancel();
+    _scrollUiNotifyMaxDeferTimer = null;
+    _activeChatUiNotifyMaxDeferTimer?.cancel();
+    _activeChatUiNotifyMaxDeferTimer = null;
+    _deferredPinReorderTimer?.cancel();
+    _deferredPinReorderTimer = null;
+    _activeChatDirtyCatchUpTimer?.cancel();
+    _activeChatDirtyCatchUpTimer = null;
+    _notifySuppressDepth = 0;
+    _notifyPendingWhileSuppressed = false;
+    _uiNotifyPendingWhileScrolling = false;
+    _uiNotifyPendingWhileActiveChat = false;
+    _activeChatDirtyIds.clear();
     _conversations = List<V2TimConversation>.from(conversations);
+    _rebuildConversationIndex();
+    _canonicalLookupFallbacks = 0;
     _structureRevision = 0;
     _contentRevision = 0;
     _lastPeerDisplayAppliedRevision = -1;
@@ -4454,9 +5712,36 @@ class ConversationListNotifier extends ChangeNotifier {
   }
 
   /// 会话行 UI 指纹：未变时可跳过行重建，避免空刷打断手势。
+  /// 改为 int hash 替代字符串拼接，避免每行每次重建分配 15 段字符串。
   /// 有活跃时间时忽略 orderkey 抖动（SDK 回写常改 orderkey 但不改视觉序）。
   /// 必须含 lastMessage.status，否则 SENDING→SUCC 同 msgID 会被判等跳过。
   /// C2C 追加 DisplayNameStore 片段：备注写入 Store 后即使 showName 未变也能失效行缓存。
+  static int conversationUiFingerprintHash(V2TimConversation conversation) {
+    final lastMessage = conversation.lastMessage;
+    final activeMs = ConversationLocalStore.activeTimeMs(conversation);
+    final orderKey = activeMs > 0 ? 0 : (conversation.orderkey ?? 0);
+    return Object.hash(
+      conversation.conversationID,
+      conversation.unreadCount ?? 0,
+      conversation.isPinned == true,
+      conversation.recvOpt ?? 0,
+      orderKey,
+      activeMs,
+      lastMessage?.msgID?.trim() ?? '',
+      lastMessage?.status ?? -1,
+      lastMessage?.isPeerRead == true,
+      revokedLastMessageFingerprint(lastMessage),
+      _lastMessagePreviewFingerprint(lastMessage),
+      conversation.showName?.trim() ?? '',
+      conversation.faceUrl?.trim() ?? '',
+      conversation.draftText?.trim() ?? '',
+      c2cDisplayNameStoreFragment(conversation),
+    );
+  }
+
+  /// Legacy string-based fingerprint. Kept for backwards compatibility
+  /// but the hash version [conversationUiFingerprintHash] is preferred
+  /// in hot paths.
   static String conversationUiFingerprint(V2TimConversation conversation) {
     final lastMessage = conversation.lastMessage;
     final lastMsgId = lastMessage?.msgID?.trim() ?? '';
@@ -4488,28 +5773,7 @@ class ConversationListNotifier extends ChangeNotifier {
   ///
   /// 只读取列表摘要所需的轻量字段，避免热路径序列化整条消息 JSON。
   static String _lastMessagePreviewFingerprint(V2TimMessage? message) {
-    if (message == null) {
-      return '';
-    }
-    final groupTips = message.groupTipsElem;
-    return Object.hash(
-      message.elemType,
-      message.textElem?.text?.trim() ?? '',
-      message.customElem?.data?.trim() ?? '',
-      message.customElem?.desc?.trim() ?? '',
-      message.faceElem?.data?.trim() ?? '',
-      message.sender?.trim() ?? '',
-      message.nickName?.trim() ?? '',
-      message.nameCard?.trim() ?? '',
-      groupTips?.type,
-      groupTips?.groupID.trim() ?? '',
-      groupTips?.opMember.userID?.trim() ?? '',
-      groupTips?.memberList
-              ?.map((member) => member?.userID?.trim() ?? '')
-              .join(',') ??
-          '',
-      message.revokeReason?.trim() ?? '',
-    ).toString();
+    return GroupTipsMessageHelper.contentFingerprint(message);
   }
 
   /// 仅 C2C 读取 DisplayNameStore（O(1) Map），群会话返回空串。
@@ -4713,8 +5977,22 @@ class ConversationListNotifier extends ChangeNotifier {
     required String conversationID,
     required String showName,
   }) {
+    final id = conversationID.trim();
+    final name = showName.trim();
+    if (id.isEmpty || name.isEmpty) {
+      return;
+    }
+    for (final conversation in _conversations) {
+      if (MessageConversationId.sameConversation(
+            conversation.conversationID,
+            id,
+          ) &&
+          (conversation.showName?.trim() ?? '') == name) {
+        return;
+      }
+    }
     applyC2cShowNamesBatch(<String, String>{
-      conversationID.trim(): showName.trim(),
+      id: name,
     });
   }
 

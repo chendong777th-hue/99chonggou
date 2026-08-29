@@ -167,33 +167,8 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
   static const int _minFaceMessageSendIntervalMs = 350;
   List<CustomStickerPackage> stickerPackageList = [];
   Timer? _keyboardGeometrySyncTimer;
-  int _inputDiagSeq = 0;
   final GlobalKey<TIMUIKitTextFieldLayoutNarrowState> _narrowTextFieldKey =
       GlobalKey<TIMUIKitTextFieldLayoutNarrowState>();
-
-  String _diagText(String text) {
-    final clipped = text.length > 120 ? '${text.substring(0, 120)}…' : text;
-    final escaped = clipped
-        .replaceAll('\\', '\\\\')
-        .replaceAll('\n', '\\n')
-        .replaceAll('\r', '\\r')
-        .replaceAll('\t', '\\t');
-    final codes = clipped.runes
-        .map((r) => 'U+${r.toRadixString(16).toUpperCase().padLeft(4, '0')}')
-        .join(',');
-    return 'text="$escaped" codes=[$codes]';
-  }
-
-  void _inputDiag(String event, {String? extra}) {
-    final value = textEditingController.value;
-    final composing = value.composing;
-    print('[ChatInputDiag] seq=${++_inputDiagSeq} event=$event '
-        'conv=${widget.conversationID} focus=${focusNode.hasFocus} '
-        'len=${value.text.length} sel=${value.selection.baseOffset},${value.selection.extentOffset} '
-        'composing=${composing.start},${composing.end} '
-        '${_diagText(value.text)} isComposing=$_isComposingText '
-        '${extra ?? ''}');
-  }
 
   generateStickerList() {
     if (widget.customStickerPanel != null) {
@@ -264,13 +239,21 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
 
   /// 更新输入框内容时一次性提交 text/selection/composing，避免 iOS 中文输入法
   /// 在拼音组合期间收到“先改 text、再改 selection”的两次状态同步后切换输入模式。
-  void _setProgrammaticText(String text, {int? selectionOffset}) {
+  void _setProgrammaticText(
+    String text, {
+    int? selectionOffset,
+    bool notifyChanged = true,
+  }) {
+    final previousText = textEditingController.text;
     final offset = (selectionOffset ?? text.length).clamp(0, text.length);
     textEditingController.value = TextEditingValue(
       text: text,
       selection: TextSelection.collapsed(offset: offset),
       composing: TextRange.empty,
     );
+    if (notifyChanged && previousText != text) {
+      widget.onChanged?.call(text);
+    }
   }
 
   RegExp emojiRegex() => RegExp(
@@ -410,6 +393,10 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
             context);
       }
       textEditingController.clear();
+      // Controller mutations do not invoke TextField.onChanged. Notify the
+      // host explicitly so its local draft is cleared at send intent instead
+      // of waiting for the asynchronous messageDidSend callback.
+      widget.onChanged?.call("");
       goDownBottom(fromOutgoingSend: true);
     }
     currentCursor = null;
@@ -471,9 +458,6 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
   }
 
   onSubmitted() async {
-    _inputDiag('submit_start',
-        extra: 'textNonEmpty=${textEditingController.text.trim().isNotEmpty} '
-            'trimmed=${_diagText(textEditingController.text.trim())}');
     conversationModel.clearWebDraft(conversationID: widget.conversationID);
     lastText = "";
     final text = textEditingController.text.trim();
@@ -500,7 +484,7 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
             context);
       }
       textEditingController.clear();
-      _inputDiag('submit_cleared');
+      widget.onChanged?.call("");
       currentCursor = null;
       lastText = "";
       mentionedMembersMap = {};
@@ -1091,7 +1075,7 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
     textEditingController =
         widget.controller?.textEditingController ?? TextEditingController();
     if (widget.initText != null) {
-      _setProgrammaticText(widget.initText!);
+      _setProgrammaticText(widget.initText!, notifyChanged: false);
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _narrowTextFieldKey.currentState?.setSendButton();
       });
@@ -1107,10 +1091,7 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
       } else {
         _isComposingText = nextComposing;
       }
-      _inputDiag('controller_value', extra: 'isComposing=$_isComposingText');
     });
-    focusNode.addListener(() => _inputDiag('focus_changed'));
-    _inputDiag('init');
     generateStickerList();
   }
 
@@ -1123,7 +1104,11 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
       return;
     } else if (actionType == ActionType.setTextField) {
       final newText = widget.controller?.inputText ?? "";
-      _setProgrammaticText(newText);
+      _setProgrammaticText(
+        newText,
+        notifyChanged: widget.controller?.notifyOnSetTextField ?? true,
+      );
+      widget.controller?.notifyOnSetTextField = true;
       lastText = textEditingController.text;
       focusNode.requestFocus();
       _narrowTextFieldKey.currentState?.setSendButton();
@@ -1162,14 +1147,14 @@ class _InputTextFieldState extends TIMUIKitState<TIMUIKitInputTextField> {
           convType: oldWidget.conversationType,
           groupID: oldWidget.groupID);
       if (oldWidget.initText != widget.initText) {
-        _setProgrammaticText(widget.initText ?? "");
+        _setProgrammaticText(widget.initText ?? "", notifyChanged: false);
       } else {
-        _setProgrammaticText("");
+        _setProgrammaticText("", notifyChanged: false);
       }
     }
     if (widget.initText != oldWidget.initText) {
       final nextText = widget.initText ?? "";
-      _setProgrammaticText(nextText);
+      _setProgrammaticText(nextText, notifyChanged: false);
       if (TencentUtils.checkString(nextText) != null) {
         focusNode.requestFocus();
       }

@@ -8,6 +8,45 @@ class HistoryPaginationLoadRunner {
   final TUIChatSeparateViewModel model;
   final HistoryPaginationController pagination;
 
+  MessageHistoryBounds _returnedBounds(Iterable<V2TimMessage> messages) {
+    V2TimMessage? oldest;
+    V2TimMessage? newest;
+    for (final message in messages) {
+      if ((message.msgID?.trim() ?? '').isEmpty) continue;
+      if (oldest == null ||
+          TUIChatGlobalModel.compareMessagesChronological(message, oldest) <
+              0) {
+        oldest = message;
+      }
+      if (newest == null ||
+          TUIChatGlobalModel.compareMessagesChronological(message, newest) >
+              0) {
+        newest = message;
+      }
+    }
+    return MessageHistoryBounds(
+      oldestMsgID: oldest?.msgID,
+      newestMsgID: newest?.msgID,
+      oldestSeq: int.tryParse(oldest?.seq?.trim() ?? ''),
+      newestSeq: int.tryParse(newest?.seq?.trim() ?? ''),
+    );
+  }
+
+  MessageHistoryCursor? _requestedCursor({
+    required LoadDirection direction,
+    required String? lastMsgID,
+    required int lastMsgSeq,
+  }) {
+    if (lastMsgID == null && lastMsgSeq <= 0) return null;
+    return MessageHistoryCursor(
+      direction: direction == LoadDirection.latest
+          ? MessageHistoryCursorDirection.newer
+          : MessageHistoryCursorDirection.older,
+      lastMsgID: lastMsgID,
+      lastMsgSeq: lastMsgSeq > 0 ? lastMsgSeq : null,
+    );
+  }
+
   Future<bool> loadChatRecord({
     HistoryMsgGetTypeEnum? getType,
     int lastMsgSeq = -1,
@@ -23,6 +62,17 @@ class HistoryPaginationLoadRunner {
       lastMsgID: lastMsgID,
       direction: direction,
     );
+    // Re-arm haveMoreData if the empty-batch latch has expired (30s).
+    if (direction == LoadDirection.previous &&
+        !pagination.haveMoreData &&
+        pagination.emptyBatchLatchExpired) {
+      pagination.haveMoreData = true;
+      pagination.lastEmptyBatchAt = null;
+      ChatHistoryTrace.log(
+        'load_chat_record_empty_batch_retry',
+        conversationID: model.conversationID,
+      );
+    }
     if (pagination.historyLoadingKeys.contains(requestKey)) {
       ChatHistoryTrace.log(
         'load_chat_record_deduped',
@@ -39,6 +89,28 @@ class HistoryPaginationLoadRunner {
     }
     final isPreviousPagination = (lastMsgID != null || lastMsgSeq > 0) &&
         direction == LoadDirection.previous;
+    ChatHistoryTrace.log(
+      'load_chat_record_start',
+      conversationID: model.conversationID,
+      extras: <String, Object?>{
+        'direction': direction.name,
+        'getType': getType?.name,
+        'lastMsgID': lastMsgID,
+        'lastMsgSeq': lastMsgSeq,
+        'count': count,
+        'forceReloadNewest': forceReloadNewest,
+        'requestKey': requestKey,
+        'isPaginated': isPreviousPagination,
+        'haveMoreData': pagination.haveMoreData,
+        'emptyBatchAt': pagination.lastEmptyBatchAt?.toIso8601String(),
+        'position':
+            model.globalModel.getMessageListPosition(model.conversationID).name,
+        ...ChatHistoryTrace.windowSummary(
+          _aliasAwareInMemoryList(model),
+          prefix: 'memory',
+        ),
+      },
+    );
     if (isPreviousPagination && pagination.previousPaginationInFlight) {
       ChatHistoryTrace.log(
         'load_chat_record_previous_in_flight',
@@ -59,6 +131,8 @@ class HistoryPaginationLoadRunner {
       pagination.previousPaginationInFlight = true;
     }
     final windowGenAtStart = model._historyWindowGeneration;
+    MessageReconciliationRequest? reconciliationRequest;
+    var reconciliationCommitted = false;
     try {
       var previousListGrew = false;
       final isPaginatedLoad =
@@ -131,6 +205,13 @@ class HistoryPaginationLoadRunner {
           (direction == LoadDirection.previous
               ? HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_OLDER_MSG
               : HistoryMsgGetTypeEnum.V2TIM_GET_CLOUD_NEWER_MSG);
+      final requestedHistorySource = resolvedGetType ==
+                  HistoryMsgGetTypeEnum.V2TIM_GET_LOCAL_OLDER_MSG ||
+              resolvedGetType == HistoryMsgGetTypeEnum.V2TIM_GET_LOCAL_NEWER_MSG
+          ? MessageReconciliationSource.local
+          : MessageReconciliationSource.cloud;
+      final networkBeforeHistoryRequest =
+          model.globalModel.messageReconciliationNetworkState;
 
       final String? historyUserID =
           model.conversationType == ConvType.c2c ? model.conversationID : null;
@@ -153,10 +234,17 @@ class HistoryPaginationLoadRunner {
         // C2C / 群聊只走 IM 云端，不进自建归档。
         return await _loadArchiveOlderHistory(count: count);
       }
-      final useC2cCloudOnly = model.usesOfficialSdkHistory &&
+      reconciliationRequest = model.globalModel.beginHistoryReconciliation(
+        conversationID: model.conversationID,
+        requestedSource: requestedHistorySource,
+        networkState: networkBeforeHistoryRequest,
+      );
+      final useOfficialCloudOnly = model.usesOfficialSdkHistory &&
           direction == LoadDirection.previous &&
           !forceReloadNewest;
-      if (useC2cCloudOnly || (getType == null && isPreviousPagination)) {
+      final useC2cOlderCursor =
+          useOfficialCloudOnly && model.conversationType == ConvType.c2c;
+      if (useOfficialCloudOnly || (getType == null && isPreviousPagination)) {
         var effectiveLastMsgID = lastMsgID;
         var effectiveLastMsgSeq = lastMsgSeq;
         var effectiveAnchor = paginationAnchor;
@@ -194,7 +282,11 @@ class HistoryPaginationLoadRunner {
             return archiveGrew;
           }
         }
-        if (useC2cCloudOnly && isPreviousPagination) {
+        // The SDK tail cursor is only valid for C2C. Group message seq is a
+        // conversation-wide ordering key, so use the actual oldest group
+        // message passed by the list; applying a C2C tail to a group can move
+        // the cursor forward and return a page already in memory.
+        if (useC2cOlderCursor && isPreviousPagination) {
           final official = HistoryPaginationAnchor.c2cOfficialOlderCursor(
             newestFirstWindow: inMemoryAtRequest,
             lastSdkPageTail: model._c2cSdkOlderPageTail,
@@ -209,9 +301,7 @@ class HistoryPaginationLoadRunner {
               },
             );
             effectiveLastMsgID = official.msgID;
-            effectiveLastMsgSeq = model.conversationType == ConvType.group
-                ? int.tryParse(official.seq?.toString() ?? '') ?? -1
-                : -1;
+            effectiveLastMsgSeq = -1;
             effectiveAnchor = official;
           }
         } else if (effectiveAnchor != null &&
@@ -237,7 +327,7 @@ class HistoryPaginationLoadRunner {
           }
         }
 
-        final peekResult = useC2cCloudOnly
+        final peekResult = useOfficialCloudOnly
             ? await MessageHistoryPeekLoader.loadOlderCloudOnlyResult(
                 messageService: model._messageService,
                 count: count,
@@ -271,13 +361,21 @@ class HistoryPaginationLoadRunner {
             },
           );
           // SDK 已无更早消息，回退自建后端归档补拉冷历史（游标跳过 ce_*）。
-          final archiveGrew = await _loadArchiveOlderHistory(count: count);
-          if (archiveGrew) {
-            return true;
+          if (!model.usesOfficialSdkHistory) {
+            final archiveGrew = await _loadArchiveOlderHistory(count: count);
+            if (archiveGrew) {
+              return true;
+            }
           }
           // 本地注入消息不能作为 SDK 锚点；空批次在此场景下不代表云端无历史。
           if (!invalidAnchor) {
+            // Do not permanently latch haveMoreData=false on an empty batch.
+            // The empty result may be transient (SDK local DB not yet synced,
+            // network hiccup). Record the timestamp and allow retry after
+            // emptyBatchRetryWindow (30s). Only SDK isFinished=true sets
+            // the permanent archiveOlderExhausted latch.
             pagination.haveMoreData = false;
+            pagination.lastEmptyBatchAt = DateTime.now();
           }
           return false;
         }
@@ -316,8 +414,64 @@ class HistoryPaginationLoadRunner {
       }
 
       if (response == null) {
+        final provenance = MessageReconciliationProvenance.resolve(
+          requestedSource: requestedHistorySource,
+          beforeRequest: networkBeforeHistoryRequest,
+          afterResponse: model.globalModel.messageReconciliationNetworkState,
+        );
+        ChatHistoryTrace.log(
+          'history_response_provenance',
+          conversationID: model.conversationID,
+          extras: <String, Object?>{
+            'direction': direction.name,
+            'requestedSource': requestedHistorySource.name,
+            'actualSource': provenance.actualSource.name,
+            'networkState': provenance.networkState.name,
+            'cloudProven': provenance.cloudResponseProven,
+            'hasResponse': false,
+          },
+        );
+        ChatHistoryTrace.log(
+          'load_chat_record_response_empty',
+          conversationID: model.conversationID,
+          extras: <String, Object?>{
+            'direction': direction.name,
+            'lastMsgID': lastMsgID,
+            'lastMsgSeq': lastMsgSeq,
+            'isPaginated': isPaginatedLoad,
+          },
+        );
         return false;
       }
+      final responseProvenance = MessageReconciliationProvenance.resolve(
+        requestedSource: requestedHistorySource,
+        beforeRequest: networkBeforeHistoryRequest,
+        afterResponse: model.globalModel.messageReconciliationNetworkState,
+      );
+      ChatHistoryTrace.log(
+        'history_response_provenance',
+        conversationID: model.conversationID,
+        extras: <String, Object?>{
+          'direction': direction.name,
+          'requestedSource': requestedHistorySource.name,
+          'actualSource': responseProvenance.actualSource.name,
+          'networkState': responseProvenance.networkState.name,
+          'cloudProven': responseProvenance.cloudResponseProven,
+          'hasResponse': true,
+          'resultCount': response.messageList.length,
+          'isFinished': response.isFinished,
+          ...ChatHistoryTrace.windowSummary(
+            response.messageList,
+            prefix: 'response',
+          ),
+        },
+      );
+      final requestedCursor = _requestedCursor(
+        direction: direction,
+        lastMsgID: lastMsgID,
+        lastMsgSeq: lastMsgSeq,
+      );
+      final returnedBounds = _returnedBounds(response.messageList);
 
       // around / 搜索整窗替换后：丢弃替换前发起的在途翻页，防止旧最新页 baseline 污染。
       if (windowGenAtStart != model._historyWindowGeneration) {
@@ -395,32 +549,70 @@ class HistoryPaginationLoadRunner {
                 .toList(growable: false),
           );
           if (!canMerge) {
-            final existingNewestSeq =
-                mergeBase.isEmpty ? null : mergeBase.first.seq;
-            final incomingOldestSeq =
-                messageList.isEmpty ? null : messageList.last.seq;
+            final existingNewestTs =
+                mergeBase.isEmpty ? 0 : (mergeBase.first.timestamp ?? 0);
+            final incomingOldestTs =
+                messageList.isEmpty ? 0 : (messageList.last.timestamp ?? 0);
             ChatHistoryTrace.log(
-              'load_latest_rejected_non_contiguous',
+              'load_latest_rejected_direction_error',
               conversationID: model.conversationID,
               extras: <String, Object?>{
                 'mergeBaseCount': mergeBase.length,
                 'incomingCount': messageList.length,
-                'existingNewestSeq': existingNewestSeq,
-                'incomingOldestSeq': incomingOldestSeq,
+                'existingNewestTs': existingNewestTs,
+                'incomingOldestTs': incomingOldestTs,
                 'lastMsgID': lastMsgID,
                 'lastMsgSeq': lastMsgSeq,
               },
             );
-            // Keep prior window; leave tip-fill available for a later abutting page.
+            // Direction error only (incoming is older than existing newest).
+            // Keep prior window; leave tip-fill available for a later batch.
             pagination.haveMoreLatestData = true;
             model._notify();
             return false;
           }
           newList = _combineMessageList(messageList, mergeBase);
         } else {
+          // previous 方向：信任 SDK lastMsg 游标，不做 seq 邻接检查。
+          // dedupeMessages 处理 msgID 重叠。空洞由空洞检测处理（Phase 3）。
           newList = _combineMessageList(mergeBase, messageList);
         }
         if (direction == LoadDirection.previous) {
+          final currentOldest =
+              HistoryPaginationAnchor.oldestSdkPaginationAnchor(mergeBase);
+          final hasStrictlyOlderMessage = currentOldest == null ||
+              messageList.any(
+                (message) =>
+                    TUIChatGlobalModel.compareMessagesChronological(
+                      message,
+                      currentOldest,
+                    ) <
+                    0,
+              );
+          if (messageList.isNotEmpty && !hasStrictlyOlderMessage) {
+            final mismatchBounds = _returnedBounds(messageList);
+            ChatHistoryTrace.log(
+              'load_previous_direction_mismatch',
+              conversationID: model.conversationID,
+              extras: <String, Object?>{
+                'requestedLastMsgID': lastMsgID,
+                'requestedLastMsgSeq': lastMsgSeq,
+                'currentOldestMsgID': currentOldest.msgID,
+                'currentOldestSeq': currentOldest.seq,
+                'responseNewestMsgID': mismatchBounds.newestMsgID,
+                'responseNewestSeq': mismatchBounds.newestSeq,
+                'responseOldestMsgID': mismatchBounds.oldestMsgID,
+                'responseOldestSeq': mismatchBounds.oldestSeq,
+                'isFinished': response.isFinished,
+              },
+            );
+            // Keep the cursor retryable. A direction-mismatched page is not
+            // proof that history ended and must not consume the top reach.
+            pagination.haveMoreData = !response.isFinished;
+            tempHaveMoreData = pagination.haveMoreData;
+            model._notify();
+            return false;
+          }
           _logPreviousPaginationStage(
             model.conversationID,
             stage: 'after_combine',
@@ -497,9 +689,11 @@ class HistoryPaginationLoadRunner {
             },
           );
           // SDK 无新增（多为到达漫游底部），回退自建后端归档补拉。
-          final archiveGrew = await _loadArchiveOlderHistory(count: count);
-          if (archiveGrew) {
-            return true;
+          if (!model.usesOfficialSdkHistory) {
+            final archiveGrew = await _loadArchiveOlderHistory(count: count);
+            if (archiveGrew) {
+              return true;
+            }
           }
           pagination.haveMoreData = !response.isFinished;
           tempHaveMoreData = pagination.haveMoreData;
@@ -604,22 +798,64 @@ class HistoryPaginationLoadRunner {
           );
           return false;
         }
-        model.globalModel.setMessageList(
-          model.conversationID,
-          finalList,
-          needResetNewMessageCount: false,
-          replace: true,
-          // 用户上翻时宁可暂时持有完整窗口，也不能在锚点恢复前裁掉已见消息。
-          // 回到底部或退出历史阅读后由既有窗口策略统一收束。
+        final reconciliationCommit =
+            model.globalModel.completeHistoryReconciliation(
+          request: reconciliationRequest,
+          history: finalList,
+          actualSource: responseProvenance.actualSource,
+          networkState: responseProvenance.networkState,
+          // 上翻提交先保留完整窗口，待 UI 完成视口补偿后再按锚点收束。
+          // 旧契约要求此处明确区分 previous，搜索定位也因此不会丢目标行。
           applyMemoryWindow: direction != LoadDirection.previous,
           memoryWindowPreferLatest:
               direction == LoadDirection.latest || forceReloadNewest,
-          skipEquivalentHistoryWindow: true,
           historyCommitSource: direction.name,
+          batchKind: direction == LoadDirection.latest
+              ? MessageHistoryBatchKind.newerCatchUp
+              : MessageHistoryBatchKind.olderPage,
+          historyIsFinished: response.isFinished,
+          clearEpoch: model.globalModel
+                  .messageHistoryCoverageFor(model.conversationID)
+                  ?.clearEpoch ??
+              0,
+          requestedCursor: requestedCursor,
+          returnedBounds: returnedBounds,
+          cloudResponseProven: responseProvenance.cloudResponseProven,
+        );
+        if (reconciliationCommit == null) {
+          ChatHistoryTrace.log(
+            'history_commit_rejected',
+            conversationID: model.conversationID,
+            extras: <String, Object?>{
+              'direction': direction.name,
+              'batchKind': MessageHistoryBatchKind.olderPage.name,
+              'historyCount': finalList.length,
+              'baselineCount': previousPaginationBaseline.length,
+              'lastMsgID': lastMsgID,
+              'lastMsgSeq': lastMsgSeq,
+              'windowGeneration': windowGenAtStart,
+              'windowGenerationNow': model._historyWindowGeneration,
+            },
+          );
+          return false;
+        }
+        reconciliationCommitted = true;
+        ChatHistoryTrace.log(
+          'history_commit_applied',
+          conversationID: model.conversationID,
+          extras: <String, Object?>{
+            'direction': direction.name,
+            'batchKind': MessageHistoryBatchKind.olderPage.name,
+            'historyCount': finalList.length,
+            'baselineCount': previousPaginationBaseline.length,
+            'rawCount': model.globalModel.rawMessageCount(model.conversationID),
+            'lastMsgID': lastMsgID,
+            'lastMsgSeq': lastMsgSeq,
+          },
         );
         // 只有页面真正合并并写入权威列表后，才允许推进官方 SDK 分页游标。
         // 在途请求被窗口替换、去重无增长或提交失败时继续沿用原游标，避免跳页。
-        if (useC2cCloudOnly &&
+        if (useC2cOlderCursor &&
             direction == LoadDirection.previous &&
             previousListGrew) {
           model._rememberC2cSdkOlderPage(response.messageList);
@@ -666,15 +902,59 @@ class HistoryPaginationLoadRunner {
           conversationType: model.conversationType?.name ?? 'none',
         );
 
-        model.globalModel.setMessageList(
-          model.conversationID,
-          mergedList,
-          needResetNewMessageCount: false,
-          replace: true,
+        final reconciliationCommit =
+            model.globalModel.completeHistoryReconciliation(
+          request: reconciliationRequest,
+          history: model.usesOfficialSdkHistory ? receivedList : mergedList,
+          actualSource: responseProvenance.actualSource,
+          networkState: responseProvenance.networkState,
           memoryWindowPreferLatest:
               direction == LoadDirection.latest || forceReloadNewest,
-          skipEquivalentHistoryWindow: true,
           historyCommitSource: direction.name,
+          batchKind: MessageHistoryBatchKind.latestWindow,
+          historyIsFinished: response.isFinished,
+          clearEpoch: model.globalModel
+                  .messageHistoryCoverageFor(model.conversationID)
+                  ?.clearEpoch ??
+              0,
+          requestedCursor: requestedCursor,
+          returnedBounds: returnedBounds,
+          cloudResponseProven: responseProvenance.cloudResponseProven,
+        );
+        if (reconciliationCommit == null) {
+          ChatHistoryTrace.log(
+            'history_commit_rejected',
+            conversationID: model.conversationID,
+            extras: <String, Object?>{
+              'direction': direction.name,
+              'batchKind': MessageHistoryBatchKind.latestWindow.name,
+              'historyCount': model.usesOfficialSdkHistory
+                  ? receivedList.length
+                  : mergedList.length,
+              'existingCount': existingInMemory.length,
+              'lastMsgID': lastMsgID,
+              'lastMsgSeq': lastMsgSeq,
+              'windowGeneration': windowGenAtStart,
+              'windowGenerationNow': model._historyWindowGeneration,
+            },
+          );
+          return false;
+        }
+        reconciliationCommitted = true;
+        ChatHistoryTrace.log(
+          'history_commit_applied',
+          conversationID: model.conversationID,
+          extras: <String, Object?>{
+            'direction': direction.name,
+            'batchKind': MessageHistoryBatchKind.latestWindow.name,
+            'historyCount': model.usesOfficialSdkHistory
+                ? receivedList.length
+                : mergedList.length,
+            'existingCount': existingInMemory.length,
+            'rawCount': model.globalModel.rawMessageCount(model.conversationID),
+            'lastMsgID': lastMsgID,
+            'lastMsgSeq': lastMsgSeq,
+          },
         );
         if (forceReloadNewest) {
           model.globalModel.clearMemoryWindowMissingNewer(model.conversationID);
@@ -692,7 +972,15 @@ class HistoryPaginationLoadRunner {
         if (lastMsgID == null && lastMsgSeq <= 0 && mergedList.isNotEmpty) {
           // 首屏请求完成就放开渲染闸门；空结果不在此标记，避免离线登录同步未完成时误判。
           if (mergedList.length >= count || response.isFinished) {
-            model.globalModel.markInitialHistoryLoaded(model.conversationID);
+            if (responseProvenance.proofKind ==
+                MessageHistoryProofKind.serverContinuity) {
+              model.globalModel
+                  .markCloudInitialHistoryVerified(model.conversationID);
+            } else {
+              model.globalModel.markLocalInitialHistoryVisible(
+                model.conversationID,
+              );
+            }
           }
         }
       }
@@ -756,6 +1044,13 @@ class HistoryPaginationLoadRunner {
       outputLogger.i('loadChatRecord error: $e');
       return false;
     } finally {
+      final pendingReconciliation = reconciliationRequest;
+      if (pendingReconciliation != null && !reconciliationCommitted) {
+        model.globalModel.failHistoryReconciliation(
+          request: pendingReconciliation,
+          reason: 'history_request_not_committed',
+        );
+      }
       pagination.historyLoadingKeys.remove(requestKey);
       if (pagination.historyLoadingKeys.isEmpty) {
         model._notify();

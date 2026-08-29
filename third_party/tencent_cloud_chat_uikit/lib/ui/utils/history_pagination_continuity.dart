@@ -1,28 +1,30 @@
-/// Pure abutment checks for history pagination merges into an around-window.
+/// Continuity check for prepending a newer batch onto the existing window.
 ///
 /// Lists are **newest-first** (index 0 = newest), matching
 /// `TUIChatGlobalModel.sortMessagesNewestFirst` / in-memory chat lists.
+///
+/// Plan 097铁律：SDK 是唯一权威。应用层不做 seq 连续性判断，
+/// 不做时间窗邻接检查。`lastMsg` 游标天然无重复（SDK 返回不含 lastMsg
+/// 本身），`dedupeMessages` 处理 msgID 重叠。这里只拒绝时间方向错误的
+/// 批次（incoming 比 existing 更旧时不应 prepend 到 newer 端）。
 class HistoryPaginationContinuity {
   HistoryPaginationContinuity._();
 
-  /// Default max hole (seconds) allowed on C2C / seq-less join edges.
-  static const int defaultTimeAbutSec = 120;
-
   /// Whether [incomingNewerNewestFirst] may be prepended onto
-  /// [existingNewestFirst] without inventing a seq/time gap.
+  /// [existingNewestFirst].
   ///
   /// - Empty incoming → true (no-op merge).
   /// - Empty existing → true (replace/bootstrap).
-  /// - Overlap on seq at the join edge → true.
-  /// - Group-style positive seqs: existing newest seq must equal
-  ///   incoming oldest seq, or incoming oldest == existing newest + 1
-  ///   (incoming batch is strictly newer and contiguous).
-  /// - Else timestamps: incoming oldest timestamp >= existing newest
-  ///   timestamp, and delta <= [timeAbutSec] (unless overlap).
+  /// - Incoming oldest timestamp < existing newest timestamp → false
+  ///   (direction error: incoming batch is older, should not prepend to
+  ///   the newer side).
+  /// - Otherwise → true (trust SDK lastMsg cursor; dedupeMessages handles
+  ///   any overlap; C2C seq is per-sender and has no global continuity so
+  ///   seq checks are intentionally absent).
   static bool canPrependNewerBatch({
     required List<({int? seq, int? timestamp})> existingNewestFirst,
     required List<({int? seq, int? timestamp})> incomingNewerNewestFirst,
-    int timeAbutSec = defaultTimeAbutSec,
+    int timeAbutSec = 0,
   }) {
     if (incomingNewerNewestFirst.isEmpty || existingNewestFirst.isEmpty) {
       return true;
@@ -31,34 +33,11 @@ class HistoryPaginationContinuity {
     final existingNewest = existingNewestFirst.first;
     final incomingOldest = incomingNewerNewestFirst.last;
 
-    final existingNewestSeq = _positiveSeq(existingNewest.seq);
-    final incomingOldestSeq = _positiveSeq(incomingOldest.seq);
-
-    if (existingNewestSeq != null && incomingOldestSeq != null) {
-      if (incomingOldestSeq == existingNewestSeq) {
-        return true; // overlap at edge
-      }
-      // Incoming page is newer: its oldest should be exactly one past
-      // the window's newest.
-      return incomingOldestSeq == existingNewestSeq + 1;
-    }
-
     final existingTs = existingNewest.timestamp ?? 0;
     final incomingTs = incomingOldest.timestamp ?? 0;
-    if (existingTs <= 0 || incomingTs <= 0) {
-      // No seq and no usable time — allow merge (dedupe still applies).
-      return true;
-    }
-    if (incomingTs < existingTs) {
+    if (existingTs > 0 && incomingTs > 0 && incomingTs < existingTs) {
       return false;
     }
-    return (incomingTs - existingTs) <= timeAbutSec;
-  }
-
-  static int? _positiveSeq(int? seq) {
-    if (seq == null || seq <= 0) {
-      return null;
-    }
-    return seq;
+    return true;
   }
 }

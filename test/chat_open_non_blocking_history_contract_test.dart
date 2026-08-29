@@ -22,13 +22,7 @@ void main() {
       ),
       isFalse,
     );
-    expect(
-      callback.contains(
-        'unawaited(\n'
-        '          ChatImageMessagePrefetch.resolveOnlineUrlsForMessages',
-      ),
-      isTrue,
-    );
+    expect(callback.contains('resolveOnlineUrlsForMessages'), isFalse);
   });
 
   test('route transition listeners are owned and cleared on dispose', () {
@@ -108,11 +102,16 @@ void main() {
     );
   });
 
-  test('open prepare gate kicks URL resolve without blocking history', () {
+  test('post-open enrichment owns URL resolve outside the history gate', () {
     final source = File('lib/src/chat.dart').readAsStringSync();
-    final gateStart = source.indexOf('prepare_gate_bootstrap_done');
-    expect(gateStart, greaterThanOrEqualTo(0));
-    final slice = source.substring(gateStart, gateStart + 1200);
+    final enrichmentStart = source.indexOf('_runOpenHistoryEnrichment(');
+    final enrichmentEnd = source.indexOf(
+      '_ensureGroupLocalTipsMergedOnOpen(',
+      enrichmentStart,
+    );
+    expect(enrichmentStart, greaterThanOrEqualTo(0));
+    expect(enrichmentEnd, greaterThan(enrichmentStart));
+    final slice = source.substring(enrichmentStart, enrichmentEnd);
     expect(
       slice.contains('ChatImageMessagePrefetch.fromMessages(messages)'),
       isTrue,
@@ -123,11 +122,9 @@ void main() {
       ),
       isTrue,
     );
-    expect(
-      slice.contains(
-        'await ChatImageMessagePrefetch.resolveOnlineUrlsForMessages',
-      ),
-      isFalse,
-    );
+    final gateStart = source.indexOf('_prepareOpenHistoryGate(');
+    final gateEnd = source.indexOf('_runOpenHistoryEnrichment(', gateStart);
+    final gate = source.substring(gateStart, gateEnd);
+    expect(gate.contains('resolveOnlineUrlsForMessages'), isFalse);
   });
 }

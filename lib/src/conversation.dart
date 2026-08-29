@@ -18,6 +18,7 @@ import 'package:tencent_cloud_chat_demo/src/services/group_notice_unread_service
 import 'package:tencent_cloud_chat_demo/src/services/group_system_notice_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_incremental_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_local_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/user_profile_local/user_profile_local_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_local_perf_flags.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_membership_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/platform_official_account_service.dart';
@@ -36,7 +37,12 @@ import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_sync_servi
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/peer_profile_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_preview_cache.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_tab_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_gate_log.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_mutation_coordinator.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_mutation_event.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_sync_notifier.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
@@ -81,6 +87,7 @@ import 'package:tencent_cloud_chat_demo/utils/conversation_face_url.dart';
 import 'package:tencent_cloud_chat_demo/utils/friend_display_name.dart';
 import 'package:tencent_cloud_chat_demo/utils/friend_mutual_utils.dart';
 import 'package:tencent_cloud_chat_demo/utils/group_tips_message_helper.dart';
+import 'package:tencent_cloud_chat_demo/utils/user_avatar.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/conversation_group_title_color.dart';
 import 'package:tencent_cloud_chat_demo/src/multi_platform_widget/search_entry/search_entry.dart';
 import 'package:tencent_cloud_chat_demo/src/multi_platform_widget/search_entry/search_entry_wide.dart';
@@ -163,7 +170,7 @@ final Map<ConversationListScope, VoidCallback?> conversationScrollToTopActions =
     {};
 const String archivedEntryIconAsset = 'assets/img/archive_icon.png';
 const String groupNoticeEntryIconAsset = 'assets/img/group_notice_icon.png';
-const double _systemEntryAvatarSize = 52;
+const double _systemEntryAvatarSize = 54;
 
 Widget _buildSystemEntryAvatar(String assetPath) {
   return SizedBox(
@@ -777,21 +784,9 @@ class _ConversationState extends State<Conversation> {
     } else {
       unawaited(_ensureOfficialAccountsAfterImLogin());
     }
-    unawaited(() async {
-      ConversationListNotifier.instance.ensureTabStoreBridgeAttached();
-      await ConversationListNotifier.instance.reloadFromLocal();
-      if (!mounted) {
-        return;
-      }
-      _suppressFeedPaging(const Duration(milliseconds: 800));
-      _viewportFillDone = false;
-      _viewportFillPagesDone = 0;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          unawaited(_maybeFillFeedViewportOnce());
-        }
-      });
-    }());
+    // Cold-start projection is loaded exactly once by
+    // _loadCachedConversationPreviews below. A second concurrent reload marks
+    // the notifier dirty and causes another whole-window pass after the first.
     if (kIsWeb) {
       Future<void>.delayed(const Duration(milliseconds: 700), () {
         if (mounted) {
@@ -837,6 +832,7 @@ class _ConversationState extends State<Conversation> {
     ConversationListNotifier.instance.addListener(
       _invalidateVisibleConversationsCache,
     );
+    ConversationTabStore.instance.addListener(_onCommittedTabStoreChanged);
     ConversationListNotifier.instance.ensureArchiveChangeListenersAttached();
     archivedConversationC2cIDsNotifier.addListener(
       _onArchivedIdsChangedForMainList,
@@ -890,12 +886,14 @@ class _ConversationState extends State<Conversation> {
     required V2TimConversation conversation,
     required String showName,
     required Color? fallbackTitleColor,
+    required double fontSize,
   }) {
     if (widget.listScope == ConversationListScope.group) {
       return buildGroupConversationListNickName(
         userId: conversation.userID,
         name: showName,
         fallbackTitleColor: fallbackTitleColor,
+        fontSize: fontSize,
         groupType: conversation.groupType,
         groupId: conversation.groupID,
       );
@@ -904,6 +902,7 @@ class _ConversationState extends State<Conversation> {
       userId: conversation.userID,
       name: showName,
       fallbackTitleColor: fallbackTitleColor,
+      fontSize: fontSize,
       groupType: conversation.groupType,
     );
   }
@@ -1177,32 +1176,32 @@ class _ConversationState extends State<Conversation> {
     }
     const timeout = Duration(seconds: 20);
     final deadline = DateTime.now().add(timeout);
-    debugPrint(
-      'Conversation: ensureVisible wait bootstrap '
-      'timeoutMs=${timeout.inMilliseconds}',
-    );
     while (!AuthBootstrapService.instance.conversationListBootstrapDone &&
         DateTime.now().isBefore(deadline)) {
       if (_getVisibleConversations().isNotEmpty) {
-        debugPrint(
-          'Conversation: ensureVisible wait aborted early (visible already)',
-        );
         return;
       }
       await Future<void>.delayed(const Duration(milliseconds: 100));
     }
-    debugPrint(
-      'Conversation: ensureVisible bootstrap wait done '
-      'done=${AuthBootstrapService.instance.conversationListBootstrapDone} '
-      'visible=${_getVisibleConversations().isNotEmpty}',
-    );
   }
 
   Future<void> _loadCachedConversationPreviews() async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) {
+      return;
+    }
     if (ConversationListSyncNotifier.instance.hasSyncedOnce) {
       return;
     }
-    await ConversationListNotifier.instance.reloadFromLocal();
+    // Plan 094：冷启动投影恢复例外（072 完成标准三类之一）。
+    // reloadFromLocal 内部 in-flight 合并保证与 initState 的调用不双跑；
+    // hasSyncedOnce 翻转后本路径不会再触发。
+    await ConversationListNotifier.instance.restoreStoreProjection(
+      reason: ConversationStoreProjectionReason.coldStart,
+    );
+    if (!SessionIdentityService.instance.isCurrent(identity)) {
+      return;
+    }
     _suppressFeedPaging(const Duration(milliseconds: 800));
     _viewportFillDone = false;
     _viewportFillPagesDone = 0;
@@ -1218,12 +1217,30 @@ class _ConversationState extends State<Conversation> {
       });
       return;
     }
-    final items = await ConversationPreviewCache.load(_previewCacheScopeKey);
-    if (!mounted || ConversationListSyncNotifier.instance.hasSyncedOnce) {
+    final items = await ConversationPreviewCache.load(
+      _previewCacheScopeKey,
+      ownerUserId: identity.ownerUserId,
+    );
+    if (!mounted ||
+        !SessionIdentityService.instance.isCurrent(identity) ||
+        ConversationListSyncNotifier.instance.hasSyncedOnce) {
       return;
     }
     setState(() {
       _cachedConversationPreviews = items;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || items.isEmpty) return;
+      unawaited(
+        AvatarImageWarm.warmSources(
+          items
+              .take(24)
+              .map(_conversationFromPreview)
+              .map(_conversationAvatarWarmSource),
+          context: context,
+          logicalSize: conversationFeedAvatarSize(context),
+        ),
+      );
     });
   }
 
@@ -1239,35 +1256,71 @@ class _ConversationState extends State<Conversation> {
     }
   }
 
-  void _onConversationRefreshRequested() {
-    if (!mounted) return;
-    final reason = ConversationRefreshBus.instance.lastReason;
-    ConversationPinFlickerLog.log(
-      'refresh_bus',
-      conversationID: ConversationRefreshBus.instance.lastConversationId,
-      extras: <String, Object?>{
-        'reason': reason,
-        'patchOnly': _shouldPatchConversationOnly(reason),
-        'deferring': ConversationListNotifier.instance.isDeferringPinReorder,
-      },
-    );
-    if (_shouldPatchConversationOnly(reason)) {
-      if (reason == 'new_message' || _isReadStatePatchReason(reason)) {
-        _patchConversationTimer?.cancel();
-        _patchConversationUpdates(reason: reason);
-        return;
-      }
-      _queuePatchConversationUpdates(reason: reason);
-      return;
+  void _onCommittedTabStoreChanged() {
+    _invalidateVisibleConversationsCache();
+    if (mounted) {
+      setState(() {});
     }
-
-    _ConversationListRefreshCoordinator.scheduleFullRefresh(reason: reason);
   }
 
-  void _queuePatchConversationUpdates({String? reason}) {
+  void _onConversationRefreshRequested() {
+    if (!mounted) return;
+    final bus = ConversationRefreshBus.instance;
+    final events = bus.lastEvents.isNotEmpty
+        ? bus.lastEvents
+        : <ConversationRefreshEvent>[
+            ConversationRefreshEvent(
+              sequence: 0,
+              reason: bus.lastReason,
+              conversationId: bus.lastConversationId,
+            ),
+          ];
+    String? fullRefreshReason;
+    for (final event in events) {
+      final reason = event.reason;
+      ConversationPinFlickerLog.log(
+        'refresh_bus',
+        conversationID: event.conversationId,
+        extras: <String, Object?>{
+          'reason': reason,
+          'patchOnly': _shouldPatchConversationOnly(reason),
+          'deferring': ConversationListNotifier.instance.isDeferringPinReorder,
+        },
+      );
+      if (!_shouldPatchConversationOnly(reason)) {
+        fullRefreshReason = reason;
+        continue;
+      }
+      if (reason == 'new_message' || _isReadStatePatchReason(reason)) {
+        _patchConversationTimer?.cancel();
+        _patchConversationUpdates(
+          reason: reason,
+          conversationId: event.conversationId,
+        );
+        continue;
+      }
+      _queuePatchConversationUpdates(
+        reason: reason,
+        conversationId: event.conversationId,
+      );
+    }
+    if (fullRefreshReason != null) {
+      _ConversationListRefreshCoordinator.scheduleFullRefresh(
+        reason: fullRefreshReason,
+      );
+    }
+  }
+
+  void _queuePatchConversationUpdates({
+    String? reason,
+    String? conversationId,
+  }) {
     _lastPatchReason = reason;
     _pendingPatchConversationIds.addAll(
-      _collectPatchConversationIds(reason: reason),
+      _collectPatchConversationIds(
+        reason: reason,
+        conversationId: conversationId,
+      ),
     );
     _patchConversationTimer?.cancel();
     _patchConversationTimer = Timer(const Duration(milliseconds: 250), () {
@@ -1280,21 +1333,22 @@ class _ConversationState extends State<Conversation> {
     });
   }
 
-  Set<String> _collectPatchConversationIds({String? reason}) {
+  Set<String> _collectPatchConversationIds({
+    String? reason,
+    String? conversationId,
+  }) {
     if (reason == 'new_message' || _isReadStatePatchReason(reason)) {
       return const <String>{};
     }
     final conversationIDs = <String>{};
     if (_isFriendPatchReason(reason)) {
-      final busConversationID =
-          ConversationRefreshBus.instance.lastConversationId;
+      final busConversationID = conversationId;
       if (busConversationID != null && busConversationID.isNotEmpty) {
         conversationIDs.add(busConversationID);
       }
       return conversationIDs;
     }
-    final busConversationID =
-        ConversationRefreshBus.instance.lastConversationId;
+    final busConversationID = conversationId;
     if (busConversationID != null && busConversationID.isNotEmpty) {
       conversationIDs.add(busConversationID);
     }
@@ -1457,10 +1511,14 @@ class _ConversationState extends State<Conversation> {
     _patchConversationUpdates();
   }
 
-  void _patchConversationUpdates({String? reason}) {
+  void _patchConversationUpdates({
+    String? reason,
+    String? conversationId,
+  }) {
     if (reason == 'new_message') {
-      // 预览由 NotificationSettingsService 的 patch 即时写入；
-      // 未读以 IM SDK 会话回调为准，勿 refreshConversationItem 抢写。
+      // 预览由 ConversationSyncService 的入站消息补丁即时写入；
+      // 通知服务仍可提供同一补丁作为兜底，勿在这里 refreshConversationItem
+      // 抢写旧的 SDK 会话快照。
       return;
     }
     if (_isReadStatePatchReason(reason)) {
@@ -1470,7 +1528,10 @@ class _ConversationState extends State<Conversation> {
       return;
     }
     _flushPatchConversationIds(
-      _collectPatchConversationIds(reason: reason),
+      _collectPatchConversationIds(
+        reason: reason,
+        conversationId: conversationId,
+      ),
       reason: reason,
     );
   }
@@ -1744,8 +1805,18 @@ class _ConversationState extends State<Conversation> {
         final local =
             await ConversationLocalStore.instance.conversationById(openedId);
         if (local != null) {
-          await notifier.applyConversationsFromStore(
-            upserted: <V2TimConversation>[local],
+          // Plan 094：conversationById 读出的已是 Coordinator 提交后的 Store 快照，
+          // 属于 commit 产物消费，走 applyCommittedBatch 表达「已提交」语义，
+          // 不再由页面直接构造 apply（与 SDK 实时事件共享同一批 UI 投影入口）。
+          await notifier.applyCommittedBatch(
+            ConversationUiSnapshotBatch<V2TimConversation>(
+              upsertedSnapshots: <V2TimConversation>[local],
+              deletedCanonicalIds: const <String>[],
+              structureChanged: false,
+              changedFieldMasks: const <String,
+                  Set<ConversationMutationField>>{},
+              commitGeneration: 0,
+            ),
             forceAdmitIds: <String>{openedId},
           );
         }
@@ -1883,7 +1954,13 @@ class _ConversationState extends State<Conversation> {
       ChatImageMessagePrefetch.prefetchForConversation(conversation);
       return;
     }
-    ConversationHistoryWarmScheduler.instance.schedulePressWarm(conversation);
+    // C2C press warm must remain LOCAL-only. The C2C seq is not a
+    // conversation-wide cursor, so a cloud request here would compete with
+    // the entry bootstrap before its real anchor is established.
+    ConversationHistoryWarmScheduler.instance.scheduleTargetLocalWarm(
+      conversation,
+      reason: 'c2c_press',
+    );
     ChatImageMessagePrefetch.prefetchForConversation(conversation);
   }
 
@@ -2280,8 +2357,10 @@ class _ConversationState extends State<Conversation> {
         final slide =
             await ConversationListNotifier.instance.appendOlderFromLocal(
           convType: typeFilter,
+          protectVirtualViewport: true,
         );
         if (!slide.changed) {
+          await _hydrateVirtualFeedTail(typeFilter);
           _suppressFeedPaging(const Duration(seconds: 2));
           return;
         }
@@ -2300,8 +2379,14 @@ class _ConversationState extends State<Conversation> {
           typeFilter != null) {
         await ConversationListNotifier.instance.refreshTypeTotals();
       }
+      final virtualTotalBeforeSdk =
+          ConversationPerfFlags.conversationVirtualListEnabled &&
+                  typeFilter != null
+              ? ConversationListNotifier.instance.totalCountForType(typeFilter)
+              : 0;
       var slide = await ConversationListNotifier.instance.appendOlderFromLocal(
         convType: typeFilter,
+        protectVirtualViewport: true,
       );
       if (slide.changed) {
         _feedAppendEmptyStreak = 0;
@@ -2335,6 +2420,7 @@ class _ConversationState extends State<Conversation> {
           (haveMore || _feedAppendEmptyStreak < 2);
       if (!shouldSdk && !haveMore) {
         _feedAppendEmptyStreak = 0;
+        await _hydrateVirtualFeedTail(typeFilter);
         _feedBottomExhausted = true;
         ConversationPerfGateLog.log(
           'feed_bottom_no_more',
@@ -2379,23 +2465,32 @@ class _ConversationState extends State<Conversation> {
       if (ConversationPerfFlags.conversationVirtualListEnabled) {
         await ConversationListNotifier.instance.refreshTypeTotals();
       }
+      final virtualTotalAfterSdk =
+          ConversationPerfFlags.conversationVirtualListEnabled &&
+                  typeFilter != null
+              ? ConversationListNotifier.instance.totalCountForType(typeFilter)
+              : 0;
+      final virtualPageAdded = virtualTotalAfterSdk > virtualTotalBeforeSdk;
       _captureFeedScrollAnchor();
       final preSlideOffsetSdk = _feedScrollController.hasClients
           ? _feedScrollController.offset
           : (_lastKnownFeedScrollOffset ?? 0.0);
       slide = await ConversationListNotifier.instance.appendOlderFromLocal(
         convType: typeFilter,
+        protectVirtualViewport: true,
       );
-      if (!slide.changed) {
+      if (!slide.changed &&
+          !ConversationPerfFlags.conversationVirtualListEnabled) {
         await Future<void>.delayed(const Duration(milliseconds: 80));
         if (!mounted) {
           return;
         }
         slide = await ConversationListNotifier.instance.appendOlderFromLocal(
           convType: typeFilter,
+          protectVirtualViewport: true,
         );
       }
-      if (slide.changed) {
+      if (slide.changed || virtualPageAdded) {
         _feedAppendEmptyStreak = 0;
         _feedBottomExhausted = false;
       } else if (_feedAppendEmptyStreak >= 3) {
@@ -2408,6 +2503,7 @@ class _ConversationState extends State<Conversation> {
                 : latest.haveMoreForType(typeFilter))
             : latest.haveMore;
         if (!still) {
+          await _hydrateVirtualFeedTail(typeFilter);
           _feedBottomExhausted = true;
         }
       }
@@ -2431,6 +2527,26 @@ class _ConversationState extends State<Conversation> {
     } finally {
       _feedPageLoadInFlight = false;
     }
+  }
+
+  Future<void> _hydrateVirtualFeedTail(int? convType) async {
+    if (!ConversationPerfFlags.conversationVirtualListEnabled ||
+        (convType != 1 && convType != 2)) {
+      return;
+    }
+    final notifier = ConversationListNotifier.instance;
+    await notifier.refreshTypeTotals();
+    final total = notifier.totalCountForType(convType!);
+    if (total <= 0) {
+      return;
+    }
+    await notifier.ensureTypeIndexHydrated(
+      convType: convType,
+      centerIndex: total - 1,
+      forceReload: true,
+      allowWindowJump: true,
+      forceNotify: true,
+    );
   }
 
   Future<void> _loadNewerFeedConversations() async {
@@ -2582,6 +2698,7 @@ class _ConversationState extends State<Conversation> {
     ConversationListNotifier.instance.removeListener(
       _invalidateVisibleConversationsCache,
     );
+    ConversationTabStore.instance.removeListener(_onCommittedTabStoreChanged);
     archivedConversationC2cIDsNotifier.removeListener(
       _onArchivedIdsChangedForMainList,
     );
@@ -2868,7 +2985,9 @@ class _ConversationState extends State<Conversation> {
     if (conversationID.isEmpty) {
       return;
     }
-    if (_openingConversationID == conversationID) {
+    // 移动端一次只允许一个 chat open 进入导航栈。旧实现只拦同一会话，
+    // 冷开 prepare 期间快速点另一行可能产生两条竞争的 Chat route。
+    if (_openingConversationID != null) {
       return;
     }
     _openingConversationID = conversationID;
@@ -2969,8 +3088,10 @@ class _ConversationState extends State<Conversation> {
     try {
       if (mounted) {
         unawaited(
-          AvatarImageWarm.warmUrls(
-            <String?>[_conversationFaceUrl(selectedConv)],
+          AvatarImageWarm.warmSources(
+            <AvatarImageWarmSource>[
+              _conversationAvatarWarmSource(selectedConv),
+            ],
             context: context,
             logicalSize: 40,
           ),
@@ -2981,39 +3102,61 @@ class _ConversationState extends State<Conversation> {
         widget.onConversationChanged!(selectedConv);
       } else {
         ChatOpenPerfLog.mark('open_prewarm_begin');
-        final snap = await ChatOpenViewportCoordinator.instance.prepareForOpen(
-          conversation: selectedConv,
-        );
-        if (!ChatOpenViewportCoordinator.instance.isCurrent(
-          snap.requestId,
-          snap.conversationKey,
-        )) {
-          ChatOpenPerfLog.mark(
-            'viewport_prepare_ignored',
-            extras: <String, Object?>{
-              'requestId': snap.requestId,
-              'key': snap.conversationKey,
-            },
-          );
-          return;
-        }
-        ChatOpenPerfLog.mark(
-          'open_prewarm_end',
-          extras: <String, Object?>{
-            'complete': snap.isViewportReady,
-            'rawCount': snap.messageCount,
-            'requestId': snap.requestId,
-          },
-        );
+        // Telegram-style open: warm history races the transition, but never
+        // delays it. The stable Chat tree consumes the same per-conversation
+        // global history bucket while this task completes in the background.
+        unawaited(() async {
+          try {
+            final snap = await ChatOpenViewportCoordinator.instance
+                .prepareForOpen(conversation: selectedConv);
+            if (!ChatOpenViewportCoordinator.instance.isCurrent(
+              snap.requestId,
+              snap.conversationKey,
+            )) {
+              ChatOpenPerfLog.mark(
+                'viewport_prepare_ignored',
+                extras: <String, Object?>{
+                  'requestId': snap.requestId,
+                  'key': snap.conversationKey,
+                },
+              );
+              return;
+            }
+            ChatOpenPerfLog.mark(
+              'open_prewarm_end',
+              extras: <String, Object?>{
+                'complete': snap.isViewportReady,
+                'rawCount': snap.messageCount,
+                'requestId': snap.requestId,
+                'background': true,
+              },
+            );
+          } catch (error) {
+            ChatOpenPerfLog.mark(
+              'open_prewarm_error',
+              extras: <String, Object?>{'error': '$error'},
+            );
+          }
+        }());
         ChatOpenViewportCoordinator.instance.markTransitioning(
-          snap.conversationKey,
+          openCacheKey,
         );
         ChatOpenPerfLog.mark('navigator_push_begin');
-        await Navigator.push(
+        await openOrReuseAppChat(
           context,
-          appChatRoute(selectedConv, entryUnreadCount: entryUnreadCount),
+          selectedConv,
+          entryUnreadCount: entryUnreadCount,
         );
         ChatOpenPerfLog.mark('navigator_pop_back');
+        if (!mounted) {
+          return;
+        }
+        // Chat.dispose 也会启动同一 finalize。这里必须等待它的 single-flight
+        // 本地提交完成后再强制 hydrate，否则会从 SQLite 读回旧 unread。
+        await _finalizeConversationLeave(
+          conversationID,
+          entryUnreadCount: entryUnreadCount,
+        );
         if (!mounted) {
           return;
         }
@@ -3021,15 +3164,13 @@ class _ConversationState extends State<Conversation> {
         _scheduleVirtualFeedHydrateAfterChatReturn(selectedConv);
         // 从聊天返回：预热当前会话头像，降低列表行闪动。
         unawaited(
-          AvatarImageWarm.warmUrls(
-            <String?>[_conversationFaceUrl(selectedConv)],
+          AvatarImageWarm.warmSources(
+            <AvatarImageWarmSource>[
+              _conversationAvatarWarmSource(selectedConv),
+            ],
             context: context,
             logicalSize: 52,
           ),
-        );
-        await _finalizeConversationLeave(
-          conversationID,
-          entryUnreadCount: entryUnreadCount,
         );
       }
     } finally {
@@ -3202,6 +3343,9 @@ class _ConversationState extends State<Conversation> {
     }
 
     void applyLocal(int recvOpt) {
+      // 072 phase-6 allowlist: this is a transient pending projection only.
+      // The successful value is published from the Coordinator commit below;
+      // this helper is also used to roll back an SDK failure.
       conversation.recvOpt = recvOpt;
       ConversationListNotifier.instance.applyRecvOptLocally(
         conversationID: conversation.conversationID,
@@ -3230,10 +3374,6 @@ class _ConversationState extends State<Conversation> {
               );
 
     if (result != null && result.code == 0) {
-      if (!optimistic) {
-        applyLocal(targetIndex);
-      }
-      final normalizedGroup = ChatIdFormat.normalizeGroupId(groupID);
       String resolvedGroup = '';
       if (groupID.isNotEmpty) {
         try {
@@ -3241,31 +3381,17 @@ class _ConversationState extends State<Conversation> {
               await GroupLocalStore.instance.resolveImGroupId(groupID);
         } catch (_) {}
       }
-      for (final gid in <String>{normalizedGroup, resolvedGroup}) {
-        if (gid.isEmpty) {
-          continue;
-        }
-        final altId = 'group_$gid';
-        if (!MessageConversationId.sameConversation(
-          conversation.conversationID,
-          altId,
-        )) {
-          ConversationListNotifier.instance.applyRecvOptLocally(
-            conversationID: altId,
-            recvOpt: targetIndex,
-            snapshot: conversation,
-          );
-        }
-      }
       if (resolvedGroup.isNotEmpty &&
           ChatIdFormat.isCustomCommunityId(resolvedGroup) &&
           conversation.groupID?.trim() != resolvedGroup) {
         conversation.groupID = resolvedGroup;
       }
-      // 同步落库，避免后续 soft/merge 用旧 recvOpt 盖回。
+      // SDK 成功后的正式持久化只走 Coordinator；UI 乐观态保留在上方。
       try {
-        await ConversationLocalStore.instance.upsertBatch(
-          conversations: [conversation],
+        await ConversationSyncService.instance.applyConversationMuteLocally(
+          conversationID: conversation.conversationID,
+          recvOpt: targetIndex,
+          snapshot: conversation,
         );
       } catch (e) {
         debugPrint('Conversation disturb upsert fail: $e');
@@ -3362,14 +3488,27 @@ class _ConversationState extends State<Conversation> {
       return cached;
     }
     final notifierRows = ConversationListNotifier.instance.conversations;
+    // SQLite committed pages can arrive before the legacy notifier projection
+    // is hydrated. Keep the feed usable from the same committed TabStore view
+    // instead of falling back to an empty list and rendering a full skeleton.
+    final tabStoreRows = ConversationLocalStore.mergeConversationsForUi(
+      ConversationTabStore.instance.itemsForType(1),
+      ConversationTabStore.instance.itemsForType(2),
+    );
+    final sourceRows = notifierRows.isEmpty
+        ? tabStoreRows
+        : ConversationLocalStore.mergeConversationsForUi(
+            notifierRows,
+            tabStoreRows,
+          );
     final notifierIds = <String>{
-      for (final row in notifierRows) row.conversationID.trim(),
+      for (final row in sourceRows) row.conversationID.trim(),
     };
     final typed =
         _selectedFolderId == null || _folderHydratedConversations.isEmpty
-            ? notifierRows
+            ? sourceRows
             : <V2TimConversation>[
-                ...notifierRows,
+                ...sourceRows,
                 for (final row in _folderHydratedConversations)
                   if (!notifierIds.contains(row.conversationID.trim())) row,
               ];
@@ -4112,6 +4251,7 @@ class _ConversationState extends State<Conversation> {
           _getArchivedConversations(_archivedIDsNotifier.value),
       conversationTimestampMs: _getConversationTimestampMs,
       buildConversationRow: _buildConversationRowBound,
+      resolveConversationAvatarUrl: _conversationAvatarWarmSource,
       onArchivedTap: () {
         if (_isEditing) {
           return;
@@ -4289,7 +4429,12 @@ class _ConversationState extends State<Conversation> {
   }
 
   Widget _buildCachedConversationFeed(BuildContext context, TUITheme theme) {
-    if (ConversationListNotifier.instance.hasLocalData) {
+    final notifierHasData = ConversationListNotifier.instance.hasLocalData;
+    final tabStore = ConversationTabStore.instance;
+    final committedC2cCount = tabStore.countForType(1);
+    final committedGroupCount = tabStore.countForType(2);
+    final hasCommittedRows = committedC2cCount > 0 || committedGroupCount > 0;
+    if (notifierHasData || hasCommittedRows) {
       return _buildActiveConversationFeed(
         context,
         theme,
@@ -4297,15 +4442,27 @@ class _ConversationState extends State<Conversation> {
       );
     }
     if (_cachedConversationPreviews.isEmpty) {
+      ConversationPerfGateLog.log(
+        'conversation_outer_placeholder',
+        extras: <String, Object?>{
+          'hasLocalData': notifierHasData,
+          'cachedPreviewCount': _cachedConversationPreviews.length,
+          'isLoadingConversationData':
+              _controller.model.isLoadingConversationData,
+          'tabStoreC2cCount': committedC2cCount,
+          'tabStoreGroupCount': committedGroupCount,
+          'reason': 'no_notifier_or_committed_rows',
+        },
+      );
       return _buildConversationLoadingPlaceholder(theme);
     }
     return ListView.builder(
       key: PageStorageKey<String>('conversation_feed_$_previewCacheScopeKey'),
       controller: _feedScrollController,
       physics: conversationFeedScrollPhysics(context),
+      cacheExtent: ConversationPerfFlags.conversationFeedCacheExtent,
       itemCount: _cachedConversationPreviews.length,
       itemBuilder: (context, index) {
-        final avatarSize = conversationFeedAvatarSize(context);
         final titleSize = conversationFeedTitleFontSize(context);
         final subtitleSize = conversationFeedSubtitleFontSize(context);
         final timeSize = conversationFeedTimestampFontSize(context);
@@ -4321,20 +4478,15 @@ class _ConversationState extends State<Conversation> {
           fallbackTitleColor: theme.conversationItemTitleTextColor,
           groupType: item.groupType,
         );
-        final avatarCore = AppUserAvatar(
-          faceUrl: item.faceUrl,
+        final isGroup = conversation.type == 2;
+        final avatarWidget = _conversationAvatarWidget(
+          context,
+          conversationID: conversation.conversationID,
+          faceUrl: _conversationFaceUrl(conversation),
           showName: item.title,
-          size: avatarSize,
-          type: conversation.type ?? (item.scope == 'group' ? 2 : 1),
-          preferRasterPlaceholder: true,
+          isGroup: isGroup,
+          groupId: conversation.groupID,
         );
-        final avatarWidget = widget.listScope == ConversationListScope.group &&
-                item.scope == 'group'
-            ? GroupLiveConversationListAvatarWrap(
-                groupId: conversation.groupID ?? '',
-                child: avatarCore,
-              )
-            : avatarCore;
         return KeyedSubtree(
           key: ValueKey(item.conversationId),
           child: AppListPressable(
@@ -4447,6 +4599,36 @@ class _ConversationState extends State<Conversation> {
     );
   }
 
+  AvatarImageWarmSource _conversationAvatarWarmSource(
+    V2TimConversation conversation,
+  ) {
+    final isGroup = conversationMatchesScope(
+      conversation,
+      ConversationListScope.group,
+    );
+    final ownerId = isGroup
+        ? ((conversation.groupID?.trim().isNotEmpty ?? false)
+            ? conversation.groupID!.trim()
+            : conversation.conversationID.replaceFirst('group_', '').trim())
+        : (ChatIdFormat.rawUserUid(conversation.userID ?? '').isNotEmpty
+            ? ChatIdFormat.rawUserUid(conversation.userID ?? '')
+            : ChatIdFormat.rawUserUid(
+                conversation.conversationID.replaceFirst('c2c_', ''),
+              ));
+    final avatarVersion = isGroup
+        ? GroupLocalStore.instance.readCached(groupId: ownerId)?.avatarVersion
+        : UserProfileLocalService.instance.readCached(ownerId)?.avatarVersion;
+    return AvatarImageWarmSource(
+      url: _conversationFaceUrl(conversation),
+      cacheKey: UserAvatarHelper.cacheKey(
+        ownerId: ownerId,
+        avatarVersion: avatarVersion,
+        isGroup: isGroup,
+        variant: 'thumb',
+      ),
+    );
+  }
+
   Widget _conversationAvatarWidget(
     BuildContext context, {
     required String conversationID,
@@ -4457,6 +4639,12 @@ class _ConversationState extends State<Conversation> {
     String? groupId,
   }) {
     final avatarSize = conversationFeedAvatarSize(context);
+    final ownerId = isGroup
+        ? (groupId?.trim() ?? '')
+        : ChatIdFormat.rawUserUid(conversationID.replaceFirst('c2c_', ''));
+    final avatarVersion = isGroup
+        ? GroupLocalStore.instance.readCached(groupId: ownerId)?.avatarVersion
+        : UserProfileLocalService.instance.readCached(ownerId)?.avatarVersion;
     final avatar = SizedBox(
       width: avatarSize,
       height: avatarSize,
@@ -4472,6 +4660,8 @@ class _ConversationState extends State<Conversation> {
             size: avatarSize,
             type: isGroup ? 2 : 1,
             preferRasterPlaceholder: true,
+            ownerId: ownerId.isEmpty ? null : ownerId,
+            avatarVersion: avatarVersion,
           ),
           if (onlineStatus?.statusType == 1)
             Positioned(
@@ -4600,9 +4790,13 @@ class _ConversationState extends State<Conversation> {
               conversation: conversationItem,
               showName: showName,
               fallbackTitleColor: theme.conversationItemTitleTextColor,
+              fontSize: conversationFeedTitleFontSize(context),
             ),
             avatarBorderRadius: BorderRadius.circular(999),
             avatarSize: avatarSize,
+            titleFontSize: conversationFeedTitleFontSize(context),
+            subtitleFontSize: conversationFeedSubtitleFontSize(context),
+            timestampFontSize: conversationFeedTimestampFontSize(context),
             isDisturb: conversationShouldShowMuteIcon(conversationItem),
             lastMsg: conversationItem.lastMessage,
             lastActiveTimestamp: _conversationLastActiveTimestampSec(
@@ -4872,9 +5066,13 @@ class _ConversationState extends State<Conversation> {
                   conversation: conversation,
                   showName: showName,
                   fallbackTitleColor: theme.conversationItemTitleTextColor,
+                  fontSize: conversationFeedTitleFontSize(context),
                 ),
                 avatarBorderRadius: BorderRadius.circular(999),
                 avatarSize: avatarSize,
+                titleFontSize: conversationFeedTitleFontSize(context),
+                subtitleFontSize: conversationFeedSubtitleFontSize(context),
+                timestampFontSize: conversationFeedTimestampFontSize(context),
                 isDisturb: conversationShouldShowMuteIcon(conversation),
                 lastMsg: conversation.lastMessage,
                 lastActiveTimestamp: ConversationLocalStore.displayTimestampSec(
@@ -5052,6 +5250,7 @@ class _ConversationState extends State<Conversation> {
             Expanded(
               child: ConversationFeedSyncGate(
                 theme: theme,
+                feedScrollController: _feedScrollController,
                 cachedFeedBuilder: _buildCachedConversationFeed,
                 feedBuilder: _buildActiveConversationFeedForGate,
               ),
@@ -5374,10 +5573,11 @@ class _ArchivedConversationPageState extends State<ArchivedConversationPage> {
         if (conversation == null) {
           continue;
         }
-        await ConversationLocalStore.instance.upsertBatch(
-          conversations: [conversation],
+        final committed = await ConversationSyncService.instance
+            .commitSdkHydratedConversations(
+          <V2TimConversation>[conversation],
         );
-        hydrated.add(conversation);
+        hydrated.addAll(committed);
       } catch (e) {
         debugPrint('archive hydrate getConversation failed: $id $e');
       }
@@ -5715,6 +5915,9 @@ class _ArchivedConversationPageState extends State<ArchivedConversationPage> {
     }
 
     void applyLocal(int recvOpt) {
+      // 072 phase-6 allowlist: this is a transient pending projection only.
+      // The successful value is published from the Coordinator commit below;
+      // this helper is also used to roll back an SDK failure.
       conversation.recvOpt = recvOpt;
       ConversationListNotifier.instance.applyRecvOptLocally(
         conversationID: conversation.conversationID,
@@ -5742,10 +5945,6 @@ class _ArchivedConversationPageState extends State<ArchivedConversationPage> {
               );
 
     if (result != null && result.code == 0) {
-      if (!optimistic) {
-        applyLocal(targetIndex);
-      }
-      final normalizedGroup = ChatIdFormat.normalizeGroupId(groupID);
       String resolvedGroup = '';
       if (groupID.isNotEmpty) {
         try {
@@ -5753,30 +5952,16 @@ class _ArchivedConversationPageState extends State<ArchivedConversationPage> {
               await GroupLocalStore.instance.resolveImGroupId(groupID);
         } catch (_) {}
       }
-      for (final gid in <String>{normalizedGroup, resolvedGroup}) {
-        if (gid.isEmpty) {
-          continue;
-        }
-        final altId = 'group_$gid';
-        if (!MessageConversationId.sameConversation(
-          conversation.conversationID,
-          altId,
-        )) {
-          ConversationListNotifier.instance.applyRecvOptLocally(
-            conversationID: altId,
-            recvOpt: targetIndex,
-            snapshot: conversation,
-          );
-        }
-      }
       if (resolvedGroup.isNotEmpty &&
           ChatIdFormat.isCustomCommunityId(resolvedGroup) &&
           conversation.groupID?.trim() != resolvedGroup) {
         conversation.groupID = resolvedGroup;
       }
       try {
-        await ConversationLocalStore.instance.upsertBatch(
-          conversations: [conversation],
+        await ConversationSyncService.instance.applyConversationMuteLocally(
+          conversationID: conversation.conversationID,
+          recvOpt: targetIndex,
+          snapshot: conversation,
         );
       } catch (_) {}
     } else if (optimistic) {
@@ -6390,6 +6575,11 @@ class _ArchivedConversationPageState extends State<ArchivedConversationPage> {
                                     ),
                           avatarBorderRadius: BorderRadius.circular(999),
                           avatarSize: conversationFeedAvatarSize(context),
+                          titleFontSize: conversationFeedTitleFontSize(context),
+                          subtitleFontSize:
+                              conversationFeedSubtitleFontSize(context),
+                          timestampFontSize:
+                              conversationFeedTimestampFontSize(context),
                           isDisturb: conversationShouldShowMuteIcon(
                             conversation,
                           ),

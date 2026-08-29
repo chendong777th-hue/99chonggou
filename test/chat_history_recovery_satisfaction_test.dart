@@ -85,5 +85,24 @@ void main() {
         isTrue,
       );
     });
+
+    test(
+        'returns false when cloud required but only local attempted '
+        '(didAttemptCloud=false — synthetic anchor skipped cloud)', () {
+      // Scenario: latest visible is a synthetic (group tip / call bubble).
+      // _pullLatestMessagesFromAnchor returns didAttemptCloud=false because
+      // it could not use a real SDK anchor for CLOUD_NEWER. The satisfaction
+      // helper must NOT mark success — cloud was never actually attempted.
+      expect(
+        isRecoveryAlreadySatisfied(
+          changed: false,
+          hasMessages: true,
+          previewAhead: false,
+          cloudCatchUpRequired: true,
+          cloudCatchUpAttempted: false,
+        ),
+        isFalse,
+      );
+    });
   });
 }

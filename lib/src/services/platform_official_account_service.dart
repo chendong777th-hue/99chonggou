@@ -3,6 +3,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tencent_cloud_chat_demo/config.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
+import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_demo/utils/user_avatar.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
@@ -38,6 +40,7 @@ class PlatformOfficialAccountService {
   static String? _boundImUserId;
   static final Set<String> _dismissedOfficialIds = {};
   static bool _dismissedLoaded = false;
+  static SessionIdentity? _ensureSubscribedIdentity;
   static Future<bool>? _ensureSubscribedFuture;
   static DateTime? _lastEnsureSubscribedAt;
 
@@ -164,11 +167,21 @@ class PlatformOfficialAccountService {
     _dismissedOfficialIds.clear();
     _profileByUserId.clear();
     _ensureSubscribedFuture = null;
+    _ensureSubscribedIdentity = null;
     _lastEnsureSubscribedAt = null;
   }
 
-  static Future<void> loadDismissedState({bool force = false}) async {
+  static Future<void> loadDismissedState({
+    bool force = false,
+    SessionIdentity? expectedIdentity,
+  }) async {
+    final identity =
+        expectedIdentity ?? SessionIdentityService.instance.capture();
+    if (!_isCurrent(identity)) return;
     final imUserId = await _resolveImUserId();
+    if (!_isCurrent(identity) || !_sameOwner(imUserId, identity.ownerUserId)) {
+      return;
+    }
     if (imUserId == null) {
       _dismissedOfficialIds.clear();
       _dismissedLoaded = true;
@@ -179,31 +192,41 @@ class PlatformOfficialAccountService {
     }
     _boundImUserId = imUserId;
     final prefs = await SharedPreferences.getInstance();
+    if (!_isCurrent(identity) || !_sameOwner(imUserId, identity.ownerUserId)) {
+      return;
+    }
     _dismissedOfficialIds.clear();
 
     final legacyDismissed =
         prefs.getBool(_legacyDismissedPrefsKey(imUserId)) ?? false;
-    if (legacyDismissed && IMDemoConfig.platformOfficialAccountId.trim().isNotEmpty) {
+    if (legacyDismissed &&
+        IMDemoConfig.platformOfficialAccountId.trim().isNotEmpty) {
       _dismissedOfficialIds.add(IMDemoConfig.platformOfficialAccountId.trim());
     }
     final stored = prefs.getStringList(_dismissedIdsPrefsKey(imUserId));
     if (stored != null) {
-      _dismissedOfficialIds.addAll(stored.map((e) => e.trim()).where((e) => e.isNotEmpty));
+      _dismissedOfficialIds
+          .addAll(stored.map((e) => e.trim()).where((e) => e.isNotEmpty));
     }
 
     _dismissedLoaded = true;
   }
 
-  static Future<void> _persistDismissedState() async {
-    final imUserId = _boundImUserId ?? await _resolveImUserId();
-    if (imUserId == null) {
-      return;
-    }
+  static Future<void> _persistDismissedState({
+    SessionIdentity? expectedIdentity,
+  }) async {
+    final identity =
+        expectedIdentity ?? SessionIdentityService.instance.capture();
+    if (!_isCurrent(identity)) return;
+    final imUserId = identity.ownerUserId;
+    if (!_sameOwner(imUserId, identity.ownerUserId)) return;
     _boundImUserId = imUserId;
+    final dismissed = _dismissedOfficialIds.toList(growable: false);
     final prefs = await SharedPreferences.getInstance();
+    if (!_isCurrent(identity)) return;
     await prefs.setStringList(
       _dismissedIdsPrefsKey(imUserId),
-      _dismissedOfficialIds.toList(),
+      dismissed,
     );
     await prefs.setBool(_legacyDismissedPrefsKey(imUserId), false);
   }
@@ -227,7 +250,7 @@ class PlatformOfficialAccountService {
     if (userId.isNotEmpty) {
       return userId;
     }
-    final conversationId = conversation.conversationID?.trim() ?? '';
+    final conversationId = conversation.conversationID.trim();
     if (conversationId.startsWith('c2c_')) {
       return conversationId.substring(4);
     }
@@ -262,39 +285,51 @@ class PlatformOfficialAccountService {
     }
   }
 
-  static Future<void> _undismissAccount(String accountId) async {
+  static Future<void> _undismissAccount(
+    String accountId, {
+    required SessionIdentity identity,
+  }) async {
     if (!_dismissedOfficialIds.remove(accountId)) {
       return;
     }
     _dismissedLoaded = true;
-    await _persistDismissedState();
+    await _persistDismissedState(expectedIdentity: identity);
   }
 
   static Future<String?> ensureReadyForChat({String? userId}) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (!_isCurrent(identity)) return null;
     final def = _defFor(userId);
     if (def == null) {
       return null;
     }
-    await loadDismissedState(force: true);
-    await _undismissAccount(def.userId);
-    await _refreshCachedProfileWithRetry(attempts: 2, userIds: [def.userId]);
-    await _ensureNormalReceiveOpt(userIds: [def.userId]);
-    await _ensureNotPinned(userIds: [def.userId]);
+    await loadDismissedState(force: true, expectedIdentity: identity);
+    if (!_isCurrent(identity)) return null;
+    await _undismissAccount(def.userId, identity: identity);
+    await _refreshCachedProfileWithRetry(
+      attempts: 2,
+      userIds: [def.userId],
+      identity: identity,
+    );
+    if (!_isCurrent(identity)) return null;
+    await _ensureNormalReceiveOpt(userIds: [def.userId], identity: identity);
+    await _ensureNotPinned(userIds: [def.userId], identity: identity);
     return null;
   }
 
   static Future<void> dismissFromConversationList({String? userId}) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (!_isCurrent(identity)) return;
     final def = _defFor(userId);
     if (def == null) {
       return;
     }
     _dismissedOfficialIds.add(def.userId);
     _dismissedLoaded = true;
-    final imUserId = _boundImUserId ?? await _resolveImUserId();
-    if (imUserId != null) {
-      _boundImUserId = imUserId;
-      await _persistDismissedState();
-    }
+    final imUserId = identity.ownerUserId;
+    _boundImUserId = imUserId;
+    await _persistDismissedState(expectedIdentity: identity);
+    if (!_isCurrent(identity)) return;
     await TencentImSDKPlugin.v2TIMManager
         .getConversationManager()
         .deleteConversation(conversationID: 'c2c_${def.userId}');
@@ -370,11 +405,12 @@ class PlatformOfficialAccountService {
     return userId != null && shouldHideFromContactAndPickers(userId);
   }
 
-  static bool _matchesAccount(V2TimConversation conversation, String accountId) {
+  static bool _matchesAccount(
+      V2TimConversation conversation, String accountId) {
     if (conversation.userID?.trim() == accountId) {
       return true;
     }
-    final conversationId = conversation.conversationID?.trim() ?? '';
+    final conversationId = conversation.conversationID.trim();
     return conversationId == 'c2c_$accountId';
   }
 
@@ -456,12 +492,12 @@ class PlatformOfficialAccountService {
   static String? get messengerIntroduction =>
       introductionFor(officialAccountId);
 
-  static String? get messengerFaceUrl =>
-      _profileFor(officialAccountId).faceUrl;
+  static String? get messengerFaceUrl => _profileFor(officialAccountId).faceUrl;
 
   static bool _isUsableFaceUrl(String? url) {
     final trimmed = url?.trim() ?? '';
-    return trimmed.isNotEmpty && !UserAvatarHelper.isDefaultPlaceholder(trimmed);
+    return trimmed.isNotEmpty &&
+        !UserAvatarHelper.isDefaultPlaceholder(trimmed);
   }
 
   static String resolveFaceUrl({
@@ -528,8 +564,10 @@ class PlatformOfficialAccountService {
   }
 
   static Future<bool> ensureSubscribed({bool force = false}) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (!_isCurrent(identity)) return false;
     // 冷启动 / 会话页 init 可能早于 IM Login；未登录绝不打 getUsersInfo。
-    if (!await _isImLoggedIn()) {
+    if (!await _isImLoggedIn() || !_isCurrent(identity)) {
       return false;
     }
 
@@ -539,7 +577,7 @@ class PlatformOfficialAccountService {
     }
 
     final running = _ensureSubscribedFuture;
-    if (!force && running != null) {
+    if (!force && running != null && _ensureSubscribedIdentity == identity) {
       return running;
     }
 
@@ -550,36 +588,55 @@ class PlatformOfficialAccountService {
       return true;
     }
 
-    _ensureSubscribedFuture = _doEnsureSubscribed(ids).whenComplete(() {
-      _ensureSubscribedFuture = null;
+    late final Future<bool> task;
+    task = _doEnsureSubscribed(ids, identity).whenComplete(() {
+      if (identical(_ensureSubscribedFuture, task)) {
+        _ensureSubscribedFuture = null;
+        _ensureSubscribedIdentity = null;
+      }
     });
-    return _ensureSubscribedFuture!;
+    _ensureSubscribedIdentity = identity;
+    _ensureSubscribedFuture = task;
+    return task;
   }
 
-  static Future<bool> _doEnsureSubscribed(List<String> ids) async {
-    if (!await _isImLoggedIn()) {
+  static Future<bool> _doEnsureSubscribed(
+    List<String> ids,
+    SessionIdentity identity,
+  ) async {
+    if (!await _isImLoggedIn() || !_isCurrent(identity)) {
       return false;
     }
-    await loadDismissedState(force: true);
+    await loadDismissedState(force: true, expectedIdentity: identity);
     try {
-      await _refreshCachedProfileWithRetry(attempts: 3, userIds: ids);
+      await _refreshCachedProfileWithRetry(
+        attempts: 3,
+        userIds: ids,
+        identity: identity,
+      );
+      if (!_isCurrent(identity)) return false;
       // 免打扰/取消置顶仅对配置的平台公众号生效。
       final officialIds = officialAccountIds;
       if (officialIds.isNotEmpty) {
-        await _ensureNormalReceiveOpt(userIds: officialIds);
-        await _ensureNotPinned(userIds: officialIds);
+        await _ensureNormalReceiveOpt(
+          userIds: officialIds,
+          identity: identity,
+        );
+        await _ensureNotPinned(userIds: officialIds, identity: identity);
       }
+      if (!_isCurrent(identity)) return false;
       _lastEnsureSubscribedAt = DateTime.now();
       return true;
     } finally {
-      infoRevision.value++;
+      if (_isCurrent(identity)) infoRevision.value++;
     }
   }
 
   static Future<void> _ensureNormalReceiveOpt({
     required List<String> userIds,
+    required SessionIdentity identity,
   }) async {
-    if (userIds.isEmpty) {
+    if (userIds.isEmpty || !_isCurrent(identity)) {
       return;
     }
     final res = await TencentImSDKPlugin.v2TIMManager
@@ -593,8 +650,12 @@ class PlatformOfficialAccountService {
     }
   }
 
-  static Future<void> _ensureNotPinned({required List<String> userIds}) async {
+  static Future<void> _ensureNotPinned({
+    required List<String> userIds,
+    required SessionIdentity identity,
+  }) async {
     for (final id in userIds) {
+      if (!_isCurrent(identity)) return;
       final uid = id.trim();
       if (uid.isEmpty) {
         continue;
@@ -620,8 +681,11 @@ class PlatformOfficialAccountService {
     return resolveShowName(userId: def.userId);
   }
 
-  static Future<void> _refreshCachedProfile({List<String>? userIds}) async {
-    if (!await _isImLoggedIn()) {
+  static Future<void> _refreshCachedProfile({
+    List<String>? userIds,
+    required SessionIdentity identity,
+  }) async {
+    if (!await _isImLoggedIn() || !_isCurrent(identity)) {
       return;
     }
     final ids = _fetchableProfileUserIds(userIds);
@@ -631,6 +695,7 @@ class PlatformOfficialAccountService {
     final res = await TencentImSDKPlugin.v2TIMManager.getUsersInfo(
       userIDList: ids,
     );
+    if (!_isCurrent(identity)) return;
     if (res.code != 0 || res.data == null || res.data!.isEmpty) {
       return;
     }
@@ -672,16 +737,17 @@ class PlatformOfficialAccountService {
   static Future<void> _refreshCachedProfileWithRetry({
     int attempts = 5,
     List<String>? userIds,
+    required SessionIdentity identity,
   }) async {
     final ids = _fetchableProfileUserIds(userIds ?? officialAccountIds);
     if (ids.isEmpty) {
       return;
     }
     for (var i = 0; i < attempts; i++) {
-      if (!await _isImLoggedIn()) {
+      if (!await _isImLoggedIn() || !_isCurrent(identity)) {
         return;
       }
-      await _refreshCachedProfile(userIds: ids);
+      await _refreshCachedProfile(userIds: ids, identity: identity);
       final allReady = ids.every(_hasUsableCachedProfile);
       if (allReady) {
         return;
@@ -690,6 +756,17 @@ class PlatformOfficialAccountService {
         await Future<void>.delayed(Duration(milliseconds: 250 * (i + 1)));
       }
     }
+  }
+
+  static bool _isCurrent(SessionIdentity identity) {
+    return identity.ownerUserId.isNotEmpty &&
+        SessionIdentityService.instance.isCurrent(identity);
+  }
+
+  static bool _sameOwner(String? left, String? right) {
+    final a = ChatIdFormat.rawUserUid(left);
+    final b = ChatIdFormat.rawUserUid(right);
+    return a.isNotEmpty && a == b;
   }
 
   /// 展示名：IM 昵称缓存 > 会话 showName（SDK）> userID。

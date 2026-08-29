@@ -13,6 +13,7 @@ import 'package:tencent_cloud_chat_demo/src/services/peer_profile_refresh_bus.da
 import 'package:tencent_cloud_chat_demo/src/widgets/conversation_profile_pin_bar.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/group_profile_join_mode_row.dart';
 import 'package:tencent_cloud_chat_demo/src/group_info_detail.dart';
+import 'package:tencent_cloud_chat_demo/src/api/me_group_api.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/conversation_group_title_color.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
@@ -21,7 +22,7 @@ import 'package:tencent_cloud_chat_demo/utils/group_display_resolver.dart';
 import 'package:tencent_cloud_chat_demo/src/navigation/group_leave_navigation.dart';
 import 'package:tencent_cloud_chat_demo/src/platform/clipboard_guard.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
-import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_flags.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im_group_receive_opt.dart';
 import 'package:tencent_cloud_chat_demo/utils/dio_error_message.dart';
@@ -64,6 +65,7 @@ import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitGroupProfile/group_pro
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitGroupProfile/widgets/tim_uikit_group_button_area.dart';
 import 'package:tencent_cloud_chat_demo/src/pages/profile_signature_edit_page.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitGroupProfile/widgets/tim_ui_group_profile_widget.dart';
+import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitGroupProfile/widgets/tim_uikit_group_detail_card.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/group_member_preview_skeleton.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/group_profile_type_indicators.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/avatar.dart';
@@ -947,6 +949,8 @@ class GroupProfilePage extends StatelessWidget {
     final prevOpt = model.conversation?.recvOpt ?? 0;
     final optimistic = ConversationPerfFlags.recvOptOptimisticUiEnabled;
     if (optimistic) {
+      // 072 phase-6 allowlist: pending-only UI projection. Success is
+      // published by the Coordinator commit; SDK failure rolls this back.
       final conversation = model.conversation;
       final seedIds = <String>{
         for (final id in candidates) 'group_$id',
@@ -986,9 +990,6 @@ class GroupProfilePage extends StatelessWidget {
     model.groupID = (ok && successId != null && successId.isNotEmpty)
         ? successId
         : previousId;
-    if (!context.mounted) {
-      return;
-    }
     if (!ok) {
       if (optimistic) {
         final conversation = model.conversation;
@@ -1009,44 +1010,46 @@ class GroupProfilePage extends StatelessWidget {
           );
         }
       }
-      ToastUtils.toast(AppI18n.of(context).t(
-        zhHans: '设置失败($lastCode) $lastDesc',
-        zhHant: '設置失敗($lastCode) $lastDesc',
-        en: 'Failed ($lastCode) $lastDesc',
-        ja: '失敗($lastCode) $lastDesc',
-        ko: '실패($lastCode) $lastDesc',
-      ));
+      if (context.mounted) {
+        ToastUtils.toast(AppI18n.of(context).t(
+          zhHans: '设置失败($lastCode) $lastDesc',
+          zhHant: '設置失敗($lastCode) $lastDesc',
+          en: 'Failed ($lastCode) $lastDesc',
+          ja: '失敗($lastCode) $lastDesc',
+          ko: '실패($lastCode) $lastDesc',
+        ));
+      }
       return;
     }
 
     final conversation = model.conversation;
-    final persistIds = <String>{
-      'group_$primaryImId',
-      for (final id in candidates) 'group_$id',
-    };
     if (conversation != null) {
-      conversation.recvOpt = optIndex;
       final conversationId = conversation.conversationID.trim().isNotEmpty
           ? conversation.conversationID.trim()
           : 'group_$primaryImId';
-      persistIds.add(conversationId);
-      for (final conversationId in persistIds) {
-        ConversationListNotifier.instance.applyRecvOptLocally(
+      try {
+        await ConversationSyncService.instance.applyConversationMuteLocally(
           conversationID: conversationId,
           recvOpt: optIndex,
+          snapshot: conversation,
         );
+      } catch (e) {
+        debugPrint('GroupProfile disturb commit failed: $e');
       }
-      unawaited(
-        ConversationLocalStore.instance.upsertBatch(
-          conversations: [conversation],
-        ),
-      );
     } else {
+      final persistIds = <String>{
+        'group_$primaryImId',
+        for (final id in candidates) 'group_$id',
+      };
       for (final conversationId in persistIds) {
-        ConversationListNotifier.instance.applyRecvOptLocally(
-          conversationID: conversationId,
-          recvOpt: optIndex,
-        );
+        try {
+          await ConversationSyncService.instance.applyConversationMuteLocally(
+            conversationID: conversationId,
+            recvOpt: optIndex,
+          );
+        } catch (e) {
+          debugPrint('GroupProfile disturb shell commit failed: $e');
+        }
       }
     }
   }
@@ -1216,10 +1219,14 @@ class GroupProfilePage extends StatelessWidget {
       groupId: groupId,
       groupList: serviceLocator<TUIFriendShipViewModel>().groupList,
     );
+    final avatarVersion = localRecord?.avatarVersion ?? 0;
     final canOpenGroupInfo = _canManageGroup(groupInfo);
     final canInviteMember = model.canInviteMember();
     final canKickOffMember = model.canKickOffMember();
-    final memberCount = _resolveDisplayedMemberCount(model, memberList);
+    final localMemberCount = localRecord?.memberCount ?? 0;
+    final memberCount = localMemberCount > 0
+        ? localMemberCount
+        : _resolveDisplayedMemberCount(model, memberList);
     const maxPreviewSlots = 10;
     final actionSlotCount =
         (canInviteMember ? 1 : 0) + (canKickOffMember ? 1 : 0);
@@ -1329,6 +1336,16 @@ class GroupProfilePage extends StatelessWidget {
                     showName: groupName,
                     type: 2,
                     isShowBigWhenClick: true,
+                    previewFaceUrl: localRecord?.avatarPreviewUrl,
+                    previewUrlResolver: () async {
+                      final result = await MeGroupApi.instance
+                          .fetchGroupAvatarPreview(groupId);
+                      return result.previewUrl;
+                    },
+                    avatarCacheKey:
+                        'avatar|group|$groupId|$avatarVersion|thumb',
+                    previewCacheKey:
+                        'avatar|group|$groupId|$avatarVersion|preview',
                     borderRadius: BorderRadius.circular(28),
                   ),
                 ),
@@ -1433,7 +1450,14 @@ class GroupProfilePage extends StatelessWidget {
     TUIGroupProfileModel model,
   ) {
     final canManageGroup = _canManageGroup(groupInfo);
-    final notice = (groupInfo.notification ?? "").trim();
+    final localRecord = GroupLocalStore.instance.readCached(
+      groupId: groupInfo.groupID,
+    );
+    // Presence of a Store row is authoritative even when the notice is empty;
+    // otherwise a cleared notice is resurrected from stale SDK groupInfo.
+    final notice = localRecord != null
+        ? localRecord.notice.trim()
+        : (groupInfo.notification ?? "").trim();
     final groupNoticeText = notice.isEmpty
         ? AppI18n.of(context).t(
             zhHans: '暂无群公告',
@@ -1445,7 +1469,10 @@ class GroupProfilePage extends StatelessWidget {
         : notice;
     final nameCard = model.getSelfNameCard().trim();
     final showMuteSwitch = groupInfo.groupType != GroupType.Meeting;
-    final groupAlias = _resolveGroupDisplayAlias(groupInfo);
+    final localAlias = localRecord?.displayAlias.trim() ?? '';
+    final groupAlias = localAlias.isNotEmpty
+        ? localAlias
+        : _resolveGroupDisplayAlias(groupInfo);
 
     final basicRows = <Widget>[
       _buildGroupAliasRow(
@@ -1598,120 +1625,145 @@ class GroupProfilePage extends StatelessWidget {
       value: overlayStyle,
       child: TencentPage(
         name: 'groupProfile',
-        child: ValueListenableBuilder<int>(
-          valueListenable: PeerProfileRefreshBus.instance.revision,
-          builder: (context, _, __) {
+        child: AnimatedBuilder(
+          animation: Listenable.merge(<Listenable>[
+            PeerProfileRefreshBus.instance.revision,
+            GroupLocalStore.instance.commitListenable,
+          ]),
+          builder: (context, _) {
             return Scaffold(
-          backgroundColor:
-              isDarkBackground ? appBarBaseColor : const Color(0xFFF1F1F1),
-          extendBody: true,
-          appBar: AppBar(
-              systemOverlayStyle: overlayStyle,
-              title: Text(
-                AppI18n.of(context).t(
-                  zhHans: '群聊',
-                  zhHant: '群聊',
-                  en: 'Groups',
-                  ja: 'グループ',
-                  ko: '그룹',
-                ),
-                style: TextStyle(
-                  color: theme.appbarTextColor ?? theme.darkTextColor,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              iconTheme: IconThemeData(
-                color: theme.primaryColor ?? const Color(0xFF1E90FF),
-              ),
-              shadowColor: theme.weakDividerColor,
-              backgroundColor: theme.appbarBgColor ?? Colors.white),
-          body: SafeArea(
-            top: false,
-            child: TIMUIKitGroupProfile(
-              lifeCycle: GroupProfileLifeCycle(didLeaveGroup: () async {
-                await GroupLeaveNavigation.returnToMessageList(context);
-              }),
-              groupID: groupID,
-              onClickUser: (V2TimGroupMemberFullInfo memberInfo, _) {
-                final userID = memberInfo.userID.trim();
-                if (userID.isEmpty ||
-                    userID == _selfInfoViewModel.loginInfo?.userID) {
-                  return;
-                }
-                ProfilePageNav.openUserProfileOrAddFriend(
-                  context,
-                  userID: userID,
-                  nickname: UserDisplayProfile.nameOfMember(memberInfo),
-                  avatarUrl: UserDisplayProfile.avatarOfMember(memberInfo),
-                  addSource: FriendAddSource.card,
-                  groupId: groupID,
-                );
-              },
-              builder: isWideScreen
-                  ? null
-                  : (context, groupInfo, groupMemberList) {
-                      final model = Provider.of<TUIGroupProfileModel>(context);
-                      return _buildMobileGroupProfile(
-                        context,
-                        theme,
-                        groupInfo,
-                        groupMemberList,
-                        model,
-                      );
-                    },
-              profileWidgetBuilder: isWideScreen
-                  ? GroupProfileWidgetBuilder(
-                      searchMessage: () {
-                        return TIMUIKitGroupProfileWidget.searchMessage(
-                            (V2TimConversation? conversation) {
-                          _openSearchMessage(context, conversation);
-                        });
-                      },
-                      groupJoiningModeBar: (groupAddOptType, handleActionTap) {
-                        return const GroupProfileJoinModeRow();
-                      },
-                      pinedConversationBar: (isPinned, onChange) {
-                        return Consumer<TUIGroupProfileModel>(
-                          builder: (context, model, _) {
-                            return ConversationGroupProfilePinBar(
-                              groupID: groupID,
-                              conversation: model.conversation,
-                              source: 'group_profile_wide',
-                              onApplied: (pinned) {
-                                if (model.conversation != null) {
-                                  model.conversation!.isPinned = pinned;
-                                }
+              backgroundColor:
+                  isDarkBackground ? appBarBaseColor : const Color(0xFFF1F1F1),
+              extendBody: true,
+              appBar: AppBar(
+                  systemOverlayStyle: overlayStyle,
+                  title: Text(
+                    AppI18n.of(context).t(
+                      zhHans: '群聊',
+                      zhHant: '群聊',
+                      en: 'Groups',
+                      ja: 'グループ',
+                      ko: '그룹',
+                    ),
+                    style: TextStyle(
+                      color: theme.appbarTextColor ?? theme.darkTextColor,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  iconTheme: IconThemeData(
+                    color: theme.primaryColor ?? const Color(0xFF1E90FF),
+                  ),
+                  shadowColor: theme.weakDividerColor,
+                  backgroundColor: theme.appbarBgColor ?? Colors.white),
+              body: SafeArea(
+                top: false,
+                child: TIMUIKitGroupProfile(
+                  lifeCycle: GroupProfileLifeCycle(didLeaveGroup: () async {
+                    await GroupLeaveNavigation.returnToMessageList(context);
+                  }),
+                  groupID: groupID,
+                  onClickUser: (V2TimGroupMemberFullInfo memberInfo, _) {
+                    final userID = memberInfo.userID.trim();
+                    if (userID.isEmpty ||
+                        userID == _selfInfoViewModel.loginInfo?.userID) {
+                      return;
+                    }
+                    ProfilePageNav.openUserProfileOrAddFriend(
+                      context,
+                      userID: userID,
+                      nickname: UserDisplayProfile.nameOfMember(memberInfo),
+                      avatarUrl: UserDisplayProfile.avatarOfMember(memberInfo),
+                      addSource: FriendAddSource.card,
+                      groupId: groupID,
+                    );
+                  },
+                  builder: isWideScreen
+                      ? null
+                      : (context, groupInfo, groupMemberList) {
+                          final model =
+                              Provider.of<TUIGroupProfileModel>(context);
+                          return _buildMobileGroupProfile(
+                            context,
+                            theme,
+                            groupInfo,
+                            groupMemberList,
+                            model,
+                          );
+                        },
+                  profileWidgetBuilder: isWideScreen
+                      ? GroupProfileWidgetBuilder(
+                          detailCard: (groupInfo, updateGroupName) {
+                            final local = GroupLocalStore.instance.readCached(
+                              groupId: groupInfo.groupID,
+                            );
+                            return GroupProfileDetailCard(
+                              groupInfo: groupInfo,
+                              isHavePermission: _canManageGroup(groupInfo),
+                              updateGroupName: updateGroupName,
+                              previewFaceUrl: local?.avatarPreviewUrl,
+                              previewUrlResolver: () async {
+                                final result = await MeGroupApi.instance
+                                    .fetchGroupAvatarPreview(groupInfo.groupID);
+                                return result.previewUrl;
+                              },
+                              avatarCacheKey:
+                                  'avatar|group|${groupInfo.groupID}|${local?.avatarVersion ?? 0}|thumb',
+                              previewCacheKey:
+                                  'avatar|group|${groupInfo.groupID}|${local?.avatarVersion ?? 0}|preview',
+                            );
+                          },
+                          searchMessage: () {
+                            return TIMUIKitGroupProfileWidget.searchMessage(
+                                (V2TimConversation? conversation) {
+                              _openSearchMessage(context, conversation);
+                            });
+                          },
+                          groupJoiningModeBar:
+                              (groupAddOptType, handleActionTap) {
+                            return const GroupProfileJoinModeRow();
+                          },
+                          pinedConversationBar: (isPinned, onChange) {
+                            return Consumer<TUIGroupProfileModel>(
+                              builder: (context, model, _) {
+                                return ConversationGroupProfilePinBar(
+                                  groupID: groupID,
+                                  conversation: model.conversation,
+                                  source: 'group_profile_wide',
+                                  onApplied: (pinned) {
+                                    if (model.conversation != null) {
+                                      model.conversation!.isPinned = pinned;
+                                    }
+                                  },
+                                );
                               },
                             );
                           },
-                        );
-                      },
-                    )
-                  : null,
-              profileWidgetsOrder: isWideScreen
-                  ? const [
-                      GroupProfileWidgetEnum.detailCard,
-                      GroupProfileWidgetEnum.operationDivider,
-                      GroupProfileWidgetEnum.memberListTile,
-                      GroupProfileWidgetEnum.operationDivider,
-                      GroupProfileWidgetEnum.searchMessage,
-                      GroupProfileWidgetEnum.operationDivider,
-                      GroupProfileWidgetEnum.groupNotice,
-                      GroupProfileWidgetEnum.groupManage,
-                      GroupProfileWidgetEnum.groupJoiningModeBar,
-                      GroupProfileWidgetEnum.operationDivider,
-                      GroupProfileWidgetEnum.pinedConversationBar,
-                      GroupProfileWidgetEnum.muteGroupMessageBar,
-                      GroupProfileWidgetEnum.operationDivider,
-                      GroupProfileWidgetEnum.nameCardBar,
-                      GroupProfileWidgetEnum.operationDivider,
-                      GroupProfileWidgetEnum.buttonArea,
-                    ]
-                  : null,
-            ),
-          ),
-        );
+                        )
+                      : null,
+                  profileWidgetsOrder: isWideScreen
+                      ? const [
+                          GroupProfileWidgetEnum.detailCard,
+                          GroupProfileWidgetEnum.operationDivider,
+                          GroupProfileWidgetEnum.memberListTile,
+                          GroupProfileWidgetEnum.operationDivider,
+                          GroupProfileWidgetEnum.searchMessage,
+                          GroupProfileWidgetEnum.operationDivider,
+                          GroupProfileWidgetEnum.groupNotice,
+                          GroupProfileWidgetEnum.groupManage,
+                          GroupProfileWidgetEnum.groupJoiningModeBar,
+                          GroupProfileWidgetEnum.operationDivider,
+                          GroupProfileWidgetEnum.pinedConversationBar,
+                          GroupProfileWidgetEnum.muteGroupMessageBar,
+                          GroupProfileWidgetEnum.operationDivider,
+                          GroupProfileWidgetEnum.nameCardBar,
+                          GroupProfileWidgetEnum.operationDivider,
+                          GroupProfileWidgetEnum.buttonArea,
+                        ]
+                      : null,
+                ),
+              ),
+            );
           },
         ),
       ),

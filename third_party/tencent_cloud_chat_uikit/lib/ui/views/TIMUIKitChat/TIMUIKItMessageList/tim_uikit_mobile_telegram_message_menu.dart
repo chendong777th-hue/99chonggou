@@ -15,9 +15,11 @@ import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKitMessageIt
 
 /// 表情条沿用浅色毛玻璃；操作菜单对齐微信深色横向面板。
 const Color _kTelegramMenuBackgroundColor = Color(0xE6F2F2F7);
-const Color _kWeChatActionMenuBackgroundColor = Color(0xE64C4C4C);
+// The WeChat action panel is an opaque surface: no translucency, border, or
+// shadow should blend the menu with the dimmed message backdrop.
+const Color _kWeChatActionMenuBackgroundColor = Color(0xFF4C4C4C);
 
-/// Resolved layout for Telegram-style mobile context menu.
+/// Resolved layout for the mobile WeChat-style context menu.
 class TelegramMobileContextMenuLayout {
   final double menuTop;
   final double? menuMaxHeight;
@@ -38,7 +40,7 @@ class TelegramMobileContextMenuLayout {
   });
 }
 
-/// Telegram-style placement:
+/// WeChat-style placement:
 /// - Reactions sit above the bubble top (or above the menu when flipped).
 /// - Menu prefers below the bubble; flips above when bottom space is tight.
 /// - The whole stack shifts vertically to stay inside [safeTop, safeBottom].
@@ -51,7 +53,8 @@ TelegramMobileContextMenuLayout resolveTelegramMobileContextMenuLayout({
   required double menuWidth,
   required double menuHeight,
   required bool showReactionBar,
-  double reactionBarHeight = TIMUIKitMessageTooltipState.mobileTelegramReactionBarHeight,
+  double reactionBarHeight =
+      TIMUIKitMessageTooltipState.mobileTelegramReactionBarHeight,
   double gap = 8,
   double edgePadding = 8,
 }) {
@@ -78,13 +81,11 @@ TelegramMobileContextMenuLayout resolveTelegramMobileContextMenuLayout({
 
   if (menuBelowBubble) {
     menuTop = bubbleAnchor.bottom + gap;
-    reactionTop = showReactionBar
-        ? bubbleAnchor.top - reactionBarHeight - gap
-        : null;
+    reactionTop =
+        showReactionBar ? bubbleAnchor.top - reactionBarHeight - gap : null;
   } else {
     menuTop = bubbleAnchor.top - gap - menuHeight;
-    reactionTop =
-        showReactionBar ? menuTop - reactionBarHeight - gap : null;
+    reactionTop = showReactionBar ? menuTop - reactionBarHeight - gap : null;
   }
 
   if (!menuBelowBubble) {
@@ -149,13 +150,14 @@ TelegramMobileContextMenuLayout resolveTelegramMobileContextMenuLayout({
 
   final menuLeft = isSelf
       ? null
-      : bubbleAnchor.left.clamp(edgePadding, screenWidth - menuWidth - edgePadding);
+      : bubbleAnchor.left
+          .clamp(edgePadding, screenWidth - menuWidth - edgePadding);
   final menuRight = isSelf
       ? (screenWidth - bubbleAnchor.right)
           .clamp(edgePadding, screenWidth - menuWidth - edgePadding)
       : null;
-  final reactionLeft =
-      bubbleAnchor.left.clamp(edgePadding, screenWidth - menuWidth - edgePadding);
+  final reactionLeft = bubbleAnchor.left
+      .clamp(edgePadding, screenWidth - menuWidth - edgePadding);
 
   return TelegramMobileContextMenuLayout(
     menuTop: menuTop,
@@ -180,11 +182,13 @@ class MobileTelegramMessageContextMenu extends StatefulWidget {
   final double safeBottom;
   final bool allowAtUserWhenReply;
   final bool showQuickReactionBar;
-  final Function(String? userId, String? nickName)? onLongPressForOthersHeadPortrait;
+  final Function(String? userId, String? nickName)?
+      onLongPressForOthersHeadPortrait;
   final Function(String? userId, String? nickName)? onAtUserWhenReply;
   final V2TimGroupMemberFullInfo? groupMemberInfo;
   final bool iSUseDefaultHoverBar;
   final VoidCallback onClose;
+  final VoidCallback onDismissBlank;
   final ValueChanged<int> onSelectSticker;
 
   /// When non-null, super-long-text mode: the full bubble snapshot scrolls
@@ -202,6 +206,7 @@ class MobileTelegramMessageContextMenu extends StatefulWidget {
     required this.message,
     required this.model,
     required this.onClose,
+    required this.onDismissBlank,
     required this.onSelectSticker,
     required this.safeTop,
     required this.safeBottom,
@@ -238,7 +243,8 @@ class _MobileTelegramMessageContextMenuState
     super.initState();
     if (widget.scrollableBubbleImage != null) {
       _comboScrollController = ScrollController();
-      WidgetsBinding.instance.addPostFrameCallback((_) => _revealInitialScroll());
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _revealInitialScroll());
     }
     WidgetsBinding.instance.addPostFrameCallback(_remeasure);
   }
@@ -249,7 +255,8 @@ class _MobileTelegramMessageContextMenuState
     }
     final controller = _comboScrollController;
     if (controller == null || !controller.hasClients) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => _revealInitialScroll());
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _revealInitialScroll());
       return;
     }
 
@@ -299,16 +306,10 @@ class _MobileTelegramMessageContextMenuState
     }
   }
 
-  final DateTime _openedAt = DateTime.now();
-
   void _dismissOnBlankTap() {
-    // Mirror the controller's open guard so the long-press release doesn't
-    // immediately close the freshly opened menu.
-    if (DateTime.now().difference(_openedAt) <
-        const Duration(milliseconds: 320)) {
-      return;
-    }
-    widget.onClose();
+    // The owning context controller applies the long-press release guard and
+    // queues early dismissal instead of dropping it.
+    widget.onDismissBlank();
   }
 
   @override
@@ -351,7 +352,8 @@ class _MobileTelegramMessageContextMenuState
         _measuredReactionHeight = reactionHeight ?? _measuredReactionHeight;
       });
       if (widget.scrollableBubbleImage != null && menuChanged) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => _revealInitialScroll());
+        WidgetsBinding.instance
+            .addPostFrameCallback((_) => _revealInitialScroll());
       }
       WidgetsBinding.instance.addPostFrameCallback(_remeasure);
     }
@@ -431,8 +433,9 @@ class _MobileTelegramMessageContextMenuState
     final leftInset = anchor.left.clamp(0.0, screenWidth).toDouble();
     final rightInset =
         (screenWidth - anchor.right).clamp(0.0, screenWidth).toDouble();
-    final reactionLeft =
-        anchor.left.clamp(8.0, max(8.0, screenWidth - menuWidth - 8.0)).toDouble();
+    final reactionLeft = anchor.left
+        .clamp(8.0, max(8.0, screenWidth - menuWidth - 8.0))
+        .toDouble();
 
     final bubble = Padding(
       padding: EdgeInsets.only(left: leftInset, right: rightInset),
@@ -561,9 +564,8 @@ class _MobileTelegramMessageContextMenuState
       widget.estimatedMenuItemCount,
     );
     final menuHeight = _measuredMenuHeight ?? estimatedMenuHeight;
-    final reactionBarHeight =
-        _measuredReactionHeight ??
-            TIMUIKitMessageTooltipState.mobileTelegramReactionBarHeight;
+    final reactionBarHeight = _measuredReactionHeight ??
+        TIMUIKitMessageTooltipState.mobileTelegramReactionBarHeight;
 
     final layout = resolveTelegramMobileContextMenuLayout(
       bubbleAnchor: anchor,
@@ -577,8 +579,16 @@ class _MobileTelegramMessageContextMenuState
       reactionBarHeight: reactionBarHeight,
     );
 
-    final needsScroll = layout.menuMaxHeight != null &&
-        layout.menuMaxHeight! < menuHeight - 1;
+    final needsScroll =
+        layout.menuMaxHeight != null && layout.menuMaxHeight! < menuHeight - 1;
+    final menuLeft = layout.menuLeft ??
+        media.size.width - (layout.menuRight ?? 0) - menuWidth;
+    final pointerLeft = (anchor.center.dx - 8)
+        .clamp(menuLeft + 14, menuLeft + menuWidth - 30)
+        .toDouble();
+    final pointerTop = layout.menuBelowBubble
+        ? layout.menuTop - 7
+        : layout.menuTop + menuHeight;
 
     return SizedBox(
       width: media.size.width,
@@ -607,6 +617,19 @@ class _MobileTelegramMessageContextMenuState
                 ),
               ),
             Positioned(
+              left: pointerLeft,
+              top: pointerTop,
+              child: IgnorePointer(
+                child: CustomPaint(
+                  size: const Size(16, 8),
+                  painter: _MenuPointerPainter(
+                    color: _kWeChatActionMenuBackgroundColor,
+                    pointsDown: !layout.menuBelowBubble,
+                  ),
+                ),
+              ),
+            ),
+            Positioned(
               left: layout.menuLeft,
               right: layout.menuRight,
               top: layout.menuTop,
@@ -620,8 +643,7 @@ class _MobileTelegramMessageContextMenuState
                   useBackdropBlur: false,
                   child: _buildTooltip(
                     layout: TelegramMobileTooltipLayout.actionMenuOnly,
-                    menuMaxHeight:
-                        needsScroll ? layout.menuMaxHeight : null,
+                    menuMaxHeight: needsScroll ? layout.menuMaxHeight : null,
                   ),
                 ),
               ),
@@ -631,6 +653,36 @@ class _MobileTelegramMessageContextMenuState
       ),
     );
   }
+}
+
+class _MenuPointerPainter extends CustomPainter {
+  final Color color;
+  final bool pointsDown;
+
+  const _MenuPointerPainter({required this.color, required this.pointsDown});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final path = Path();
+    if (pointsDown) {
+      path
+        ..moveTo(0, 0)
+        ..lineTo(size.width, 0)
+        ..lineTo(size.width / 2, size.height)
+        ..close();
+    } else {
+      path
+        ..moveTo(size.width / 2, 0)
+        ..lineTo(size.width, size.height)
+        ..lineTo(0, size.height)
+        ..close();
+    }
+    canvas.drawPath(path, Paint()..color = color);
+  }
+
+  @override
+  bool shouldRepaint(covariant _MenuPointerPainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.pointsDown != pointsDown;
 }
 
 class _FrostedTooltipShell extends StatelessWidget {
@@ -654,10 +706,6 @@ class _FrostedTooltipShell extends StatelessWidget {
       decoration: BoxDecoration(
         color: backgroundColor ?? _kTelegramMenuBackgroundColor,
         borderRadius: borderRadius,
-        border: Border.all(
-          color: Colors.white.withValues(alpha: 0.35),
-          width: 0.5,
-        ),
       ),
       child: Padding(
         padding: padding,

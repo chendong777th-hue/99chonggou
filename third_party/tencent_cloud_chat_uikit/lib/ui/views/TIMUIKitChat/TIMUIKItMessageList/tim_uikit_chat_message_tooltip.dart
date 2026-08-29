@@ -110,8 +110,11 @@ class TIMUIKitMessageTooltip extends StatefulWidget {
 
 class TIMUIKitMessageTooltipState
     extends TIMUIKitState<TIMUIKitMessageTooltip> {
-  /// 微信风格：每行最多 5 个，图标在上、文案在下。
+  /// WeChat-style action panel: five columns and two stable rows per page.
   static const int mobileTooltipColumns = 5;
+  static const int mobileTooltipRows = 2;
+  static const int mobileTooltipItemsPerPage =
+      mobileTooltipColumns * mobileTooltipRows;
   static const double mobileTooltipItemWidth = 56;
   static const double mobileTooltipSpacing = 0;
   static const double mobileTooltipHorizontalPadding = 10;
@@ -122,16 +125,15 @@ class TIMUIKitMessageTooltipState
   static const double mobileTooltipWidth =
       mobileTooltipContentWidth + mobileTooltipHorizontalPadding * 2;
 
-  /// 单行网格高度（图标 + 间距 + 文案）。
-  static const double mobileTelegramMenuRowHeight = 58;
   static const double mobileTelegramReactionBarHeight = 46;
   static const double mobileWeChatMenuCellHeight = 52;
+  static const double mobileTelegramMenuRowHeight = mobileWeChatMenuCellHeight;
+  static const double mobileWeChatActionMenuHeight =
+      mobileTooltipRows * mobileWeChatMenuCellHeight +
+          mobileTooltipVerticalPadding * 2;
 
   static double estimateTelegramActionMenuHeight(int itemCount) {
-    final count = itemCount <= 0 ? 1 : itemCount;
-    final rows = (count / mobileTooltipColumns).ceil();
-    return rows * mobileTelegramMenuRowHeight +
-        mobileTooltipVerticalPadding * 2;
+    return mobileWeChatActionMenuHeight;
   }
 
   static const double _mobileTooltipItemWidth = mobileTooltipItemWidth;
@@ -166,7 +168,7 @@ class TIMUIKitMessageTooltipState
       case 'finder':
         return PlatformUtils().isMacOS ? '访达' : '文件夹';
       case 'copyMessage':
-        return '拷贝';
+        return '复制';
       case 'forwardMessage':
         return '转发';
       case 'replyMessage':
@@ -239,18 +241,50 @@ class TIMUIKitMessageTooltipState
 
   Widget _buildMobileTooltipGrid(BuildContext context, List<Widget> children) {
     final contentMaxWidth = mobileTooltipContentMaxWidth(context);
-
+    final pages = <Widget>[];
+    for (var start = 0;
+        start < children.length;
+        start += mobileTooltipItemsPerPage) {
+      final end = min(start + mobileTooltipItemsPerPage, children.length);
+      final pageChildren = children.sublist(start, end);
+      final firstRowEnd = min(mobileTooltipColumns, pageChildren.length);
+      pages.add(
+        SizedBox(
+          width: mobileTooltipContentWidth,
+          height: mobileWeChatMenuCellHeight * mobileTooltipRows,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: pageChildren
+                    .take(firstRowEnd)
+                    .map(_buildMobileTooltipCell)
+                    .toList(growable: false),
+              ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: pageChildren
+                    .skip(firstRowEnd)
+                    .map(_buildMobileTooltipCell)
+                    .toList(growable: false),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     return SizedBox(
       width: contentMaxWidth,
-      child: Wrap(
-        spacing: mobileTooltipSpacing,
-        runSpacing: 6,
-        alignment: WrapAlignment.start,
-        children: children
-            .map(
-              (child) => _buildMobileTooltipCell(child),
-            )
-            .toList(),
+      height: mobileWeChatMenuCellHeight * mobileTooltipRows,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        physics: const ClampingScrollPhysics(),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: pages,
+        ),
       ),
     );
   }
@@ -960,8 +994,7 @@ class TIMUIKitMessageTooltipState
     }
     model.updateMultiSelectStatus(false);
     model.setMessageItemChecked(widget.message, true);
-    final resolvedNavigator =
-        navigator ?? resolveUIKitRootNavigator(context);
+    final resolvedNavigator = navigator ?? resolveUIKitRootNavigator(context);
     if (resolvedNavigator == null) {
       onTIMCallback(TIMCallback(
         type: TIMCallbackType.INFO,
@@ -1028,8 +1061,7 @@ class TIMUIKitMessageTooltipState
     required V2TimMessage messageItem,
   }) async {
     final timestamp = messageItem.timestamp ?? widget.message.timestamp;
-    final isOwnMessage =
-        messageItem.isSelf ?? widget.message.isSelf ?? false;
+    final isOwnMessage = messageItem.isSelf ?? widget.message.isSelf ?? false;
     final needAdminRecall = !isOwnMessage ||
         (timestamp != null &&
             !isRevocable(timestamp, model.chatConfig.upperRecallTime));
@@ -1128,17 +1160,16 @@ class TIMUIKitMessageTooltipState
         TencentUtils.checkString(message.fileElem?.localUrl) ??
         message.fileElem?.path ??
         '';
-    final imageLocal = TencentUtils.checkString(
-            message.imageElem?.imageList?[0]?.localUrl) ??
-        TencentUtils.checkString(message.imageElem?.path) ??
-        '';
+    final imageLocal =
+        TencentUtils.checkString(message.imageElem?.imageList?[0]?.localUrl) ??
+            TencentUtils.checkString(message.imageElem?.path) ??
+            '';
     final videoLocal =
         TencentUtils.checkString(message.videoElem?.localVideoUrl) ??
             TencentUtils.checkString(message.videoElem?.videoPath) ??
             '';
     final sender = message.sender;
-    final dynamicQuote =
-        model.chatConfig.isAtWhenReplyDynamic?.call(message);
+    final dynamicQuote = model.chatConfig.isAtWhenReplyDynamic?.call(message);
     final isSelf = message.isSelf ?? true;
     final isGroup = TencentUtils.checkString(message.groupID) != null;
     final allowAt = widget.allowAtUserWhenReply;

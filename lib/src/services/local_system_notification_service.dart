@@ -41,7 +41,8 @@ class LocalSystemNotificationService {
           if (avatarUrl != null && avatarUrl.trim().isNotEmpty)
             'avatarUrl': avatarUrl.trim(),
           if (notificationId != null) 'notificationId': notificationId,
-          if (msgKey != null && msgKey.trim().isNotEmpty) 'msgKey': msgKey.trim(),
+          if (msgKey != null && msgKey.trim().isNotEmpty)
+            'msgKey': msgKey.trim(),
           if (threadId != null && threadId.trim().isNotEmpty)
             'threadId': threadId.trim(),
         },
@@ -51,6 +52,21 @@ class LocalSystemNotificationService {
       if (kDebugMode) {
         debugPrint('LocalSystemNotification: show failed ($e)');
       }
+      return false;
+    }
+  }
+
+  Future<bool> setAppBadge(int count) async {
+    if (kIsWeb || (!Platform.isAndroid && !Platform.isIOS)) {
+      return false;
+    }
+    try {
+      return await _channel.invokeMethod<bool>(
+            "setAppBadge",
+            <String, dynamic>{"count": count < 0 ? 0 : count},
+          ) ??
+          false;
+    } catch (_) {
       return false;
     }
   }

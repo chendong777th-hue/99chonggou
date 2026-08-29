@@ -16,6 +16,7 @@ class Frame {
   static TimingsCallback? _previousCallback;
   static bool _installed = false;
   static int _installDepth = 0;
+  static final Set<TimingsCallback> _timingsListeners = <TimingsCallback>{};
 
   /// Optional: log fps every [fpsLogEveryNFrames] reports (0 = never).
   @visibleForTesting
@@ -61,6 +62,13 @@ class Frame {
       prev(timings);
     }
 
+    // Keep additional probes off window.onReportTimings itself. There is only
+    // one platform callback; replacing it for every Chat instance either
+    // drops another consumer or recursively chains callbacks.
+    for (final listener in _timingsListeners.toList(growable: false)) {
+      listener(timings);
+    }
+
     if (fpsLogEveryNFrames > 0) {
       _reportsSinceLog++;
       if (_reportsSinceLog >= fpsLogEveryNFrames) {
@@ -68,6 +76,17 @@ class Frame {
         outputLogger.i('fps: $fps');
       }
     }
+  }
+
+  /// Registers a passive FrameTiming consumer without taking ownership of the
+  /// platform callback. Repeated registrations of the same callback are
+  /// intentionally idempotent.
+  static void addTimingsListener(TimingsCallback listener) {
+    _timingsListeners.add(listener);
+  }
+
+  static void removeTimingsListener(TimingsCallback listener) {
+    _timingsListeners.remove(listener);
   }
 
   static double get fps {
@@ -117,6 +136,7 @@ class Frame {
     _installDepth = 0;
     lastFrames.clear();
     _reportsSinceLog = 0;
+    _timingsListeners.clear();
     fpsLogEveryNFrames = 0;
   }
 }

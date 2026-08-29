@@ -4,7 +4,9 @@ import 'package:flutter/foundation.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_unread_aggregate.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_unread_trace.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/services/web_read_service.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_callback.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_callback.dart';
@@ -21,6 +23,16 @@ enum MarkReadEditMode { selected, scopeAll, archivedAll }
 
 /// 与会话列表 Tab 对齐的清未读 scope（避免 ClearService 依赖 UI 文件）。
 enum MarkReadListScope { all, c2c, group }
+
+class _LeaveFinalizeFlight {
+  const _LeaveFinalizeFlight({
+    required this.generation,
+    required this.future,
+  });
+
+  final int generation;
+  final Future<void> future;
+}
 
 /// [ConversationUnreadClearService.markReadForEditAction] 结果。
 class MarkReadEditResult {
@@ -84,10 +96,31 @@ class ConversationUnreadClearService {
       <String, DateTime>{};
   static final Map<String, DateTime> _lastSuccessfulSdkClean =
       <String, DateTime>{};
-  static final Set<String> _leaveFinalizedSessionIds = <String>{};
+  static final Map<String, int> _leaveSessionGenerationById = <String, int>{};
+  static final Map<String, int> _leaveFinalizedGenerationById = <String, int>{};
+  static final Map<String, _LeaveFinalizeFlight> _leaveFinalizeInFlightById =
+      <String, _LeaveFinalizeFlight>{};
 
   static Future<void> _queueTail = Future<void>.value();
   static DateTime? _lastQueuedSdkCleanAt;
+
+  static bool _isCurrentSession(int generation) {
+    return SessionIdentityService.instance.isGenerationCurrent(generation);
+  }
+
+  /// Invalidates account-scoped SDK cleanups before the next account starts.
+  /// In-flight native calls cannot be cancelled, but their retry tails and
+  /// post-success local writes must not cross the account boundary.
+  static void clearSession() {
+    _sdkCleanInFlight.clear();
+    _frequencyBlockUntil.clear();
+    _lastSuccessfulSdkClean.clear();
+    _leaveSessionGenerationById.clear();
+    _leaveFinalizedGenerationById.clear();
+    _leaveFinalizeInFlightById.clear();
+    _queueTail = Future<void>.value();
+    _lastQueuedSdkCleanAt = null;
+  }
 
   @visibleForTesting
   static Future<V2TimCallback> Function(String conversationID)?
@@ -98,10 +131,7 @@ class ConversationUnreadClearService {
 
   @visibleForTesting
   static void resetCoordinatorStateForTesting() {
-    _sdkCleanInFlight.clear();
-    _frequencyBlockUntil.clear();
-    _lastSuccessfulSdkClean.clear();
-    _leaveFinalizedSessionIds.clear();
+    clearSession();
     sdkCleanOverride = null;
     _queueTail = Future<void>.value();
     _lastQueuedSdkCleanAt = null;
@@ -190,33 +220,74 @@ class ConversationUnreadClearService {
     void Function(String conversationID)? markViewModelReadLocally,
   }) async {
     final started = DateTime.now();
+    final sessionGeneration = SessionIdentityService.instance.generation;
     late final MarkReadBatchResult local;
     switch (mode) {
       case MarkReadEditMode.selected:
-        local = await ConversationLocalStore.instance
-            .markConversationsReadLocallyBatch(selectedIds);
+        local = await ConversationLocalStore.instance.previewUnreadForMarkRead(
+          conversationIds: selectedIds,
+        );
         break;
       case MarkReadEditMode.archivedAll:
-        local = await ConversationLocalStore.instance
-            .markConversationsReadLocallyBatch(
-          archivedIds,
+        local = await ConversationLocalStore.instance.previewUnreadForMarkRead(
+          conversationIds: archivedIds,
           scope: listScope == MarkReadListScope.all
               ? null
               : _toStoreScope(listScope),
         );
         break;
       case MarkReadEditMode.scopeAll:
-        local = await ConversationLocalStore.instance.markAllUnreadReadLocally(
+        local = await ConversationLocalStore.instance.previewUnreadForMarkRead(
           scope: _toStoreScope(listScope),
           excludeConversationIds: archivedIds,
         );
         break;
     }
 
+    if (!_isCurrentSession(sessionGeneration)) {
+      return const MarkReadEditResult(
+        conversationCount: 0,
+        unreadSumBefore: 0,
+        sdkPath: 'none',
+        durationMs: 0,
+      );
+    }
+
+    await ConversationSyncService.instance.markConversationsReadLocallyBatch(
+      local.clearedIds,
+    );
+    if (!_isCurrentSession(sessionGeneration)) {
+      return const MarkReadEditResult(
+        conversationCount: 0,
+        unreadSumBefore: 0,
+        sdkPath: 'none',
+        durationMs: 0,
+      );
+    }
+
     ConversationListNotifier.instance.zeroUnreadLocallyMany(
       local.clearedIds,
       forceAggregateRefresh: true,
     );
+    if (mode == MarkReadEditMode.scopeAll) {
+      switch (listScope) {
+        case MarkReadListScope.c2c:
+          ConversationUnreadAggregate.instance.clearScopeOptimistically(
+            isGroup: false,
+          );
+          break;
+        case MarkReadListScope.group:
+          ConversationUnreadAggregate.instance.clearScopeOptimistically(
+            isGroup: true,
+          );
+          break;
+        case MarkReadListScope.all:
+          ConversationUnreadAggregate.instance
+            ..clearScopeOptimistically(isGroup: false)
+            ..clearScopeOptimistically(isGroup: true);
+          break;
+      }
+    }
     for (final id in local.clearedIds) {
       markViewModelReadLocally?.call(id);
     }
@@ -294,7 +365,8 @@ class ConversationUnreadClearService {
   static void beginConversationChatSession(String conversationID) {
     final id = conversationID.trim();
     if (id.isNotEmpty) {
-      _leaveFinalizedSessionIds.remove(id);
+      _leaveSessionGenerationById[id] =
+          (_leaveSessionGenerationById[id] ?? 0) + 1;
     }
   }
 
@@ -306,34 +378,118 @@ class ConversationUnreadClearService {
     void Function(String conversationID)? markViewModelReadLocally,
     bool scheduleSdkUnreadCleanOnLeave = true,
   }) async {
+    final sessionGeneration = SessionIdentityService.instance.generation;
+    if (!_isCurrentSession(sessionGeneration)) {
+      return;
+    }
     final id = conversationID.trim();
     if (id.isEmpty) {
       return;
     }
-    if (!_leaveFinalizedSessionIds.add(id)) {
+
+    final generation = _leaveSessionGenerationById[id] ?? 0;
+    if (_leaveFinalizedGenerationById[id] == generation) {
       ConversationUnreadTrace.log(
         'finalize_leave_skip',
         conversationID: id,
-        extras: <String, Object?>{'reason': 'already_finalized'},
+        extras: <String, Object?>{
+          'reason': 'already_finalized',
+          'generation': generation,
+        },
       );
+      return;
+    }
+
+    final existingFlight = _leaveFinalizeInFlightById[id];
+    if (existingFlight != null) {
+      ConversationUnreadTrace.log(
+        'finalize_leave_join',
+        conversationID: id,
+        extras: <String, Object?>{
+          'flightGeneration': existingFlight.generation,
+          'requestedGeneration': generation,
+        },
+      );
+      await existingFlight.future;
+      // A newer Chat session may have started while the previous generation
+      // was committing. In that case it still needs its own finalize.
+      if (!_isCurrentSession(sessionGeneration)) {
+        return;
+      }
+      if ((_leaveSessionGenerationById[id] ?? 0) != existingFlight.generation) {
+        return finalizeConversationLeaveOnce(
+          conversationID: id,
+          lastMessageId: lastMessageId,
+          entryUnreadCount: entryUnreadCount,
+          markViewModelReadLocally: markViewModelReadLocally,
+          scheduleSdkUnreadCleanOnLeave: scheduleSdkUnreadCleanOnLeave,
+        );
+      }
+      return;
+    }
+
+    final task = _finalizeConversationLeave(
+      conversationID: id,
+      generation: generation,
+      lastMessageId: lastMessageId,
+      entryUnreadCount: entryUnreadCount,
+      markViewModelReadLocally: markViewModelReadLocally,
+      scheduleSdkUnreadCleanOnLeave: scheduleSdkUnreadCleanOnLeave,
+      sessionGeneration: sessionGeneration,
+    );
+    final flight = _LeaveFinalizeFlight(
+      generation: generation,
+      future: task,
+    );
+    _leaveFinalizeInFlightById[id] = flight;
+    try {
+      await task;
+      if (_isCurrentSession(sessionGeneration)) {
+        _leaveFinalizedGenerationById[id] = generation;
+      }
+    } finally {
+      if (identical(_leaveFinalizeInFlightById[id], flight)) {
+        _leaveFinalizeInFlightById.remove(id);
+      }
+    }
+  }
+
+  static Future<void> _finalizeConversationLeave({
+    required String conversationID,
+    required int generation,
+    required String? lastMessageId,
+    required int entryUnreadCount,
+    required void Function(String conversationID)? markViewModelReadLocally,
+    required bool scheduleSdkUnreadCleanOnLeave,
+    required int sessionGeneration,
+  }) async {
+    if (!_isCurrentSession(sessionGeneration)) {
       return;
     }
     ConversationUnreadTrace.log(
       'finalize_leave_start',
-      conversationID: id,
-      extras: <String, Object?>{'entryUnreadCount': entryUnreadCount},
+      conversationID: conversationID,
+      extras: <String, Object?>{
+        'entryUnreadCount': entryUnreadCount,
+        'generation': generation,
+      },
     );
-    ConversationListNotifier.instance.zeroUnreadLocally(id);
+    ConversationListNotifier.instance.zeroUnreadLocally(conversationID);
     ConversationLocalStore.instance.recordReadClearedAnchor(
-      id,
+      conversationID,
       lastMessageId: lastMessageId,
     );
-    await ConversationSyncService.instance.markConversationReadLocally(id);
-    markViewModelReadLocally?.call(id);
+    await ConversationSyncService.instance.markConversationReadLocally(
+      conversationID,
+    );
+    if (!_isCurrentSession(sessionGeneration)) {
+      return;
+    }
+    markViewModelReadLocally?.call(conversationID);
     if (scheduleSdkUnreadCleanOnLeave) {
       unawaited(
         scheduleSdkUnreadClean(
-          conversationID: id,
+          conversationID: conversationID,
           trigger: SdkUnreadCleanTrigger.leave,
           hadUnread: entryUnreadCount > 0,
         ),
@@ -341,8 +497,9 @@ class ConversationUnreadClearService {
     }
     ConversationUnreadTrace.log(
       'finalize_leave_done',
-      conversationID: id,
+      conversationID: conversationID,
       unreadAfter: 0,
+      extras: <String, Object?>{'generation': generation},
     );
   }
 
@@ -356,6 +513,9 @@ class ConversationUnreadClearService {
       return;
     }
     final unreadBefore = conversation.unreadCount ?? 0;
+    final aggregate = ConversationUnreadAggregate.instance;
+    final aggregateBefore =
+        '${aggregate.c2cNotifiableUnreadSum}/${aggregate.groupNotifiableUnreadSum}';
     beginConversationChatSession(conversationID);
     ConversationListNotifier.instance.zeroUnreadLocally(conversationID);
     conversation.unreadCount = 0;
@@ -369,6 +529,13 @@ class ConversationUnreadClearService {
       conversationID: conversationID,
       unreadBefore: unreadBefore,
       unreadAfter: 0,
+      extras: <String, Object?>{
+        'path': 'fast',
+        'scope': isGroupConversation(conversation) ? 'group' : 'c2c',
+        'aggregateBefore': aggregateBefore,
+        'aggregateAfter':
+            '${aggregate.c2cNotifiableUnreadSum}/${aggregate.groupNotifiableUnreadSum}',
+      },
     );
     unawaited(
       ConversationSyncService.instance.markConversationReadLocally(
@@ -383,10 +550,14 @@ class ConversationUnreadClearService {
     required V2TimConversation conversation,
     void Function(String conversationID)? markViewModelReadLocally,
   }) async {
+    final sessionGeneration = SessionIdentityService.instance.generation;
     final conversationID = conversation.conversationID.trim();
     if (conversationID.isEmpty) {
       return;
     }
+    final aggregate = ConversationUnreadAggregate.instance;
+    final aggregateBefore =
+        '${aggregate.c2cNotifiableUnreadSum}/${aggregate.groupNotifiableUnreadSum}';
     ConversationListNotifier.instance.zeroUnreadLocally(conversationID);
     conversation.unreadCount = 0;
     ConversationLocalStore.instance.recordReadClearedAnchor(
@@ -397,7 +568,21 @@ class ConversationUnreadClearService {
       conversationID,
       forceImmediateUi: true,
     );
+    if (!_isCurrentSession(sessionGeneration)) {
+      return;
+    }
     markViewModelReadLocally?.call(conversationID);
+    ConversationUnreadTrace.log(
+      'clear_local_open_done',
+      conversationID: conversationID,
+      unreadAfter: 0,
+      extras: <String, Object?>{
+        'path': 'awaited',
+        'aggregateBefore': aggregateBefore,
+        'aggregateAfter':
+            '${aggregate.c2cNotifiableUnreadSum}/${aggregate.groupNotifiableUnreadSum}',
+      },
+    );
   }
 
   /// 进聊天后异步清 SDK 未读。
@@ -418,6 +603,7 @@ class ConversationUnreadClearService {
     void Function(String conversationID)? markViewModelReadLocally,
     bool markLocalAllOnSuccess = true,
   }) async {
+    final sessionGeneration = SessionIdentityService.instance.generation;
     final typeId = isGroup ? sdkCleanTypeGroup : sdkCleanTypeC2c;
     MarkSelectedReadLog.log('sdk_type_clean_begin', {
       'typeId': typeId,
@@ -443,7 +629,11 @@ class ConversationUnreadClearService {
       typeId,
       delays: openSdkRetryDelays,
       breakOnSuccess: true,
+      sessionGeneration: sessionGeneration,
     );
+    if (!_isCurrentSession(sessionGeneration)) {
+      return;
+    }
     if (lastCode == 0) {
       _lastSuccessfulSdkClean[typeId] = DateTime.now();
       if (markLocalAllOnSuccess) {
@@ -454,6 +644,7 @@ class ConversationUnreadClearService {
         await markAllLocalConversationsReadByType(
           isGroup: isGroup,
           markViewModelReadLocally: markViewModelReadLocally,
+          sessionGeneration: sessionGeneration,
         );
       } else {
         MarkSelectedReadLog.log('sdk_type_clean_ok_skip_local', {
@@ -484,10 +675,23 @@ class ConversationUnreadClearService {
   static Future<void> markAllLocalConversationsReadByType({
     required bool isGroup,
     void Function(String conversationID)? markViewModelReadLocally,
+    int? sessionGeneration,
   }) async {
-    final result = await ConversationLocalStore.instance.markAllUnreadReadLocally(
+    final generation =
+        sessionGeneration ?? SessionIdentityService.instance.generation;
+    final result =
+        await ConversationLocalStore.instance.previewUnreadForMarkRead(
       scope: isGroup ? MarkReadLocalScope.group : MarkReadLocalScope.c2c,
     );
+    if (!_isCurrentSession(generation)) {
+      return;
+    }
+    await ConversationSyncService.instance.markConversationsReadLocallyBatch(
+      result.clearedIds,
+    );
+    if (!_isCurrentSession(generation)) {
+      return;
+    }
     ConversationListNotifier.instance.zeroUnreadLocallyMany(
       result.clearedIds,
       forceAggregateRefresh: true,
@@ -507,6 +711,7 @@ class ConversationUnreadClearService {
     String conversationID, {
     bool hadUnread = true,
   }) {
+    final sessionGeneration = SessionIdentityService.instance.generation;
     final id = conversationID.trim();
     if (id.isEmpty || !hadUnread) {
       MarkSelectedReadLog.log('queue_skip', {
@@ -528,12 +733,23 @@ class ConversationUnreadClearService {
       'intervalMs': queuedSdkCleanInterval.inMilliseconds,
     });
     final previous = _queueTail;
-    final task = previous.then((_) => _runQueuedSdkUnreadClean(id));
+    final task = previous.then(
+      (_) => _runQueuedSdkUnreadClean(
+        id,
+        sessionGeneration: sessionGeneration,
+      ),
+    );
     _queueTail = task.catchError((Object _) {});
     return task;
   }
 
-  static Future<void> _runQueuedSdkUnreadClean(String conversationID) async {
+  static Future<void> _runQueuedSdkUnreadClean(
+    String conversationID, {
+    required int sessionGeneration,
+  }) async {
+    if (!_isCurrentSession(sessionGeneration)) {
+      return;
+    }
     final lastAt = _lastQueuedSdkCleanAt;
     if (lastAt != null) {
       final elapsed = DateTime.now().difference(lastAt);
@@ -544,6 +760,9 @@ class ConversationUnreadClearService {
           'waitMs': wait.inMilliseconds,
         });
         await Future<void>.delayed(wait);
+        if (!_isCurrentSession(sessionGeneration)) {
+          return;
+        }
       }
     }
 
@@ -561,7 +780,14 @@ class ConversationUnreadClearService {
           'waitMs': remaining.inMilliseconds,
         });
         await Future<void>.delayed(remaining);
+        if (!_isCurrentSession(sessionGeneration)) {
+          return;
+        }
       }
+    }
+
+    if (!_isCurrentSession(sessionGeneration)) {
+      return;
     }
 
     MarkSelectedReadLog.log('queue_run_sdk_clean', {'conv': conversationID});
@@ -571,6 +797,9 @@ class ConversationUnreadClearService {
       trigger: SdkUnreadCleanTrigger.open,
       hadUnread: true,
     );
+    if (!_isCurrentSession(sessionGeneration)) {
+      return;
+    }
     MarkSelectedReadLog.log('queue_run_sdk_clean_done', {
       'conv': conversationID,
     });
@@ -582,11 +811,15 @@ class ConversationUnreadClearService {
     required SdkUnreadCleanTrigger trigger,
     bool hadUnread = true,
   }) {
+    final sessionGeneration = SessionIdentityService.instance.generation;
     final id = conversationID.trim();
     if (id.isEmpty) {
       return Future<void>.value();
     }
     if (kIsWeb) {
+      return Future<void>.value();
+    }
+    if (!_isCurrentSession(sessionGeneration)) {
       return Future<void>.value();
     }
     if (!hadUnread && !_lastSuccessfulSdkClean.containsKey(id)) {
@@ -684,6 +917,7 @@ class ConversationUnreadClearService {
     final task = _runSdkClean(
       id,
       delays: delays,
+      sessionGeneration: sessionGeneration,
       // SDK success is authoritative for the current unread state. Retrying a
       // successful leave clean can incorrectly consume messages that arrive
       // after the user has left and also multiplies group read reports.
@@ -701,12 +935,17 @@ class ConversationUnreadClearService {
     String conversationID, {
     required List<Duration> delays,
     required bool breakOnSuccess,
+    required int sessionGeneration,
   }) async {
     final lastCode = await _cleanSdkWithRetry(
       conversationID,
       delays: delays,
       breakOnSuccess: breakOnSuccess,
+      sessionGeneration: sessionGeneration,
     );
+    if (!_isCurrentSession(sessionGeneration)) {
+      return;
+    }
     if (lastCode == 0) {
       _lastSuccessfulSdkClean[conversationID] = DateTime.now();
     }
@@ -757,13 +996,20 @@ class ConversationUnreadClearService {
     String conversationID, {
     required List<Duration> delays,
     required bool breakOnSuccess,
+    required int sessionGeneration,
   }) async {
     var lastCode = 1;
     var attempt = 0;
     for (final delay in delays) {
+      if (!_isCurrentSession(sessionGeneration)) {
+        return 1;
+      }
       attempt++;
       if (delay > Duration.zero) {
         await Future<void>.delayed(delay);
+      }
+      if (!_isCurrentSession(sessionGeneration)) {
+        return 1;
       }
       try {
         MarkSelectedReadLog.log('sdk_clean_attempt', {
@@ -772,6 +1018,9 @@ class ConversationUnreadClearService {
           'delayMs': delay.inMilliseconds,
         });
         final result = await _invokeSdkClean(conversationID);
+        if (!_isCurrentSession(sessionGeneration)) {
+          return 1;
+        }
         lastCode = result.code;
         MarkSelectedReadLog.log('sdk_clean_attempt_result', {
           'conv': conversationID,

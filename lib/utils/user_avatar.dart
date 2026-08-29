@@ -27,6 +27,22 @@ import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 class UserAvatarHelper {
   UserAvatarHelper._();
 
+  static String? cacheKey({
+    required String ownerId,
+    required int? avatarVersion,
+    required bool isGroup,
+    required String variant,
+  }) {
+    final owner = ownerId.trim();
+    // Backend avatar versions are positive. Friend-list records currently may
+    // expose no version and are persisted locally as 0; using that sentinel as
+    // a stable key would keep an old bitmap after the URL changes.
+    if (owner.isEmpty || avatarVersion == null || avatarVersion <= 0) {
+      return null;
+    }
+    return 'avatar|${isGroup ? 'group' : 'user'}|$owner|$avatarVersion|$variant';
+  }
+
   static String? resolveDisplayUrl(String? raw) {
     final trimmed = raw?.trim() ?? '';
     if (trimmed.isEmpty) {
@@ -55,7 +71,8 @@ class UserAvatarHelper {
         lower.contains('default_group_head')) {
       return true;
     }
-    final defaultUrl = IMDemoConfig.defaultRegisterAvatarUrl.trim().toLowerCase();
+    final defaultUrl =
+        IMDemoConfig.defaultRegisterAvatarUrl.trim().toLowerCase();
     return defaultUrl.isNotEmpty && lower == defaultUrl;
   }
 
@@ -247,6 +264,7 @@ class UserAvatarHelper {
             userId: id,
             nickname: remote?.nickname,
             avatarUrl: backendAvatar,
+            avatarVersion: remote?.avatarVersion,
           );
           return backendAvatar;
         }
@@ -311,7 +329,9 @@ class UserAvatarHelper {
 
   static Future<void> syncSelfAvatarFromBackend(String? rawAvatarUrl) async {
     final resolved = resolveDisplayUrl(rawAvatarUrl);
-    if (resolved == null || resolved.isEmpty || isDefaultPlaceholder(resolved)) {
+    if (resolved == null ||
+        resolved.isEmpty ||
+        isDefaultPlaceholder(resolved)) {
       return;
     }
 
@@ -332,11 +352,12 @@ class UserAvatarHelper {
   }
 
   /// 用户主动修改头像后，强制同步到 IM 与全局 self 资料。
-  static Future<V2TimUserFullInfo?> applySelfAvatarUpdate(
-    String? rawAvatarUrl,
-  ) async {
+  static Future<V2TimUserFullInfo?> applySelfAvatarUpdate(String? rawAvatarUrl,
+      {int? avatarVersion}) async {
     final resolved = resolveDisplayUrl(rawAvatarUrl);
-    if (resolved == null || resolved.isEmpty || isDefaultPlaceholder(resolved)) {
+    if (resolved == null ||
+        resolved.isEmpty ||
+        isDefaultPlaceholder(resolved)) {
       return null;
     }
 
@@ -356,9 +377,7 @@ class UserAvatarHelper {
 
     final infoRes =
         await TIMUIKitCore.getSDKInstance().getUsersInfo(userIDList: [userId]);
-    if (infoRes.code != 0 ||
-        infoRes.data == null ||
-        infoRes.data!.isEmpty) {
+    if (infoRes.code != 0 || infoRes.data == null || infoRes.data!.isEmpty) {
       return null;
     }
 
@@ -375,13 +394,15 @@ class UserAvatarHelper {
         avatarUrl: (updated.faceUrl ?? '').trim().isNotEmpty
             ? updated.faceUrl
             : resolved,
+        avatarVersion: avatarVersion,
       ),
     );
     return updated;
   }
 
   /// 用户主动修改昵称后，同步到 IM 与全局 self 资料。
-  static Future<V2TimUserFullInfo?> applySelfNicknameUpdate(String nickname) async {
+  static Future<V2TimUserFullInfo?> applySelfNicknameUpdate(
+      String nickname) async {
     final trimmed = nickname.trim();
     if (trimmed.isEmpty) {
       return null;
@@ -403,9 +424,7 @@ class UserAvatarHelper {
 
     final infoRes =
         await TIMUIKitCore.getSDKInstance().getUsersInfo(userIDList: [userId]);
-    if (infoRes.code != 0 ||
-        infoRes.data == null ||
-        infoRes.data!.isEmpty) {
+    if (infoRes.code != 0 || infoRes.data == null || infoRes.data!.isEmpty) {
       return null;
     }
 
@@ -473,8 +492,9 @@ class UserAvatarHelper {
       return false;
     }
 
-    final label = (showName?.trim().isNotEmpty == true ? showName!.trim() : 'avatar')
-        .replaceAll(RegExp(r'[^\w\-]+'), '_');
+    final label =
+        (showName?.trim().isNotEmpty == true ? showName!.trim() : 'avatar')
+            .replaceAll(RegExp(r'[^\w\-]+'), '_');
     final name =
         'avatar_${avatarType}_${label}_${DateTime.now().millisecondsSinceEpoch}';
     try {
@@ -563,8 +583,7 @@ class UserAvatarHelper {
       );
       try {
         final image = await pictureInfo.picture.toImage(size, size);
-        final byteData =
-            await image.toByteData(format: ui.ImageByteFormat.png);
+        final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
         image.dispose();
         return byteData?.buffer.asUint8List();
       } finally {

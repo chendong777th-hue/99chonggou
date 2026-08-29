@@ -3,11 +3,18 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('cold-open gate keeps one visible chat tree', () {
+  test('cold-open keeps one visible interactive chat tree', () {
     final source = File('lib/src/chat.dart').readAsStringSync();
+    final wrapperStart = source.indexOf('_wrapChatWithOpenHistoryGate(');
+    final wrapperEnd =
+        source.indexOf('_seedSelfMemberFromLocalStore(', wrapperStart);
+    expect(wrapperStart, greaterThanOrEqualTo(0));
+    expect(wrapperEnd, greaterThan(wrapperStart));
+    final wrapper = source.substring(wrapperStart, wrapperEnd);
 
-    expect(source.contains('return AbsorbPointer('), isTrue);
-    expect(source.contains('absorbing: !ready'), isTrue);
+    expect(wrapper.contains('AbsorbPointer'), isFalse);
+    expect(wrapper.contains('FutureBuilder'), isFalse);
+    expect(wrapper.contains('return chatWidget;'), isTrue);
     expect(source.contains('_buildChatHistoryGateShell'), isFalse);
     expect(source.contains('ChatMessageListSkeleton'), isFalse);
     expect(source.contains('Offstage('), isFalse);

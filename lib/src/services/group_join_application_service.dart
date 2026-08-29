@@ -12,6 +12,7 @@ import 'package:tencent_cloud_chat_demo/src/services/group_local/group_membershi
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_tip_custom_sender.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/group_join_application_dedupe.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/group_join_application_mapper.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/group_join_application_approval.dart';
@@ -44,6 +45,8 @@ class GroupJoinApplicationService extends ChangeNotifier {
   final Map<String, GroupJoinApplicationRecord> _applicationRecords = {};
   Set<String> _dismissedApplicationKeys = <String>{};
   bool _dismissedApplicationKeysLoaded = false;
+  String _dismissedApplicationOwner = '';
+  int _sessionClearGeneration = 0;
 
   List<V2TimGroupApplication> get applications =>
       List<V2TimGroupApplication>.unmodifiable(_applications);
@@ -157,39 +160,66 @@ class GroupJoinApplicationService extends ChangeNotifier {
     );
   }
 
-  String get _handledHistoryStorageKey {
-    final userId = _currentUserId();
+  String _handledHistoryStorageKeyForOwner(String userId) {
     if (userId.isEmpty) {
       return 'groupJoinApplicationHandledHistory';
     }
     return 'groupJoinApplicationHandledHistory_$userId';
   }
 
-  String get _dismissedApplicationKeysStorageKey {
-    final userId = _currentUserId();
-    if (userId.isEmpty) {
-      return 'groupJoinApplicationDismissedKeys';
-    }
-    return 'groupJoinApplicationDismissedKeys_$userId';
-  }
-
-  Future<Set<String>> _loadDismissedApplicationKeys(
-      {bool force = false}) async {
-    if (_dismissedApplicationKeysLoaded && !force) {
+  Future<Set<String>> _loadDismissedApplicationKeys({
+    bool force = false,
+    String? ownerUserId,
+    SessionIdentity? identity,
+    int? clearGeneration,
+  }) async {
+    final owner = ChatIdFormat.rawUserUid(ownerUserId ?? _currentUserId());
+    if (_dismissedApplicationKeysLoaded &&
+        !force &&
+        _dismissedApplicationOwner == owner) {
       return _dismissedApplicationKeys;
     }
     final prefs = await SharedPreferences.getInstance();
-    final stored =
-        prefs.getStringList(_dismissedApplicationKeysStorageKey) ?? const [];
+    if (identity != null &&
+        !_isCurrentRefresh(
+            identity, clearGeneration ?? _sessionClearGeneration)) {
+      return _dismissedApplicationKeys;
+    }
+    final stored = prefs.getStringList(
+          _dismissedApplicationKeysStorageKeyForOwner(owner),
+        ) ??
+        const [];
     _dismissedApplicationKeys = stored
         .map((item) => item.trim())
         .where((item) => item.isNotEmpty)
         .toSet();
     _dismissedApplicationKeysLoaded = true;
+    _dismissedApplicationOwner = owner;
     return _dismissedApplicationKeys;
   }
 
-  Future<void> _saveDismissedApplicationKeys(Set<String> keys) async {
+  String _dismissedApplicationKeysStorageKeyForOwner(String owner) {
+    if (owner.isEmpty) {
+      return 'groupJoinApplicationDismissedKeys';
+    }
+    return 'groupJoinApplicationDismissedKeys_$owner';
+  }
+
+  Future<void> _saveDismissedApplicationKeys(
+    Set<String> keys, {
+    required String ownerUserId,
+    SessionIdentity? identity,
+    int? clearGeneration,
+  }) async {
+    final owner = ChatIdFormat.rawUserUid(ownerUserId);
+    if (owner.isEmpty) return;
+    if (identity != null &&
+        !_isCurrentRefresh(
+          identity,
+          clearGeneration ?? _sessionClearGeneration,
+        )) {
+      return;
+    }
     final normalized = keys
         .map((item) => item.trim())
         .where((item) => item.isNotEmpty)
@@ -197,17 +227,33 @@ class GroupJoinApplicationService extends ChangeNotifier {
         .toList(growable: false);
     _dismissedApplicationKeys = normalized.toSet();
     _dismissedApplicationKeysLoaded = true;
+    _dismissedApplicationOwner = owner;
     final prefs = await SharedPreferences.getInstance();
+    if (identity != null &&
+        !_isCurrentRefresh(
+          identity,
+          clearGeneration ?? _sessionClearGeneration,
+        )) {
+      return;
+    }
     await prefs.setStringList(
-      _dismissedApplicationKeysStorageKey,
+      _dismissedApplicationKeysStorageKeyForOwner(owner),
       normalized,
     );
   }
 
   Future<void> _markApplicationDismissed(
-    V2TimGroupApplication application,
-  ) async {
-    final keys = await _loadDismissedApplicationKeys();
+    V2TimGroupApplication application, {
+    required SessionIdentity identity,
+    required int clearGeneration,
+  }) async {
+    if (identity.ownerUserId.isEmpty) return;
+    final keys = await _loadDismissedApplicationKeys(
+      ownerUserId: identity.ownerUserId,
+      identity: identity,
+      clearGeneration: clearGeneration,
+    );
+    if (!_isCurrentRefresh(identity, clearGeneration)) return;
     final next = Set<String>.from(keys)..add(_applicationLocalKey(application));
     final applicationId = applicationIdOf(application);
     if (applicationId != null && applicationId > 0) {
@@ -215,7 +261,12 @@ class GroupJoinApplicationService extends ChangeNotifier {
         ..add('id_$applicationId')
         ..add('${application.groupID}|$applicationId');
     }
-    await _saveDismissedApplicationKeys(next);
+    await _saveDismissedApplicationKeys(
+      next,
+      ownerUserId: identity.ownerUserId,
+      identity: identity,
+      clearGeneration: clearGeneration,
+    );
   }
 
   bool _isRecordDismissed(
@@ -284,8 +335,24 @@ class GroupJoinApplicationService extends ChangeNotifier {
       _loading = true;
       notifyListeners();
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) {
+      if (syncMembership) {
+        _loading = false;
+        notifyListeners();
+      }
+      return;
+    }
+    final clearGeneration = _sessionClearGeneration;
     try {
-      final next = await _loadApplications(syncMembership: syncMembership);
+      final next = await _loadApplications(
+        syncMembership: syncMembership,
+        identity: identity,
+        clearGeneration: clearGeneration,
+      );
+      if (!_isCurrentRefresh(identity, clearGeneration)) {
+        return;
+      }
       if (!_sameApplications(_applications, next)) {
         _applications = next;
         notifyListeners();
@@ -296,11 +363,16 @@ class GroupJoinApplicationService extends ChangeNotifier {
             'GroupJoinApplicationService.refresh failed: $error\n$stack');
       }
     } finally {
-      if (syncMembership) {
+      if (syncMembership && _isCurrentRefresh(identity, clearGeneration)) {
         _loading = false;
         notifyListeners();
       }
     }
+  }
+
+  bool _isCurrentRefresh(SessionIdentity identity, int clearGeneration) {
+    return clearGeneration == _sessionClearGeneration &&
+        SessionIdentityService.instance.isCurrent(identity);
   }
 
   /// 单群管理页：优先 `GET /group/{id}/join-applications`（一次）；
@@ -314,9 +386,13 @@ class GroupJoinApplicationService extends ChangeNotifier {
     if (gid.isEmpty) {
       return const [];
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return const [];
+    final clearGeneration = _sessionClearGeneration;
     if (_adminGroupIds.isEmpty) {
       final adminGroupIds =
           await GroupMembershipSyncService.instance.adminSelfHostedGroupIds();
+      if (!_isCurrentRefresh(identity, clearGeneration)) return const [];
       _adminGroupIds
         ..clear()
         ..addAll(_normalizedGroupIdKeys(adminGroupIds));
@@ -328,6 +404,7 @@ class GroupJoinApplicationService extends ChangeNotifier {
         gid,
         includeHandled: includeHandled,
       );
+      if (!_isCurrentRefresh(identity, clearGeneration)) return const [];
     } catch (error, stack) {
       if (kDebugMode) {
         debugPrint(
@@ -338,8 +415,18 @@ class GroupJoinApplicationService extends ChangeNotifier {
       return const [];
     }
 
-    final dismissedKeys = await _loadDismissedApplicationKeys();
-    final handledLocal = await _loadHandledHistoryLocal();
+    final dismissedKeys = await _loadDismissedApplicationKeys(
+      ownerUserId: identity.ownerUserId,
+      identity: identity,
+      clearGeneration: clearGeneration,
+    );
+    if (!_isCurrentRefresh(identity, clearGeneration)) return const [];
+    final handledLocal = await _loadHandledHistoryLocal(
+      ownerUserId: identity.ownerUserId,
+      identity: identity,
+      clearGeneration: clearGeneration,
+    );
+    if (!_isCurrentRefresh(identity, clearGeneration)) return const [];
     final localForGroup = handledLocal
         .where((record) => ChatIdFormat.groupIdsEquivalent(record.groupId, gid))
         .toList(growable: false);
@@ -351,17 +438,16 @@ class GroupJoinApplicationService extends ChangeNotifier {
           (record) => ChatIdFormat.groupIdsEquivalent(record.groupId, gid),
         )
         .toList(growable: false);
+    if (!_isCurrentRefresh(identity, clearGeneration)) return const [];
 
     _seedDisplayNames(mergedRecords);
     _seedGroupDisplay(mergedRecords);
 
-    final dropKeys = _applicationRecords.keys
-        .where((key) {
-          final pipe = key.indexOf('|');
-          final keyGroup = pipe >= 0 ? key.substring(0, pipe) : key;
-          return ChatIdFormat.groupIdsEquivalent(keyGroup, gid);
-        })
-        .toList(growable: false);
+    final dropKeys = _applicationRecords.keys.where((key) {
+      final pipe = key.indexOf('|');
+      final keyGroup = pipe >= 0 ? key.substring(0, pipe) : key;
+      return ChatIdFormat.groupIdsEquivalent(keyGroup, gid);
+    }).toList(growable: false);
     for (final key in dropKeys) {
       _applicationRecords.remove(key);
     }
@@ -419,28 +505,52 @@ class GroupJoinApplicationService extends ChangeNotifier {
 
   Future<List<V2TimGroupApplication>> _loadApplications({
     bool syncMembership = true,
+    required SessionIdentity identity,
+    required int clearGeneration,
   }) async {
     if (syncMembership) {
       await GroupMembershipSyncService.instance.syncFull(
         reason: 'join_applications',
       );
+      if (!_isCurrentRefresh(identity, clearGeneration)) {
+        return const [];
+      }
     }
     // 本地角色仅用于 canApprove / admin-only UI；不按群循环打 join-applications。
     final adminGroupIds =
         await GroupMembershipSyncService.instance.adminSelfHostedGroupIds();
+    if (!_isCurrentRefresh(identity, clearGeneration)) {
+      return const [];
+    }
     _adminGroupIds
       ..clear()
       ..addAll(_normalizedGroupIdKeys(adminGroupIds));
-    final handledLocal = await _loadHandledHistoryLocal();
-    final dismissedKeys = await _loadDismissedApplicationKeys();
+    final handledLocal = await _loadHandledHistoryLocal(
+      ownerUserId: identity.ownerUserId,
+      identity: identity,
+      clearGeneration: clearGeneration,
+    );
+    if (!_isCurrentRefresh(identity, clearGeneration)) {
+      return const [];
+    }
+    final dismissedKeys = await _loadDismissedApplicationKeys(
+      ownerUserId: identity.ownerUserId,
+      identity: identity,
+      clearGeneration: clearGeneration,
+    );
+    if (!_isCurrentRefresh(identity, clearGeneration)) {
+      return const [];
+    }
 
     // 削峰：群通知聚合只打 GET /me/join-applications（分页拉齐）。
     final records = <GroupJoinApplicationRecord>[];
     try {
-      final myItems =
-          await GroupJoinApi.instance.fetchAllMyJoinApplications(
+      final myItems = await GroupJoinApi.instance.fetchAllMyJoinApplications(
         includeHandled: true,
       );
+      if (!_isCurrentRefresh(identity, clearGeneration)) {
+        return const [];
+      }
       records.addAll(myItems);
     } catch (_) {}
 
@@ -449,6 +559,9 @@ class GroupJoinApplicationService extends ChangeNotifier {
     ).where((record) => !_isRecordDismissed(record, dismissedKeys)).toList(
           growable: false,
         );
+    if (!_isCurrentRefresh(identity, clearGeneration)) {
+      return const [];
+    }
     _seedDisplayNames(mergedRecords);
     _seedGroupDisplay(mergedRecords);
     _applicationRecords
@@ -461,7 +574,15 @@ class GroupJoinApplicationService extends ChangeNotifier {
           ),
         ),
       );
-    unawaited(_backfillLocalHistoryNicknames(mergedRecords, handledLocal));
+    unawaited(
+      _backfillLocalHistoryNicknames(
+        mergedRecords,
+        handledLocal,
+        ownerUserId: identity.ownerUserId,
+        identity: identity,
+        clearGeneration: clearGeneration,
+      ),
+    );
     final mapped = mergedRecords
         .map(GroupJoinApplicationMapper.toUIKitApplication)
         .toList(growable: false);
@@ -520,8 +641,11 @@ class GroupJoinApplicationService extends ChangeNotifier {
 
   Future<void> _backfillLocalHistoryNicknames(
     List<GroupJoinApplicationRecord> merged,
-    List<GroupJoinApplicationRecord> previousLocal,
-  ) async {
+    List<GroupJoinApplicationRecord> previousLocal, {
+    required String ownerUserId,
+    required SessionIdentity identity,
+    required int clearGeneration,
+  }) async {
     if (previousLocal.isEmpty || merged.isEmpty) {
       return;
     }
@@ -546,12 +670,29 @@ class GroupJoinApplicationService extends ChangeNotifier {
     if (!changed) {
       return;
     }
-    await _saveHandledHistoryLocal(nextLocal);
+    if (!_isCurrentRefresh(identity, clearGeneration)) {
+      return;
+    }
+    await _saveHandledHistoryLocal(
+      nextLocal,
+      ownerUserId: ownerUserId,
+      identity: identity,
+    );
   }
 
-  Future<List<GroupJoinApplicationRecord>> _loadHandledHistoryLocal() async {
+  Future<List<GroupJoinApplicationRecord>> _loadHandledHistoryLocal({
+    String? ownerUserId,
+    SessionIdentity? identity,
+    int? clearGeneration,
+  }) async {
+    final owner = ChatIdFormat.rawUserUid(ownerUserId ?? _currentUserId());
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_handledHistoryStorageKey);
+    if (identity != null &&
+        !_isCurrentRefresh(
+            identity, clearGeneration ?? _sessionClearGeneration)) {
+      return const [];
+    }
+    final raw = prefs.getString(_handledHistoryStorageKeyForOwner(owner));
     if (raw == null || raw.isEmpty) {
       return const [];
     }
@@ -572,22 +713,44 @@ class GroupJoinApplicationService extends ChangeNotifier {
   }
 
   Future<void> _saveHandledHistoryLocal(
-    List<GroupJoinApplicationRecord> records,
-  ) async {
+      List<GroupJoinApplicationRecord> records,
+      {String? ownerUserId,
+      SessionIdentity? identity}) async {
+    final owner = ChatIdFormat.rawUserUid(ownerUserId ?? _currentUserId());
+    if (owner.isEmpty ||
+        (identity != null &&
+            !_isCurrentRefresh(identity, _sessionClearGeneration))) {
+      return;
+    }
     final prefs = await SharedPreferences.getInstance();
+    if (identity != null &&
+        !_isCurrentRefresh(identity, _sessionClearGeneration)) {
+      return;
+    }
     final normalized = records.take(_maxHandledHistory).toList(growable: false);
     await prefs.setString(
-      _handledHistoryStorageKey,
+      _handledHistoryStorageKeyForOwner(owner),
       jsonEncode(normalized.map((item) => item.toJson()).toList()),
     );
   }
 
   Future<void> _appendHandledRecord(GroupJoinApplicationRecord record) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
     _applicationRecords[_recordKey(record)] = record;
-    final history = await _loadHandledHistoryLocal();
+    final history = await _loadHandledHistoryLocal(
+      ownerUserId: identity.ownerUserId,
+      identity: identity,
+      clearGeneration: _sessionClearGeneration,
+    );
+    if (!_isCurrentRefresh(identity, _sessionClearGeneration)) return;
     history.removeWhere((item) => _recordKey(item) == _recordKey(record));
     history.insert(0, record);
-    await _saveHandledHistoryLocal(history);
+    await _saveHandledHistoryLocal(
+      history,
+      ownerUserId: identity.ownerUserId,
+      identity: identity,
+    );
   }
 
   GroupJoinApplicationRecord _recordFromApplication(
@@ -721,6 +884,9 @@ class GroupJoinApplicationService extends ChangeNotifier {
     if (_applications.isEmpty) {
       return true;
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return false;
+    final clearGeneration = _sessionClearGeneration;
     final snapshot = List<V2TimGroupApplication>.from(_applications);
     try {
       try {
@@ -732,7 +898,13 @@ class GroupJoinApplicationService extends ChangeNotifier {
           );
         }
       }
-      final dismissedKeys = await _loadDismissedApplicationKeys();
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
+      final dismissedKeys = await _loadDismissedApplicationKeys(
+        ownerUserId: identity.ownerUserId,
+        identity: identity,
+        clearGeneration: clearGeneration,
+      );
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
       final next = Set<String>.from(dismissedKeys);
       for (final application in snapshot) {
         next.add(_applicationLocalKey(application));
@@ -743,7 +915,13 @@ class GroupJoinApplicationService extends ChangeNotifier {
             ..add('${application.groupID}|$applicationId');
         }
       }
-      await _saveDismissedApplicationKeys(next);
+      await _saveDismissedApplicationKeys(
+        next,
+        ownerUserId: identity.ownerUserId,
+        identity: identity,
+        clearGeneration: clearGeneration,
+      );
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
       _applications = const [];
       notifyListeners();
       return true;
@@ -759,6 +937,9 @@ class GroupJoinApplicationService extends ChangeNotifier {
       _toastDeleteFailed();
       return false;
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return false;
+    final clearGeneration = _sessionClearGeneration;
     final adminOnlyNotice = _isAdminOnlyNotice(application);
     try {
       try {
@@ -768,8 +949,19 @@ class GroupJoinApplicationService extends ChangeNotifier {
           rethrow;
         }
       }
-      await _markApplicationDismissed(application);
-      await _removeApplicationLocally(application);
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
+      await _markApplicationDismissed(
+        application,
+        identity: identity,
+        clearGeneration: clearGeneration,
+      );
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
+      await _removeApplicationLocally(
+        application,
+        identity: identity,
+        clearGeneration: clearGeneration,
+      );
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
       _toastDeleteSuccess();
       unawaited(refresh(force: true, syncMembership: false));
       return true;
@@ -780,9 +972,17 @@ class GroupJoinApplicationService extends ChangeNotifier {
   }
 
   Future<void> _removeApplicationLocally(
-    V2TimGroupApplication application,
-  ) async {
-    final dismissedKeys = await _loadDismissedApplicationKeys();
+    V2TimGroupApplication application, {
+    required SessionIdentity identity,
+    required int clearGeneration,
+  }) async {
+    if (identity.ownerUserId.isEmpty) return;
+    final dismissedKeys = await _loadDismissedApplicationKeys(
+      ownerUserId: identity.ownerUserId,
+      identity: identity,
+      clearGeneration: clearGeneration,
+    );
+    if (!_isCurrentRefresh(identity, clearGeneration)) return;
     final auth = application.authentication.trim();
     final key = _applicationLocalKey(application);
     _applications = _applications
@@ -795,7 +995,12 @@ class GroupJoinApplicationService extends ChangeNotifier {
         .toList(growable: false);
     notifyListeners();
 
-    final history = await _loadHandledHistoryLocal();
+    final history = await _loadHandledHistoryLocal(
+      ownerUserId: identity.ownerUserId,
+      identity: identity,
+      clearGeneration: clearGeneration,
+    );
+    if (!_isCurrentRefresh(identity, clearGeneration)) return;
     final applicationId = applicationIdOf(application);
     final nextHistory = history
         .where(
@@ -806,7 +1011,11 @@ class GroupJoinApplicationService extends ChangeNotifier {
         )
         .toList(growable: false);
     if (nextHistory.length != history.length) {
-      await _saveHandledHistoryLocal(nextHistory);
+      await _saveHandledHistoryLocal(
+        nextHistory,
+        ownerUserId: identity.ownerUserId,
+        identity: identity,
+      );
     }
   }
 
@@ -919,11 +1128,15 @@ class GroupJoinApplicationService extends ChangeNotifier {
       _toastActionFailed();
       return false;
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return false;
+    final clearGeneration = _sessionClearGeneration;
     try {
       await GroupJoinApi.instance.approveJoinApplication(
         groupId: application.groupID,
         applicationId: applicationId,
       );
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
       _patchHandledApplicationLocally(application, 'approved');
       _toastApproveSuccess();
       unawaited(refresh(force: true, syncMembership: false));
@@ -961,9 +1174,8 @@ class GroupJoinApplicationService extends ChangeNotifier {
       return true;
     } on DioError catch (error) {
       final quota = GroupQuotaLimitError.tryParse(error.response?.data);
-      final quotaMessage = quota == null
-          ? null
-          : GroupCreateLimitMessage.fromQuotaError(quota);
+      final quotaMessage =
+          quota == null ? null : GroupCreateLimitMessage.fromQuotaError(quota);
       if (quotaMessage != null) {
         ToastUtils.toast(quotaMessage);
       } else {
@@ -995,11 +1207,15 @@ class GroupJoinApplicationService extends ChangeNotifier {
       _toastActionFailed();
       return false;
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return false;
+    final clearGeneration = _sessionClearGeneration;
     try {
       await GroupJoinApi.instance.rejectJoinApplication(
         groupId: application.groupID,
         applicationId: applicationId,
       );
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
       _patchHandledApplicationLocally(application, 'rejected');
       _toastRejectSuccess();
       unawaited(refresh(force: true, syncMembership: false));
@@ -1035,14 +1251,26 @@ class GroupJoinApplicationService extends ChangeNotifier {
   }
 
   void clearSession() {
+    _sessionClearGeneration++;
     _applications = const [];
     _loading = false;
     _adminGroupIds.clear();
     _dismissedApplicationKeys = <String>{};
     _dismissedApplicationKeysLoaded = false;
+    _dismissedApplicationOwner = '';
+    _applicationRecords.clear();
     _userDisplayNameCache.clear();
     _groupNameCache.clear();
     _groupAvatarCache.clear();
     notifyListeners();
+  }
+
+  Future<void> clearForOwner(String? ownerUserId) async {
+    final owner = ChatIdFormat.rawUserUid(ownerUserId);
+    clearSession();
+    if (owner.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_handledHistoryStorageKeyForOwner(owner));
+    await prefs.remove(_dismissedApplicationKeysStorageKeyForOwner(owner));
   }
 }

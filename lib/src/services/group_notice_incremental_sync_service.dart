@@ -8,6 +8,7 @@ import 'package:tencent_cloud_chat_demo/src/models/group_notice_inbox_change.dar
 import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_feed_log.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_system_notice_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 
 /// 群系统通知 inbox 游标增量补偿（非全量）。
@@ -24,7 +25,7 @@ class GroupNoticeIncrementalSyncService {
   static const _maxPagesPerRun = 50;
 
   Future<void>? _inFlight;
-  String? _inFlightOwner;
+  SessionIdentity? _inFlightIdentity;
 
   String _ownerUserId() {
     return ChatIdFormat.rawUserUid(ContactSocialCacheStore.safeLoginUserId());
@@ -62,7 +63,7 @@ class GroupNoticeIncrementalSyncService {
   Future<void> clearSession() async {
     final owner = _ownerUserId();
     _inFlight = null;
-    _inFlightOwner = null;
+    _inFlightIdentity = null;
     if (owner.isNotEmpty) {
       await clearCursor(ownerUserId: owner);
     }
@@ -70,20 +71,21 @@ class GroupNoticeIncrementalSyncService {
 
   /// 冷启 / TCP auth / 快照后：按游标补洞。
   Future<void> sync({String reason = 'manual'}) {
-    final owner = _ownerUserId();
-    if (owner.isEmpty) {
+    final identity = SessionIdentityService.instance.capture();
+    final owner = identity.ownerUserId;
+    if (owner.isEmpty || !_isCurrent(identity)) {
       return Future<void>.value();
     }
     final active = _inFlight;
-    if (active != null && _inFlightOwner == owner) {
+    if (active != null && _inFlightIdentity == identity) {
       return active;
     }
     late final Future<void> task;
-    _inFlightOwner = owner;
-    task = _runSync(owner: owner, reason: reason).whenComplete(() {
+    _inFlightIdentity = identity;
+    task = _runSync(identity: identity, reason: reason).whenComplete(() {
       if (identical(_inFlight, task)) {
         _inFlight = null;
-        _inFlightOwner = null;
+        _inFlightIdentity = null;
       }
     });
     _inFlight = task;
@@ -91,28 +93,35 @@ class GroupNoticeIncrementalSyncService {
   }
 
   Future<void> _runSync({
-    required String owner,
+    required SessionIdentity identity,
     required String reason,
   }) async {
+    final owner = identity.ownerUserId;
     GroupNoticeFeedLog.log('inbox_sync_begin', extras: {
       'reason': reason,
-      'ownerTail': owner.length <= 6 ? owner : owner.substring(owner.length - 6),
+      'ownerTail':
+          owner.length <= 6 ? owner : owner.substring(owner.length - 6),
     });
     try {
-      await _pullAndApply(owner: owner, reason: reason);
+      await _pullAndApply(identity: identity, reason: reason);
       GroupNoticeFeedLog.log('inbox_sync_done', extras: {'reason': reason});
     } on GroupNoticeInboxCursorExpiredException {
       GroupNoticeFeedLog.log('inbox_sync_cursor_expired', extras: {
         'reason': reason,
       });
       await clearCursor(ownerUserId: owner);
+      if (!_isCurrent(identity)) return;
       try {
         await GroupSystemNoticeService.instance.refresh(force: true);
       } catch (_) {
         // 快照失败仍尝试用 since_seq=0 重建游标。
       }
+      if (!_isCurrent(identity)) return;
       await writeCursor(0, ownerUserId: owner);
-      await _pullAndApply(owner: owner, reason: '${reason}_after_snapshot');
+      await _pullAndApply(
+        identity: identity,
+        reason: '${reason}_after_snapshot',
+      );
       GroupNoticeFeedLog.log('inbox_sync_done', extras: {
         'reason': '${reason}_after_snapshot',
       });
@@ -133,13 +142,15 @@ class GroupNoticeIncrementalSyncService {
   }
 
   Future<void> _pullAndApply({
-    required String owner,
+    required SessionIdentity identity,
     required String reason,
   }) async {
+    final owner = identity.ownerUserId;
     var since = await readCursor(ownerUserId: owner);
+    if (!_isCurrent(identity)) return;
     var pages = 0;
     while (pages < _maxPagesPerRun) {
-      if (_ownerUserId() != owner) {
+      if (!_isCurrent(identity)) {
         return;
       }
       pages += 1;
@@ -147,16 +158,18 @@ class GroupNoticeIncrementalSyncService {
         sinceSeq: since,
         limit: _pageLimit,
       );
+      if (!_isCurrent(identity)) return;
       for (final event in page.events) {
-        if (_ownerUserId() != owner) {
+        if (!_isCurrent(identity)) {
           return;
         }
-        await _applyEvent(event);
+        await _applyEvent(event, identity);
       }
       final next = page.nextSeq > since ? page.nextSeq : since;
       if (next != since) {
         since = next;
         await writeCursor(since, ownerUserId: owner);
+        if (!_isCurrent(identity)) return;
       } else if (page.events.isNotEmpty) {
         final maxSeq = page.events.fold<int>(
           since,
@@ -165,6 +178,7 @@ class GroupNoticeIncrementalSyncService {
         if (maxSeq > since) {
           since = maxSeq;
           await writeCursor(since, ownerUserId: owner);
+          if (!_isCurrent(identity)) return;
         }
       }
       if (!page.hasMore) {
@@ -176,7 +190,11 @@ class GroupNoticeIncrementalSyncService {
     }
   }
 
-  Future<void> _applyEvent(GroupNoticeInboxChangeEvent event) async {
+  Future<void> _applyEvent(
+    GroupNoticeInboxChangeEvent event,
+    SessionIdentity identity,
+  ) async {
+    if (!_isCurrent(identity)) return;
     GroupNoticeFeedLog.log('inbox_event', extras: {
       'seq': event.seq,
       'kind': event.isReadWatermark
@@ -220,13 +238,18 @@ class GroupNoticeIncrementalSyncService {
     if (seq <= 0) {
       return;
     }
-    final owner = _ownerUserId();
-    if (owner.isEmpty) {
+    final identity = SessionIdentityService.instance.capture();
+    final owner = identity.ownerUserId;
+    if (owner.isEmpty || !_isCurrent(identity)) {
       return;
     }
     final current = await readCursor(ownerUserId: owner);
+    if (!_isCurrent(identity)) return;
     if (seq > current) {
       await writeCursor(seq, ownerUserId: owner);
     }
   }
+
+  bool _isCurrent(SessionIdentity identity) =>
+      SessionIdentityService.instance.isCurrent(identity);
 }

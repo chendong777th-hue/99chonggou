@@ -37,7 +37,8 @@ class MessageListResponse {
 
 abstract class MessageService {
   Future<List<V2TimMessage>> getHistoryMessageList({
-    HistoryMsgGetTypeEnum getType = HistoryMsgGetTypeEnum.V2TIM_GET_LOCAL_OLDER_MSG,
+    HistoryMsgGetTypeEnum getType =
+        HistoryMsgGetTypeEnum.V2TIM_GET_LOCAL_OLDER_MSG,
     String? userID,
     String? groupID,
     int lastMsgSeq,
@@ -48,7 +49,8 @@ abstract class MessageService {
   });
 
   Future<V2TimMessageListResult?> getHistoryMessageListWithComplete({
-    HistoryMsgGetTypeEnum getType = HistoryMsgGetTypeEnum.V2TIM_GET_LOCAL_OLDER_MSG,
+    HistoryMsgGetTypeEnum getType =
+        HistoryMsgGetTypeEnum.V2TIM_GET_LOCAL_OLDER_MSG,
     String? userID,
     String? groupID,
     int lastMsgSeq,
@@ -62,7 +64,8 @@ abstract class MessageService {
   });
 
   Future<MessageListResponse> getHistoryMessageListV2({
-    HistoryMsgGetTypeEnum getType = HistoryMsgGetTypeEnum.V2TIM_GET_LOCAL_OLDER_MSG,
+    HistoryMsgGetTypeEnum getType =
+        HistoryMsgGetTypeEnum.V2TIM_GET_LOCAL_OLDER_MSG,
     String? userID,
     String? groupID,
     int lastMsgSeq,
@@ -83,11 +86,13 @@ abstract class MessageService {
 
   Future<V2TimMsgCreateInfoResult?> createTextMessage({required String text});
 
-  Future<V2TimMsgCreateInfoResult?> createFaceMessage({required int index, required String data});
+  Future<V2TimMsgCreateInfoResult?> createFaceMessage(
+      {required int index, required String data});
 
   Future<V2TimMsgCreateInfoResult?> createCustomMessage({required String data});
 
-  Future<V2TimMsgCreateInfoResult?> createTextAtMessage({required String text, required List<String> atUserList});
+  Future<V2TimMsgCreateInfoResult?> createTextAtMessage(
+      {required String text, required List<String> atUserList});
 
   Future<V2TimValueCallback<V2TimMessage>> sendMessage(
       {required String id, // 自己创建的ID
@@ -111,20 +116,29 @@ abstract class MessageService {
     required V2TimMessage replyMessage, // 被回复的消息
   });
 
-  Future<V2TimValueCallback<V2TimMessage>> reSendMessage({required String msgID, bool onlineUserOnly});
+  Future<V2TimValueCallback<V2TimMessage>> reSendMessage(
+      {required String msgID, bool onlineUserOnly});
 
-  Future<V2TimValueCallback<V2TimMessageChangeInfo>> modifyMessage({required V2TimMessage message});
+  Future<V2TimValueCallback<V2TimMessageChangeInfo>> modifyMessage(
+      {required V2TimMessage message});
 
-  Future<V2TimMsgCreateInfoResult?> createImageMessage({String? imageName, String? imagePath, dynamic inputElement});
+  Future<V2TimMsgCreateInfoResult?> createImageMessage(
+      {String? imageName, String? imagePath, dynamic inputElement});
 
   Future<V2TimMsgCreateInfoResult?> createVideoMessage(
-      {String? videoPath = "", String? type = "", int? duration = 0, String? snapshotPath = "", dynamic inputElement});
+      {String? videoPath = "",
+      String? type = "",
+      int? duration = 0,
+      String? snapshotPath = "",
+      dynamic inputElement});
 
   Future<V2TimMsgCreateInfoResult?> createFileMessage(
       {String? filePath, required String fileName, dynamic inputElement});
 
   Future<V2TimMsgCreateInfoResult?> createLocationMessage(
-      {required String desc, required double longitude, required double latitude});
+      {required String desc,
+      required double longitude,
+      required double latitude});
 
   Future<V2TimMsgCreateInfoResult?> createSoundMessage({
     required String soundPath,
@@ -149,7 +163,8 @@ abstract class MessageService {
     Object? webMessageInstance,
   });
 
-  Future<V2TimCallback> revokeMessage({required String msgID, Object? webMessageInstance});
+  Future<V2TimCallback> revokeMessage(
+      {required String msgID, Object? webMessageInstance});
 
   Future<V2TimCallback> clearC2CHistoryMessage({
     required String userID,
@@ -173,7 +188,8 @@ abstract class MessageService {
     required String msgID,
   });
 
-  Future<V2TimCallback> deleteMessages({required List<String> msgIDs, List<dynamic>? webMessageInstanceList});
+  Future<V2TimCallback> deleteMessages(
+      {required List<String> msgIDs, List<dynamic>? webMessageInstanceList});
 
   Future<List<V2TimMessage>?> findMessages({
     required List<String> messageIDList,
@@ -183,9 +199,17 @@ abstract class MessageService {
     required V2TimMessageSearchParam searchParam,
   });
 
-  Future<V2TimCallback> setLocalCustomInt({required String msgID, required int localCustomInt});
+  /// Search messages in the IM cloud index. The returned result contains a
+  /// cursor for the next page; callers must pass it back in searchParam.
+  Future<V2TimValueCallback<V2TimMessageSearchResult>> searchCloudMessages({
+    required V2TimMessageSearchParam searchParam,
+  });
 
-  Future<V2TimCallback> setLocalCustomData({required String msgID, required String localCustomData});
+  Future<V2TimCallback> setLocalCustomInt(
+      {required String msgID, required int localCustomInt});
+
+  Future<V2TimCallback> setLocalCustomData(
+      {required String msgID, required String localCustomData});
 
   Future<V2TimCallback> setC2CReceiveMessageOpt({
     required List<String> userIDList,
@@ -197,7 +221,8 @@ abstract class MessageService {
     required ReceiveMsgOptEnum opt,
   });
 
-  Future<V2TimValueCallback<V2TimGroupMessageReadMemberList>> getGroupMessageReadMemberList({
+  Future<V2TimValueCallback<V2TimGroupMessageReadMemberList>>
+      getGroupMessageReadMemberList({
     required String messageID,
     required GetGroupMessageReadMemberListFilter filter,
     int nextSeq = 0,
@@ -222,6 +247,8 @@ abstract class MessageService {
     required int messageType,
     required int imageType, // 图片类型，仅messageType为图片消息是有效
     required bool isSnapshot, // 是否是视频封面，仅messageType为视频消息是有效
+    V2TimMessage? message,
+    void Function(V2TimMessage message)? onDownloadFinished,
     bool reportError = true,
   });
 

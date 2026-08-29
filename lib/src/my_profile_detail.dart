@@ -8,7 +8,6 @@ import 'package:tencent_cloud_chat_demo/src/ui/utils/adaptive_modal.dart';
 import 'package:tencent_cloud_chat_demo/src/ui/utils/desktop_modal_layout.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/app_dialog.dart';
 
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -21,6 +20,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tencent_cloud_chat_demo/config.dart';
 import 'package:tencent_cloud_chat_demo/src/api/auth_api.dart';
 import 'package:tencent_cloud_chat_demo/src/api/api_client.dart';
+import 'package:tencent_cloud_chat_demo/src/api/user_api.dart';
 import 'package:tencent_cloud_chat_demo/src/pages/settings/change_phone_page.dart';
 import 'package:tencent_cloud_chat_demo/src/api/upload_api.dart';
 import 'package:tencent_cloud_chat_demo/src/pages/profile_nickname_edit_page.dart';
@@ -52,14 +52,12 @@ import 'package:tencent_cloud_chat_uikit/data_services/core/tim_uikit_wide_modal
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 import 'package:tencent_cloud_chat_uikit/theme/tui_theme.dart';
-import 'package:tencent_cloud_chat_uikit/ui/utils/media_preview_presenter.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/platform.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/screen_utils.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/time_ago.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitProfile/widget/tim_uikit_profile_widget.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/avatar.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/chat_web_image_lightbox.dart';
-import 'package:tencent_cloud_chat_uikit/ui/widgets/image_screen.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/app_user_avatar.dart';
 import 'package:tencent_cloud_chat_demo/utils/user_avatar.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/wide_popup.dart';
@@ -93,6 +91,8 @@ class MyProfileDetailState extends State<MyProfileDetail> {
   String? _phoneDisplay;
   bool _uploadingAvatar = false;
   int _profileRefreshSeq = 0;
+  String? _avatarPreviewUrl;
+  Future<String?>? _avatarPreviewRequest;
 
   @override
   void initState() {
@@ -578,7 +578,11 @@ class MyProfileDetailState extends State<MyProfileDetail> {
           result.avatarUrl;
       if (!mounted) return;
       setState(() => userProfile?.faceUrl = resolved);
-      final updated = await UserAvatarHelper.applySelfAvatarUpdate(resolved);
+      _avatarPreviewUrl = result.previewUrl.trim();
+      final updated = await UserAvatarHelper.applySelfAvatarUpdate(
+        resolved,
+        avatarVersion: result.avatarVersion > 0 ? result.avatarVersion : null,
+      );
       if (updated != null && mounted) {
         setState(() => userProfile = updated);
         Provider.of<LoginUserInfo>(context, listen: false)
@@ -631,8 +635,8 @@ class MyProfileDetailState extends State<MyProfileDetail> {
         : '';
   }
 
-  /// 优先资料页 faceUrl，再回退当前登录用户最新头像。
-  String? _resolveAvatarPreviewNetworkUrl() {
+  /// 普通资料页与全屏首帧都只使用 thumb；preview 必须通过业务 endpoint 懒取。
+  String? _resolveAvatarThumbNetworkUrl() {
     for (final raw in <String?>[
       userProfile?.faceUrl,
       UserAvatarHelper.currentSelfFaceUrl(),
@@ -652,12 +656,46 @@ class MyProfileDetailState extends State<MyProfileDetail> {
     return null;
   }
 
-  /// Web lightbox 走 HTML `<img>`，同域需 Bearer 时先拉成 data URL。
-  Future<String?> _prepareAvatarPreviewUrlForLightbox() async {
-    final url = _resolveAvatarPreviewNetworkUrl();
-    if (url == null) {
+  Future<String?> _fetchAvatarPreviewUrl() {
+    final cached = _avatarPreviewUrl?.trim() ?? '';
+    if (cached.isNotEmpty) {
+      return Future<String?>.value(cached);
+    }
+    final inFlight = _avatarPreviewRequest;
+    if (inFlight != null) {
+      return inFlight;
+    }
+    final selfVm = serviceLocator<TUISelfInfoViewModel>();
+    final userId = ChatIdFormat.rawUserUid(
+      userProfile?.userID ?? selfVm.loginInfo?.userID ?? '',
+    );
+    if (userId.isEmpty) {
+      return Future<String?>.value(null);
+    }
+    final request = _loadAvatarPreview(userId);
+    _avatarPreviewRequest = request;
+    return request.whenComplete(() {
+      if (identical(_avatarPreviewRequest, request)) {
+        _avatarPreviewRequest = null;
+      }
+    });
+  }
+
+  Future<String?> _loadAvatarPreview(String userId) async {
+    try {
+      final result = await UserApi.instance.fetchUserAvatarPreview(userId);
+      final url = result.previewUrl.trim();
+      if (url.isNotEmpty) {
+        _avatarPreviewUrl = url;
+      }
+      return url.isEmpty ? null : url;
+    } catch (_) {
       return null;
     }
+  }
+
+  /// Web lightbox 走 HTML `<img>`，同域需 Bearer 时先拉成 data URL。
+  Future<String?> _prepareAvatarPreviewUrlForLightbox(String url) async {
     if (!kIsWeb) {
       return url;
     }
@@ -700,50 +738,19 @@ class MyProfileDetailState extends State<MyProfileDetail> {
     return 'image/jpeg';
   }
 
-  ImageProvider _avatarPreviewProvider() {
-    final raw = userProfile?.faceUrl?.trim() ?? '';
-    if (raw.startsWith('assets/')) {
-      return Image.asset(raw).image;
-    }
-    final resolved = _resolveAvatarPreviewNetworkUrl();
-    if (resolved != null && resolved.isNotEmpty) {
-      final headers = UserAvatarHelper.httpHeadersFor(resolved);
-      return CachedNetworkImageProvider(
-        resolved,
-        headers: headers,
-      );
-    }
-    return Avatar(
-      faceUrl: '',
-      showName: _avatarDisplayName(),
-    ).getImageProvider();
-  }
-
-  String _avatarPreviewHeroTag() {
-    final raw = userProfile?.faceUrl?.trim() ?? '';
-    if (raw.startsWith('assets/')) {
-      return raw;
-    }
-    final resolved = _resolveAvatarPreviewNetworkUrl();
-    if (resolved != null && resolved.isNotEmpty) {
-      return resolved;
-    }
-    final userId = userProfile?.userID?.trim() ?? '';
-    return userId.isNotEmpty ? 'profile_avatar_$userId' : 'profile_avatar_self';
-  }
-
   Future<void> _openAvatarPreview() async {
     final isWideDesktop = kIsWeb ||
         DesktopModalLayout.isDesktop(context) ||
         PlatformUtils().isDesktop;
 
-    // Web / 桌面：与聊天图片预览同路（lightbox / showMedia），不用手机版 ImageScreen。
+    // Web uses the CORS-safe lightbox. Native opens the shared avatar preview
+    // immediately with the decoded thumb, then resolves preview in-page.
     if (isWideDesktop) {
-      final networkUrl = await _prepareAvatarPreviewUrlForLightbox();
+      final thumbUrl = _resolveAvatarThumbNetworkUrl();
       if (!mounted) {
         return;
       }
-      if (networkUrl == null || networkUrl.isEmpty) {
+      if (thumbUrl == null || thumbUrl.isEmpty) {
         ToastUtils.toast(AppI18n.of(context).t(
           zhHans: '暂无头像可预览',
           zhHant: '暫無頭像可預覽',
@@ -755,53 +762,74 @@ class MyProfileDetailState extends State<MyProfileDetail> {
       }
 
       if (kIsWeb) {
-        final openUrl = networkUrl.startsWith('data:')
-            ? (_resolveAvatarPreviewNetworkUrl() ?? networkUrl)
-            : networkUrl;
         await ChatWebImageLightbox.show(
           context: context,
-          imageUrl: networkUrl,
+          imageUrl: thumbUrl,
+          imageUrlResolver: () async {
+            final preview = await _fetchAvatarPreviewUrl();
+            if (preview == null) {
+              return null;
+            }
+            return _prepareAvatarPreviewUrlForLightbox(preview);
+          },
           onDownload: () {
             unawaited(_downloadAvatar());
           },
           onOpenExternal: () {
-            final uri = Uri.tryParse(openUrl);
-            if (uri == null) {
-              return;
-            }
-            unawaited(
-              launchUrl(uri, mode: LaunchMode.externalApplication),
-            );
+            unawaited(_openAvatarExternally());
           },
         );
         return;
       }
 
-      TUIKitWidePopup.showMedia(
-        context: context,
-        mediaURL: networkUrl,
-        onClickOrigin: () {
-          final uri = Uri.tryParse(networkUrl);
-          if (uri == null) {
-            return;
-          }
-          unawaited(launchUrl(uri, mode: LaunchMode.externalApplication));
-        },
-      );
+      final userId = ChatIdFormat.rawUserUid(userProfile?.userID ?? '');
+      final avatarVersion =
+          UserProfileLocalService.instance.readCached(userId)?.avatarVersion ??
+              0;
+      await Avatar(
+        faceUrl: thumbUrl,
+        showName: _avatarDisplayName(),
+        type: 1,
+        previewUrlResolver: _fetchAvatarPreviewUrl,
+        avatarCacheKey: UserAvatarHelper.cacheKey(
+          ownerId: userId,
+          avatarVersion: avatarVersion,
+          isGroup: false,
+          variant: 'thumb',
+        ),
+        previewCacheKey: UserAvatarHelper.cacheKey(
+          ownerId: userId,
+          avatarVersion: avatarVersion,
+          isGroup: false,
+          variant: 'preview',
+        ),
+      ).openPreview(context);
       return;
     }
 
-    pushMediaPreview(
-      context: context,
-      enableGestureBack: false,
-      child: ImageScreen(
-        imageProvider: _avatarPreviewProvider(),
-        heroTag: _avatarPreviewHeroTag(),
-        downloadFn: _downloadAvatar,
-        downloadOnly: true,
-        fitTallImagesToScreenWidth: false,
+    final thumbUrl = _resolveAvatarThumbNetworkUrl();
+    if (!mounted || thumbUrl == null || thumbUrl.isEmpty) return;
+    final userId = ChatIdFormat.rawUserUid(userProfile?.userID ?? '');
+    final avatarVersion =
+        UserProfileLocalService.instance.readCached(userId)?.avatarVersion ?? 0;
+    await Avatar(
+      faceUrl: thumbUrl,
+      showName: _avatarDisplayName(),
+      type: 1,
+      previewUrlResolver: _fetchAvatarPreviewUrl,
+      avatarCacheKey: UserAvatarHelper.cacheKey(
+        ownerId: userId,
+        avatarVersion: avatarVersion,
+        isGroup: false,
+        variant: 'thumb',
       ),
-    );
+      previewCacheKey: UserAvatarHelper.cacheKey(
+        ownerId: userId,
+        avatarVersion: avatarVersion,
+        isGroup: false,
+        variant: 'preview',
+      ),
+    ).openPreview(context);
   }
 
   Future<void> _downloadAvatar() async {
@@ -816,10 +844,15 @@ class MyProfileDetailState extends State<MyProfileDetail> {
       throw StateError('unsupported');
     }
 
-    final saved = await UserAvatarHelper.saveAvatarToGallery(
+    final previewUrl = await _fetchAvatarPreviewUrl();
+    if (previewUrl == null || previewUrl.isEmpty) {
+      throw StateError('preview_unavailable');
+    }
+    final saved = await UserAvatarHelper.saveAvatarPreviewToGallery(
       context: context,
-      faceUrl: userProfile?.faceUrl,
-      userId: userProfile?.userID,
+      faceUrl: previewUrl,
+      showName: userProfile?.nickName,
+      avatarType: 1,
     );
     if (!mounted) {
       return;
@@ -842,6 +875,15 @@ class MyProfileDetailState extends State<MyProfileDetail> {
       ko: '저장에 실패했습니다.',
     ));
     throw StateError('save_failed');
+  }
+
+  Future<void> _openAvatarExternally() async {
+    final url = await _fetchAvatarPreviewUrl();
+    if (url == null || url.isEmpty) return;
+    final uri = Uri.tryParse(url);
+    if (uri != null) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
   }
 
   Future<void> _showAvatarSourceSheet(BuildContext context) async {

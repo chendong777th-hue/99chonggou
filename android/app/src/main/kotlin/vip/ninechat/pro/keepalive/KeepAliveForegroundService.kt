@@ -9,10 +9,10 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.IBinder
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import vip.ninechat.pro.MainActivity
 import vip.ninechat.pro.R
+import vip.ninechat.pro.logging.SilentLog as Log
 
 class KeepAliveForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null

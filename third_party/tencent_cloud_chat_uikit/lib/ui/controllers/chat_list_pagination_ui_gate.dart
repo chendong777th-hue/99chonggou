@@ -36,6 +36,7 @@ class ChatListPaginationUiGate {
   int latestLoadSuppressedUntilMs = 0;
   int scrollPaginationCompensationUntilMs = 0;
   int scrollPaginationCompensationGeneration = 0;
+
   /// 上拉分页前列表最老可翻页消息，用于 prepend 后贴顶时按消息恢复视口。
   String? paginationRestoreAnchorMsgID;
   int? paginationRestoreAnchorSeq;
@@ -81,8 +82,9 @@ class ChatListPaginationUiGate {
   }
 
   /// 本次贴顶是否已消费过上拉分页。
-  /// 离开顶部 [loadPreviousTopReachResetPx]、或成功翻页且仍有更早历史时再允许。
-  bool shouldAllowLoadPreviousAtTopReach({bool bypassTopReachConsumed = false}) {
+  /// 离开顶部、成功翻页，或遇到可重试零增长页时再允许。
+  bool shouldAllowLoadPreviousAtTopReach(
+      {bool bypassTopReachConsumed = false}) {
     if (bypassTopReachConsumed) {
       return true;
     }
@@ -113,8 +115,22 @@ class ChatListPaginationUiGate {
   }
 
   /// 成功翻到更早一页且模型仍有更早历史：放开同一次贴顶消费位。
-  /// 空批 / 无增长仍保持消费位（见 [finishPreviousLoadInFlight]）。
+  /// 已确认到底的空批仍保持消费位（见 [finishPreviousLoadInFlight]）。
   void releaseTopReachConsumedAfterSuccessfulPage({
+    required bool haveMoreData,
+  }) {
+    if (!haveMoreData) {
+      return;
+    }
+    previousLoadConsumedThisTopReach = false;
+    lastTopReachConsumedAnchorKey = null;
+  }
+
+  /// A request that returned a retryable zero-growth page must not consume
+  /// the current top reach forever. The normal scroll/cooldown protections
+  /// still prevent a tight request loop, while the next deliberate upward
+  /// gesture can retry with a repaired cursor.
+  void releaseTopReachConsumedAfterRetryableNoGrowth({
     required bool haveMoreData,
   }) {
     if (!haveMoreData) {

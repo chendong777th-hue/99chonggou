@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tencent_cloud_chat_demo/src/services/call_result_record.dart';
+import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/message_conversation_id.dart';
 
 /// 按 callId 缓存通话终态结果，供聊天气泡解析优先读取。
@@ -12,12 +14,14 @@ class CallResultRepository {
 
   static final CallResultRepository instance = CallResultRepository._();
 
-  static const String _prefsKey = 'call_result_canonical_v1';
+  static const String _legacyPrefsKey = 'call_result_canonical_v1';
+  static const String _prefsKeyPrefix = 'call_result_canonical_v1_';
   static const int _maxRecords = 128;
 
-  final Map<String, CallResultRecord> _records = <String, CallResultRecord>{};
-  bool _loaded = false;
-  Future<void>? _loadTask;
+  final Map<String, Map<String, CallResultRecord>> _recordsByOwner =
+      <String, Map<String, CallResultRecord>>{};
+  final Set<String> _loadedOwners = <String>{};
+  final Map<String, Future<void>> _loadTasks = <String, Future<void>>{};
 
   /// Bumped when a record is written; chat pages re-normalize bubbles.
   final ValueNotifier<int> revision = ValueNotifier<int>(0);
@@ -27,7 +31,8 @@ class CallResultRepository {
     if (id.isEmpty) {
       return null;
     }
-    return _records[id];
+    final owner = _ownerForCurrentSession();
+    return _recordsByOwner[owner]?[id];
   }
 
   /// Newest-first records for a conversation (used to rehydrate chat bubbles).
@@ -36,7 +41,8 @@ class CallResultRepository {
     if (id.isEmpty) {
       return const <CallResultRecord>[];
     }
-    final list = _records.values
+    final list = (_recordsByOwner[_ownerForCurrentSession()]?.values ??
+            const <CallResultRecord>[])
         .where((record) => record.conversationId.trim() == id)
         .toList();
     list.sort((a, b) => b.endedAtMs.compareTo(a.endedAtMs));
@@ -49,9 +55,15 @@ class CallResultRepository {
     if (id.isEmpty) {
       return 0;
     }
-    await ensureLoaded();
+    final identity = SessionIdentityService.instance.capture();
+    final owner = _ownerForIdentity(identity);
+    await ensureLoaded(identity: identity);
+    if (!_isCurrentOrGuest(identity)) {
+      return 0;
+    }
+    final records = _recordsByOwner[owner] ?? <String, CallResultRecord>{};
     final toRemove = <String>[];
-    for (final entry in _records.entries) {
+    for (final entry in records.entries) {
       final recordConv = entry.value.conversationId.trim();
       if (recordConv.isEmpty) {
         continue;
@@ -65,25 +77,42 @@ class CallResultRepository {
       return 0;
     }
     for (final key in toRemove) {
-      _records.remove(key);
+      records.remove(key);
     }
     revision.value++;
-    await _persist();
+    await _persist(owner, identity);
     return toRemove.length;
   }
 
-  /// 按来源优先级写入：server > device > signaling。
-  /// 已存在更高（或同等）优先级来源的记录时，不会被较低优先级覆盖，
-  /// 避免设备端本地推断覆盖服务端权威结果。
-  void save(CallResultRecord record) {
+  /// Merge one observation into the canonical callId record.
+  /// Lifecycle rank is monotonic; a terminal record can never be rolled back
+  /// by a late invite/accept. For equal states, server remains authoritative.
+  void save(CallResultRecord record, {SessionIdentity? identity}) {
+    final capturedIdentity =
+        identity ?? SessionIdentityService.instance.capture();
+    if (!_isCurrentOrGuest(capturedIdentity)) {
+      return;
+    }
+    final owner = _ownerForIdentity(capturedIdentity);
+    final records = _recordsByOwner.putIfAbsent(
+      owner,
+      () => <String, CallResultRecord>{},
+    );
     final id = record.callId.trim();
     if (id.isEmpty) {
       return;
     }
-    final existing = _records[id];
+    final existing = records[id];
+    final incomingStatus = record.effectiveStatus;
+    if (existing != null) {
+      final currentStatus = existing.effectiveStatus;
+      if (incomingStatus.rank < currentStatus.rank) return;
+      if (incomingStatus.rank == currentStatus.rank &&
+          existing.source.priority > record.source.priority) return;
+    }
     if (existing != null &&
-        existing.source.priority > record.source.priority) {
-      return;
+        incomingStatus.rank == existing.effectiveStatus.rank) {
+      record = _mergeFields(existing, record);
     }
     // Skip no-op writes (same source + protocol + duration + direction).
     if (existing != null &&
@@ -95,30 +124,73 @@ class CallResultRepository {
         existing.mediaType == record.mediaType) {
       return;
     }
-    _records[id] = record;
-    _trimIfNeeded();
+    records[id] = record;
+    _trimIfNeeded(records);
     revision.value++;
-    unawaited(_persist());
+    unawaited(_persist(owner, capturedIdentity));
   }
 
-  Future<void> ensureLoaded() {
-    if (_loaded) {
+  CallResultRecord _mergeFields(
+      CallResultRecord current, CallResultRecord next) {
+    return CallResultRecord(
+      callId: next.callId.isNotEmpty ? next.callId : current.callId,
+      conversationId: next.conversationId.isNotEmpty
+          ? next.conversationId
+          : current.conversationId,
+      callerUserId: next.callerUserId.isNotEmpty
+          ? next.callerUserId
+          : current.callerUserId,
+      operatorUserId: next.operatorUserId.isNotEmpty
+          ? next.operatorUserId
+          : current.operatorUserId,
+      peerUserId:
+          next.peerUserId.isNotEmpty ? next.peerUserId : current.peerUserId,
+      protocolType: next.protocolType.name == 'unknown'
+          ? current.protocolType
+          : next.protocolType,
+      durationSec:
+          next.durationSec > 0 ? next.durationSec : current.durationSec,
+      endedAtMs: next.endedAtMs > 0 ? next.endedAtMs : current.endedAtMs,
+      isOutgoing: next.isOutgoing ?? current.isOutgoing,
+      source: next.source.priority >= current.source.priority
+          ? next.source
+          : current.source,
+      mediaType:
+          next.mediaType.trim().isNotEmpty ? next.mediaType : current.mediaType,
+      status: next.status ?? current.status,
+      roomName: next.roomName.isNotEmpty ? next.roomName : current.roomName,
+      startedAtMs:
+          next.startedAtMs > 0 ? next.startedAtMs : current.startedAtMs,
+      acceptedAtMs:
+          next.acceptedAtMs > 0 ? next.acceptedAtMs : current.acceptedAtMs,
+    );
+  }
+
+  Future<void> ensureLoaded({SessionIdentity? identity}) {
+    final capturedIdentity =
+        identity ?? SessionIdentityService.instance.capture();
+    final owner = _ownerForIdentity(capturedIdentity);
+    if (_loadedOwners.contains(owner)) {
       return Future<void>.value();
     }
-    return _loadTask ??= _loadFromPrefs();
+    return _loadTasks[owner] ??= _loadFromPrefs(owner, capturedIdentity);
   }
 
-  Future<void> _loadFromPrefs() async {
+  Future<void> _loadFromPrefs(
+    String owner,
+    SessionIdentity identity,
+  ) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final raw = prefs.getString(_prefsKey);
+      final raw = prefs.getString(_prefsKeyForOwner(owner));
+      if (!_isCurrentOrGuest(identity)) {
+        return;
+      }
       if (raw == null || raw.trim().isEmpty) {
-        _loaded = true;
         return;
       }
       final decoded = jsonDecode(raw);
       if (decoded is! Map) {
-        _loaded = true;
         return;
       }
       for (final entry in decoded.entries) {
@@ -127,38 +199,100 @@ class CallResultRepository {
         if (key.isEmpty || value is! Map) {
           continue;
         }
-        final record = CallResultRecord.fromJson(Map<String, dynamic>.from(value));
+        final record =
+            CallResultRecord.fromJson(Map<String, dynamic>.from(value));
         if (record.callId.isNotEmpty) {
-          _records[record.callId] = record;
+          _recordsByOwner
+              .putIfAbsent(
+                owner,
+                () => <String, CallResultRecord>{},
+              )
+              .putIfAbsent(record.callId, () => record);
         }
       }
-      _trimIfNeeded();
+      _trimIfNeeded(_recordsByOwner[owner] ?? <String, CallResultRecord>{});
     } catch (_) {
     } finally {
-      _loaded = true;
+      if (_isCurrentOrGuest(identity)) {
+        _loadedOwners.add(owner);
+      }
+      _loadTasks.remove(owner);
     }
   }
 
-  Future<void> _persist() async {
+  Future<void> _persist(String owner, SessionIdentity identity) async {
     try {
-      await ensureLoaded();
+      await ensureLoaded(identity: identity);
       final prefs = await SharedPreferences.getInstance();
+      if (!_isCurrentOrGuest(identity)) {
+        return;
+      }
+      final records = _recordsByOwner[owner] ?? <String, CallResultRecord>{};
       final payload = <String, dynamic>{
-        for (final entry in _records.entries) entry.key: entry.value.toJson(),
+        for (final entry in records.entries) entry.key: entry.value.toJson(),
       };
-      await prefs.setString(_prefsKey, jsonEncode(payload));
+      if (!_isCurrentOrGuest(identity)) {
+        return;
+      }
+      await prefs.setString(_prefsKeyForOwner(owner), jsonEncode(payload));
     } catch (_) {}
   }
 
-  void _trimIfNeeded() {
-    if (_records.length <= _maxRecords) {
+  Future<void> clearForOwner(String ownerUserId) async {
+    final owner = ownerUserId.trim();
+    if (owner.isEmpty) {
       return;
     }
-    final sorted = _records.entries.toList()
-      ..sort((a, b) => a.value.endedAtMs.compareTo(b.value.endedAtMs));
-    final removeCount = _records.length - _maxRecords;
-    for (var i = 0; i < removeCount; i++) {
-      _records.remove(sorted[i].key);
+    _recordsByOwner.remove(_ownerForUserId(owner));
+    _loadedOwners.remove(_ownerForUserId(owner));
+    revision.value++;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_prefsKeyForOwner(owner));
+    // The old key was global and cannot be attributed safely. It must never
+    // be read by a logged-in account, so remove it at the next account purge.
+    await prefs.remove(_legacyPrefsKey);
+  }
+
+  void _trimIfNeeded(Map<String, CallResultRecord> records) {
+    if (records.length <= _maxRecords) {
+      return;
     }
+    final sorted = records.entries.toList()
+      ..sort((a, b) => a.value.endedAtMs.compareTo(b.value.endedAtMs));
+    final removeCount = records.length - _maxRecords;
+    for (var i = 0; i < removeCount; i++) {
+      records.remove(sorted[i].key);
+    }
+  }
+
+  String _ownerForCurrentSession() {
+    return _ownerForIdentity(SessionIdentityService.instance.capture());
+  }
+
+  String _ownerForIdentity(SessionIdentity identity) {
+    return _ownerForUserId(identity.ownerUserId);
+  }
+
+  String _ownerForUserId(String ownerUserId) {
+    final owner = ownerUserId.trim();
+    return owner.isEmpty ? '_guest' : owner;
+  }
+
+  String _prefsKeyForOwner(String owner) {
+    return '$_prefsKeyPrefix${ContactSocialCacheStore.accountScopeForUserId(owner)}';
+  }
+
+  bool _isCurrent(SessionIdentity identity) {
+    return identity.ownerUserId.isNotEmpty &&
+        SessionIdentityService.instance.isCurrent(identity);
+  }
+
+  bool _isCurrentOrGuest(SessionIdentity identity) {
+    if (identity.ownerUserId.isEmpty) {
+      final current = SessionIdentityService.instance.capture();
+      return current.ownerUserId.isEmpty &&
+          current.generation == identity.generation;
+    }
+    return _isCurrent(identity);
   }
 }

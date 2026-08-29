@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_flags.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart';
 
 void main() {
@@ -150,6 +153,43 @@ void main() {
     expect(followCalls, <bool>[false]);
     expect(
       ConversationPinSyncService.instance.isPinnedConversationId('group_g1'),
+      isFalse,
+    );
+  });
+
+  test('late TIM result from previous session cannot update pin state',
+      () async {
+    final timResult = Completer<bool>();
+    var followWrites = 0;
+    ConversationPinSyncService.debugPinConversationOverride =
+        (conversationID, isPinned) => timResult.future;
+    ConversationPinSyncService.debugFollowWriteOverride = ({
+      required chatType,
+      required peerId,
+      required pinned,
+    }) async {
+      followWrites++;
+    };
+
+    final pending = ConversationPinService.instance.setPinned(
+      conversation: V2TimConversation(
+        conversationID: 'c2c_late',
+        type: 1,
+        userID: 'late',
+        isPinned: false,
+      ),
+      isPinned: true,
+      source: 'test_stale_session',
+    );
+    SessionIdentityService.instance.invalidate(reason: 'test_account_switch');
+    await ConversationPinSyncService.instance.clearSession();
+    timResult.complete(true);
+
+    final result = await pending;
+    expect(result.applied, isFalse);
+    expect(followWrites, 0);
+    expect(
+      ConversationPinSyncService.instance.isPinnedConversationId('c2c_late'),
       isFalse,
     );
   });

@@ -3,10 +3,11 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:tencent_cloud_chat_demo/src/models/me_group_record.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_info_resolver.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_local/group_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_membership_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 
-enum GroupMetadataSource { localPlaceholder, remoteDetail, explicitEvent }
+enum GroupMetadataSource { localPlaceholder, remoteDetail, storeCommit }
 
 @immutable
 class GroupMetadataSnapshot {
@@ -37,19 +38,24 @@ class GroupMetadataRefreshCoordinator {
   GroupMetadataRefreshCoordinator({
     Future<MeGroupRecord?> Function(String groupId)? readLocal,
     Future<void> Function(String groupId)? refreshRemote,
+    int Function()? readStoreVersion,
     this.throttle = const Duration(seconds: 60),
   })  : _readLocal = readLocal ?? GroupInfoResolver.instance.readGroup,
         _refreshRemote = refreshRemote ??
             ((groupId) => GroupMembershipSyncService.instance
-                .refreshGroupDetail(groupId, refresh: true));
+                .refreshGroupDetail(groupId, refresh: true)),
+        _readStoreVersion = readStoreVersion ??
+            (() => GroupLocalStore.instance.listDataRevision);
 
   static final GroupMetadataRefreshCoordinator instance =
       GroupMetadataRefreshCoordinator();
 
   final Future<MeGroupRecord?> Function(String groupId) _readLocal;
   final Future<void> Function(String groupId) _refreshRemote;
+  final int Function() _readStoreVersion;
   final Duration throttle;
   final Map<String, Future<GroupMetadataSnapshot?>> _inFlight = {};
+  final Map<String, bool> _inFlightRefreshesRemote = {};
   final Map<String, int> _generation = {};
   final Map<String, DateTime> _lastRemoteRefresh = {};
 
@@ -68,7 +74,7 @@ class GroupMetadataRefreshCoordinator {
       record,
       groupId: groupId,
       source: GroupMetadataSource.localPlaceholder,
-      generation: generation,
+      generation: _readStoreVersion(),
     );
   }
 
@@ -79,29 +85,54 @@ class GroupMetadataRefreshCoordinator {
     final key = _key(groupId);
     if (key.isEmpty) return Future.value();
     final existing = _inFlight[key];
-    if (existing != null) return existing;
+    if (existing != null) {
+      if (!force || (_inFlightRefreshesRemote[key] ?? false)) {
+        return existing;
+      }
+      // A forced invalidation must not be swallowed by an in-flight local-only
+      // read that was throttled. Once that read settles, start (or join) the
+      // authoritative remote refresh.
+      return _refreshAfterExisting(groupId, existing);
+    }
     final generation = _generation[key] ?? 0;
+    final last = _lastRemoteRefresh[key];
+    final refreshesRemote =
+        force || last == null || DateTime.now().difference(last) >= throttle;
     final task = _refreshOnce(
       groupId,
       key: key,
       generation: generation,
-      force: force,
+      refreshRemote: refreshesRemote,
     );
     _inFlight[key] = task;
+    _inFlightRefreshesRemote[key] = refreshesRemote;
     return task.whenComplete(() {
-      if (identical(_inFlight[key], task)) _inFlight.remove(key);
+      if (identical(_inFlight[key], task)) {
+        _inFlight.remove(key);
+        _inFlightRefreshesRemote.remove(key);
+      }
     });
+  }
+
+  Future<GroupMetadataSnapshot?> _refreshAfterExisting(
+    String groupId,
+    Future<GroupMetadataSnapshot?> existing,
+  ) async {
+    try {
+      await existing;
+    } catch (_) {
+      // The forced invalidation still needs its own authoritative attempt.
+    }
+    return refresh(groupId, force: true);
   }
 
   Future<GroupMetadataSnapshot?> _refreshOnce(
     String groupId, {
     required String key,
     required int generation,
-    required bool force,
+    required bool refreshRemote,
   }) async {
-    final now = DateTime.now();
-    final last = _lastRemoteRefresh[key];
-    if (force || last == null || now.difference(last) >= throttle) {
+    if (refreshRemote) {
       await _refreshRemote(groupId);
       _lastRemoteRefresh[key] = DateTime.now();
     }
@@ -111,7 +142,7 @@ class GroupMetadataRefreshCoordinator {
       record,
       groupId: groupId,
       source: GroupMetadataSource.remoteDetail,
-      generation: generation,
+      generation: _readStoreVersion(),
     );
   }
 

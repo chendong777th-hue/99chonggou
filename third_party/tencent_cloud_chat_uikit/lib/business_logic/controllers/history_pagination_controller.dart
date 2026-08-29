@@ -21,14 +21,27 @@ class HistoryPaginationController {
   /// 首屏 SDK 为空且未接受归档为「当前尾巴」时：禁止上拉再用归档挖旧消息。
   bool suppressArchiveUntilSdkHistory = false;
 
+  /// Timestamp of the last empty older batch (transient SDK/network issue).
+  /// After [emptyBatchRetryWindow] the haveMoreData flag can be re-armed
+  /// so the user can retry scrolling up without re-entering the chat.
+  DateTime? lastEmptyBatchAt;
+  static const Duration emptyBatchRetryWindow = Duration(seconds: 30);
+
   final Set<String> historyLoadingKeys = <String>{};
 
   bool get isLoadingChatHistory => historyLoadingKeys.isNotEmpty;
+
+  /// Returns true if the empty-batch latch should be retried (enough time
+  /// has passed since the last empty batch to warrant another attempt).
+  bool get emptyBatchLatchExpired =>
+      lastEmptyBatchAt != null &&
+      DateTime.now().difference(lastEmptyBatchAt!) >= emptyBatchRetryWindow;
 
   void resetForConversationInit() {
     archiveOlderExhausted = false;
     archiveOlderActive = false;
     suppressArchiveUntilSdkHistory = false;
+    lastEmptyBatchAt = null;
   }
 
   Future<bool> Function({

@@ -20,7 +20,12 @@ import 'package:tencent_cloud_chat_demo/src/utils/conversation_preview_history_s
 import 'package:tencent_cloud_chat_demo/src/utils/message_conversation_id.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_reconciliation_coordinator.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_history_coverage.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_history_batch.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/archive_history_provider.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/message_history_peek_loader.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/message_services.dart';
@@ -79,6 +84,7 @@ class ConversationHistoryWarmScheduler {
     final id = conversationID?.trim() ?? '';
     return id.isNotEmpty && registry.matchesOpenConversation(id);
   }
+
   static const Duration stagger = Duration(milliseconds: 200);
   static const Duration viewportStagger = Duration(milliseconds: 120);
   static const Duration globalCooldown = Duration(seconds: 60);
@@ -92,6 +98,32 @@ class ConversationHistoryWarmScheduler {
 
   /// 孤儿 / 超容 messageListMap 对账淘汰总开关。
   static bool staleReconcileEnabled = true;
+
+  static MessageHistoryBounds _historyBounds(
+    Iterable<V2TimMessage> messages,
+  ) {
+    V2TimMessage? oldest;
+    V2TimMessage? newest;
+    for (final message in messages) {
+      if ((message.msgID?.trim() ?? '').isEmpty) continue;
+      if (oldest == null ||
+          TUIChatGlobalModel.compareMessagesChronological(message, oldest) <
+              0) {
+        oldest = message;
+      }
+      if (newest == null ||
+          TUIChatGlobalModel.compareMessagesChronological(message, newest) >
+              0) {
+        newest = message;
+      }
+    }
+    return MessageHistoryBounds(
+      oldestMsgID: oldest?.msgID,
+      newestMsgID: newest?.msgID,
+      oldestSeq: int.tryParse(oldest?.seq?.trim() ?? ''),
+      newestSeq: int.tryParse(newest?.seq?.trim() ?? ''),
+    );
+  }
 
   MessageService get _messageService => serviceLocator<MessageService>();
 
@@ -639,8 +671,7 @@ class ConversationHistoryWarmScheduler {
     required V2TimConversation conversation,
     Duration timeout = const Duration(milliseconds: 220),
   }) async {
-    final cacheKey =
-        ConversationPreviewHistorySync.conversationMessageCacheKey(
+    final cacheKey = ConversationPreviewHistorySync.conversationMessageCacheKey(
       conversation,
     );
     if (cacheKey == null || cacheKey.isEmpty) {
@@ -1070,6 +1101,18 @@ class ConversationHistoryWarmScheduler {
       final localOnly = mode == ConversationWarmMode.viewportLocal ||
           (mode == ConversationWarmMode.syncTop &&
               !ConversationPerfFlags.historyWarmSyncTopCloudEnabled);
+      // `localThenCloud` returns a merged SDK window without exposing which
+      // rows came from the cloud. Treat only explicit local-only/cloud-only
+      // modes as provenance claims; mixed warm data remains provisional.
+      final requestedSource = localOnly || !isOfficialWarm
+          ? MessageReconciliationSource.local
+          : MessageReconciliationSource.cloud;
+      final networkBefore = globalModel.messageReconciliationNetworkState;
+      final reconciliationRequest = globalModel.beginHistoryReconciliation(
+        conversationID: cacheKey,
+        requestedSource: requestedSource,
+        networkState: networkBefore,
+      );
       final historyResult = localOnly
           ? await MessageHistoryPeekLoader.loadOlderLocalOnlyResult(
               messageService: _messageService,
@@ -1092,10 +1135,18 @@ class ConversationHistoryWarmScheduler {
                 );
       final messages = historyResult.messageList;
       if (!generationAlive()) {
+        globalModel.failHistoryReconciliation(
+          request: reconciliationRequest,
+          reason: 'history_warm_generation_stale',
+        );
         return;
       }
 
       if (mode == ConversationWarmMode.viewportLocal && messages.isEmpty) {
+        globalModel.failHistoryReconciliation(
+          request: reconciliationRequest,
+          reason: 'history_warm_local_empty',
+        );
         _rememberViewportLocalMiss(cacheKey);
         ChatHistoryTrace.log(
           'history_warm_viewport_local_empty',
@@ -1135,6 +1186,12 @@ class ConversationHistoryWarmScheduler {
       );
 
       if (!fillMemory || filtered.isEmpty) {
+        globalModel.failHistoryReconciliation(
+          request: reconciliationRequest,
+          reason: filtered.isEmpty
+              ? 'history_warm_empty'
+              : 'history_warm_memory_fill_disabled',
+        );
         return;
       }
 
@@ -1142,6 +1199,10 @@ class ConversationHistoryWarmScheduler {
         cacheKey: cacheKey,
         conversationID: conversation.conversationID,
       )) {
+        globalModel.failHistoryReconciliation(
+          request: reconciliationRequest,
+          reason: 'history_warm_open_chat_owned_by_page',
+        );
         return;
       }
 
@@ -1151,6 +1212,10 @@ class ConversationHistoryWarmScheduler {
             existingCount: existing.length,
             incomingCount: filtered.length,
           )) {
+        globalModel.failHistoryReconciliation(
+          request: reconciliationRequest,
+          reason: 'history_warm_c2c_restamp_rejected',
+        );
         ChatHistoryTrace.log(
           'history_warm_skip_c2c_peek_restamp',
           conversationID: cacheKey,
@@ -1177,22 +1242,54 @@ class ConversationHistoryWarmScheduler {
                   existing: existing,
                   fetched: filtered,
                 );
-      globalModel.setMessageList(
-        cacheKey,
-        isOfficialWarm
+      final networkAfter = globalModel.messageReconciliationNetworkState;
+      final provenance = MessageReconciliationProvenance.resolve(
+        requestedSource: requestedSource,
+        beforeRequest: networkBefore,
+        afterResponse: networkAfter,
+      );
+      final clearEpoch =
+          await ArchiveHistoryProvider.historyClearedAtMs(cacheKey);
+      final batchKind = localOnly || !isOfficialWarm
+          ? MessageHistoryBatchKind.localSnapshot
+          : MessageHistoryBatchKind.latestWindow;
+      final batch = MessageHistoryBatch<V2TimMessage>(
+        conversationKey: cacheKey,
+        requestedSource: requestedSource,
+        actualSource: provenance.actualSource,
+        batchKind: batchKind,
+        requestGeneration: reconciliationRequest.generation,
+        clearEpoch: clearEpoch,
+        isFinished: historyResult.isFinished,
+        hasMoreOlder: !historyResult.isFinished,
+        cloudHasMoreNewer: false,
+        cloudResponseProven: provenance.cloudResponseProven,
+        requestedCursor: const MessageHistoryCursor(
+          direction: MessageHistoryCursorDirection.latest,
+        ),
+        returnedBounds: _historyBounds(merged),
+        messages: isOfficialWarm
             ? TUIChatGlobalModel.dedupeMessages(merged)
             : CallBubbleDedupe.prepareOpenHistoryMessages(merged),
-        needResetNewMessageCount: false,
-        replace: true,
       );
+      final commit = globalModel.completeHistoryBatch(
+        request: reconciliationRequest,
+        batch: batch,
+        networkState: provenance.networkState,
+        clearEpoch: clearEpoch,
+        historyCommitSource: 'history_warm',
+      );
+      if (commit == null) {
+        return;
+      }
       ChatMessageHeightCache.instance.seedEstimatesForMessages(filtered);
 
       if (mode == ConversationWarmMode.viewportLocal) {
         // LOCAL-only is a provisional window unless we already had a full
         // validated first screen. Tiny peeks must not invalidate that.
         final wasLoaded = globalModel.hasInitialHistoryLoaded(cacheKey);
-        final complete = merged.length >=
-            HistoryMessageDartConstant.initialOpenFetchCount;
+        final complete =
+            merged.length >= HistoryMessageDartConstant.initialOpenFetchCount;
         if (!(wasLoaded && complete)) {
           globalModel.clearInitialHistoryLoaded(cacheKey);
           globalModel.markInitialHistoryMayHaveOlder(
@@ -1201,10 +1298,18 @@ class ConversationHistoryWarmScheduler {
           );
         }
       } else {
-        globalModel.markInitialHistoryLoaded(cacheKey);
+        if (provenance.proofKind == MessageHistoryProofKind.serverContinuity) {
+          globalModel.markCloudInitialHistoryVerified(cacheKey);
+        } else {
+          globalModel.markLocalInitialHistoryVisible(cacheKey);
+        }
         final conversationID = conversation.conversationID.trim();
         if (conversationID.isNotEmpty && conversationID != cacheKey) {
-          globalModel.markInitialHistoryLoaded(conversationID);
+          if (provenance.proofKind == MessageHistoryProofKind.serverContinuity) {
+            globalModel.markCloudInitialHistoryVerified(conversationID);
+          } else {
+            globalModel.markLocalInitialHistoryVisible(conversationID);
+          }
         }
         globalModel.markInitialHistoryMayHaveOlder(
           cacheKey,

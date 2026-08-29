@@ -1,5 +1,3 @@
-import 'dart:developer' as developer;
-
 /// Group governance operation traces. Off by default; set [enabled] to true.
 class GroupGovernanceTrace {
   GroupGovernanceTrace._();
@@ -13,9 +11,6 @@ class GroupGovernanceTrace {
   }) {
     if (!enabled) return;
     final line = formatLineForLog(event, extras: extras);
-    developer.log(line, name: _tag);
-    // ignore: avoid_print
-    print(line);
   }
 
   static String formatLineForLog(

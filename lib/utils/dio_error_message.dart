@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:tencent_cloud_chat_demo/src/api/api_client.dart';
 import 'package:tencent_cloud_chat_demo/src/i18n/app_i18n.dart';
 import 'package:tencent_cloud_chat_demo/src/i18n/auth_localizations.dart';
 import 'package:tencent_cloud_chat_demo/utils/auth_error_codes.dart';
@@ -202,21 +203,10 @@ class DioErrorMessage {
   static bool isAuthFailure(DioError error) {
     final status = error.response?.statusCode;
     if (status == null) return false;
-    if (_isExplicitAuthError(error)) return true;
+    if (ApiClient.isExplicitSessionExpiryError(error)) return true;
     if (_isWalletPath(error.requestOptions.path)) return false;
     if (status == 401) return !_isBusinessError(error);
     return false;
-  }
-
-  static bool _isExplicitAuthError(DioError error) {
-    final code = _responseCode(error).toUpperCase();
-    return code == 'UNAUTHORIZED' ||
-        code == 'AUTH_EXPIRED' ||
-        code == 'TOKEN_EXPIRED' ||
-        code == 'TOKEN_INVALID' ||
-        code == 'INVALID_TOKEN' ||
-        code == 'LOGIN_EXPIRED' ||
-        code == 'SESSION_EXPIRED';
   }
 
   static bool _isBusinessError(DioError error) {
@@ -406,7 +396,9 @@ class DioErrorMessage {
         (value.contains('重新截止') || value.contains('不可重新截止'))) {
       return '已录入开彩，不可重新截止下注';
     }
-    if ((value.contains('手机号') || lower.contains('phone') || lower.contains('mobile')) &&
+    if ((value.contains('手机号') ||
+            lower.contains('phone') ||
+            lower.contains('mobile')) &&
         (value.contains('已注册') ||
             value.contains('已存在') ||
             lower.contains('registered') ||

@@ -20,12 +20,12 @@
 		A1SH03FC26346D5854E00703 /* NotificationAvatarDecorator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1SH01FC26346D5854E00701 /* NotificationAvatarDecorator.swift */; };
 		AACBDD2628597D360036A1C2 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = AACBDD2828597D360036A1C2 /* InfoPlist.strings */; };
 		AAEE01BE29DBD5C2000BFE4A /* tencent_cloud_uikit_core.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AAEE01BD29DBD5C2000BFE4A /* tencent_cloud_uikit_core.framework */; };
-		B60B1410ECC04C78282067C2 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BDC95D699995D5C1A1157F42 /* Pods_Runner.framework */; };
 		B7WD012A3C047338C1AE868 /* WithdrawProgressActivityManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7WD012A3C047338C1AE869 /* WithdrawProgressActivityManager.swift */; };
 		B7WD1000102C047338C1AE870 /* WithdrawProgressWidgetBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7WD1000022C047338C1AE870 /* WithdrawProgressWidgetBundle.swift */; };
 		B7WD1000112C047338C1AE870 /* WithdrawProgressAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7WD1000052C047338C1AE870 /* WithdrawProgressAttributes.swift */; };
 		B7WD1000122C047338C1AE870 /* WithdrawProgressAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7WD1000052C047338C1AE870 /* WithdrawProgressAttributes.swift */; };
 		B7WD1000132C047338C1AE870 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B7WD1000042C047338C1AE870 /* Assets.xcassets */; };
+		C8C871BFC740E8EF39764721 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 62EEDFCBBE46BE877300DD8C /* Pods_Runner.framework */; };
 		F8E957CD17BC45B49A1CC165 /* SelfHostedVoipCallKit.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B71A23C2A3C4997B152CF44 /* SelfHostedVoipCallKit.swift */; };
 		GLAP012A3C047338C1AE868 /* GroupLiveAirPlayViewFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = GLAP012A3C047338C1AE869 /* GroupLiveAirPlayViewFactory.swift */; };
 /* End PBXBuildFile section */
@@ -37,11 +37,13 @@
 		41677BB92FDCF6F6006350D7 /* NotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		4B71A23C2A3C4997B152CF44 /* SelfHostedVoipCallKit.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SelfHostedVoipCallKit.swift; sourceTree = "<group>"; };
 		5EEC54482D159476008CE9CC /* RunnerRelease.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = RunnerRelease.entitlements; sourceTree = "<group>"; };
+		62EEDFCBBE46BE877300DD8C /* Pods_Runner.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Runner.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
 		74858FAE1ED2DC5600515810 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
 		7AFA3C901D35360C0083082F /* Profile.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Profile.xcconfig; path = Flutter/Profile.xcconfig; sourceTree = "<group>"; };
 		84F88998C03142EA9A2F0AAE /* LiveKitCallPip.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LiveKitCallPip.swift; sourceTree = "<group>"; };
+		890F3120444AC7A370BFE703 /* Pods-Runner.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.profile.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig"; sourceTree = "<group>"; };
 		9740EEB21CF90195004384FC /* Debug.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Debug.xcconfig; path = Flutter/Debug.xcconfig; sourceTree = "<group>"; };
 		9740EEB31CF90195004384FC /* Generated.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Generated.xcconfig; path = Flutter/Generated.xcconfig; sourceTree = "<group>"; };
 		97C146EE1CF9000F007C117D /* Runner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Runner.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -49,6 +51,7 @@
 		97C146FD1CF9000F007C117D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		97C147001CF9000F007C117D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		990B3997BCEB0B34DEBE3D76 /* Pods-Runner.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.debug.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"; sourceTree = "<group>"; };
 		A1NS01FC26346D5854E00701 /* NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationService.swift; sourceTree = "<group>"; };
 		A1NS02FC26346D5854E00702 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1NS03FC26346D5854E00703 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -61,16 +64,13 @@
 		AACBDD2D28597D730036A1C2 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/LaunchScreen.strings"; sourceTree = "<group>"; };
 		AACBDD2E28597D730036A1C2 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
 		AAEE01BD29DBD5C2000BFE4A /* tencent_cloud_uikit_core.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = tencent_cloud_uikit_core.framework; sourceTree = BUILT_PRODUCTS_DIR; };
-		B77264D15590639BD2DBBDB9 /* Pods-Runner.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.debug.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"; sourceTree = "<group>"; };
 		B7WD012A3C047338C1AE869 /* WithdrawProgressActivityManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = WithdrawProgressActivityManager.swift; sourceTree = "<group>"; };
 		B7WD1000012C047338C1AE870 /* WithdrawProgressWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = WithdrawProgressWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		B7WD1000022C047338C1AE870 /* WithdrawProgressWidgetBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WithdrawProgressWidgetBundle.swift; sourceTree = "<group>"; };
 		B7WD1000032C047338C1AE870 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B7WD1000042C047338C1AE870 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B7WD1000052C047338C1AE870 /* WithdrawProgressAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WithdrawProgressAttributes.swift; sourceTree = "<group>"; };
-		BDC95D699995D5C1A1157F42 /* Pods_Runner.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Runner.framework; sourceTree = BUILT_PRODUCTS_DIR; };
-		D1B46A28BDAB1675C70D6418 /* Pods-Runner.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.profile.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.profile.xcconfig"; sourceTree = "<group>"; };
-		DE7EC6E1B0443DA1AA0604BF /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
+		DA3B7EA69E59272CFF4BEBC5 /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
 		E1096F1727E35FC400EFCED9 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 		GLAP012A3C047338C1AE869 /* GroupLiveAirPlayViewFactory.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = GroupLiveAirPlayViewFactory.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -81,7 +81,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AAEE01BE29DBD5C2000BFE4A /* tencent_cloud_uikit_core.framework in Frameworks */,
-				B60B1410ECC04C78282067C2 /* Pods_Runner.framework in Frameworks */,
+				C8C871BFC740E8EF39764721 /* Pods_Runner.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -106,7 +106,7 @@
 			isa = PBXGroup;
 			children = (
 				AAEE01BD29DBD5C2000BFE4A /* tencent_cloud_uikit_core.framework */,
-				BDC95D699995D5C1A1157F42 /* Pods_Runner.framework */,
+				62EEDFCBBE46BE877300DD8C /* Pods_Runner.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -114,9 +114,9 @@
 		8136C95DC3FAC8DB115335EF /* Pods */ = {
 			isa = PBXGroup;
 			children = (
-				B77264D15590639BD2DBBDB9 /* Pods-Runner.debug.xcconfig */,
-				DE7EC6E1B0443DA1AA0604BF /* Pods-Runner.release.xcconfig */,
-				D1B46A28BDAB1675C70D6418 /* Pods-Runner.profile.xcconfig */,
+				990B3997BCEB0B34DEBE3D76 /* Pods-Runner.debug.xcconfig */,
+				DA3B7EA69E59272CFF4BEBC5 /* Pods-Runner.release.xcconfig */,
+				890F3120444AC7A370BFE703 /* Pods-Runner.profile.xcconfig */,
 			);
 			path = Pods;
 			sourceTree = "<group>";
@@ -215,15 +215,15 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 97C147051CF9000F007C117D /* Build configuration list for PBXNativeTarget "Runner" */;
 			buildPhases = (
-				7B51381F0AA6DC24781A1E66 /* [CP] Check Pods Manifest.lock */,
+				94048B60BDBB65D578E652E2 /* [CP] Check Pods Manifest.lock */,
 				9740EEB61CF901F6004384FC /* Run Script */,
 				97C146EA1CF9000F007C117D /* Sources */,
 				97C146EB1CF9000F007C117D /* Frameworks */,
 				97C146EC1CF9000F007C117D /* Resources */,
 				B7WD2000112C047338C1AE870 /* Embed WithdrawProgressWidget */,
 				3B06AD1E1E4923F5004D2608 /* Thin Binary */,
-				80FFBC4A42D4E79E808510C1 /* [CP] Embed Pods Frameworks */,
-				38BB50B074D1B3B3F7EDE259 /* [CP] Copy Pods Resources */,
+				7EC0ABFFADA00E09109A84D5 /* [CP] Embed Pods Frameworks */,
+				4619CEF621A8F728A7B553E7 /* [CP] Copy Pods Resources */,
 			);
 			buildRules = (
 			);
@@ -340,23 +340,6 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		38BB50B074D1B3B3F7EDE259 /* [CP] Copy Pods Resources */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-resources-${CONFIGURATION}-input-files.xcfilelist",
-			);
-			name = "[CP] Copy Pods Resources";
-			outputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-resources-${CONFIGURATION}-output-files.xcfilelist",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-resources.sh\"\n";
-			showEnvVarsInLog = 0;
-		};
 		3B06AD1E1E4923F5004D2608 /* Thin Binary */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
@@ -373,7 +356,49 @@
 			shellPath = /bin/sh;
 			shellScript = "/bin/sh \"$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh\" embed_and_thin\n";
 		};
-		7B51381F0AA6DC24781A1E66 /* [CP] Check Pods Manifest.lock */ = {
+		4619CEF621A8F728A7B553E7 /* [CP] Copy Pods Resources */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-resources-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			inputPaths = (
+			);
+			name = "[CP] Copy Pods Resources";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-resources-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-resources.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+		7EC0ABFFADA00E09109A84D5 /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			inputPaths = (
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+		94048B60BDBB65D578E652E2 /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -393,23 +418,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
-			showEnvVarsInLog = 0;
-		};
-		80FFBC4A42D4E79E808510C1 /* [CP] Embed Pods Frameworks */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks-${CONFIGURATION}-input-files.xcfilelist",
-			);
-			name = "[CP] Embed Pods Frameworks";
-			outputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks-${CONFIGURATION}-output-files.xcfilelist",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-Runner/Pods-Runner-frameworks.sh\"\n";
 			showEnvVarsInLog = 0;
 		};
 		9740EEB61CF901F6004384FC /* Run Script */ = {
@@ -581,7 +589,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";
 				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = "";
 				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = 2GMR44F922;
 				ENABLE_BITCODE = NO;
@@ -600,6 +608,7 @@
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "用于发送语音消息、录音和音视频通话。";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "用于保存图片或视频到相册。";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "用于选择图片视频发送给朋友。";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
@@ -611,7 +620,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.0.0;
+				MARKETING_VERSION = 3.0.1;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
@@ -764,7 +773,7 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Developer";
 				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = "";
 				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = 2GMR44F922;
 				ENABLE_BITCODE = NO;
@@ -783,6 +792,7 @@
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "用于发送语音消息、录音和音视频通话。";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "用于保存图片或视频到相册。";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "用于选择图片视频发送给朋友。";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
@@ -794,7 +804,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.0.0;
+				MARKETING_VERSION = 3.0.1;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
@@ -830,9 +840,9 @@
 				CODE_SIGN_IDENTITY = "Apple Development";
 				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "iPhone Distribution";
 				CODE_SIGN_STYLE = Manual;
-				CURRENT_PROJECT_VERSION = 31;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = 726926SSHC;
+				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = HA2XCAK2D8;
 				ENABLE_BITCODE = NO;
 				ENABLE_NOTIFICATION_SERVICE_EXTENSION = NO;
 				ENABLE_WITHDRAW_PROGRESS_WIDGET = NO;
@@ -849,6 +859,7 @@
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "用于发送语音消息、录音和音视频通话。";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "用于保存图片或视频到相册。";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "用于选择图片视频发送给朋友。";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen;
 				INFOPLIST_KEY_UIMainStoryboardFile = Main;
@@ -860,7 +871,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.0.0;
+				MARKETING_VERSION = 3.0.1;
 				OTHER_LDFLAGS = (
 					"$(inherited)",
 					"-ObjC",
@@ -871,10 +882,10 @@
 					"-l\"sqlite3.0\"",
 					"-l\"z\"",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = vip.99chat.pro;
+				PRODUCT_BUNDLE_IDENTIFIER = vip.99chat.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = 99chatpro;
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = 99chat;
 				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
@@ -926,7 +937,7 @@
 				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 25;
 				DEVELOPMENT_TEAM = "";
-				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = 726926SSHC;
+				"DEVELOPMENT_TEAM[sdk=iphoneos*]" = HA2XCAK2D8;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotificationService/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
@@ -936,10 +947,10 @@
 					"@executable_path/../../Frameworks",
 				);
 				MARKETING_VERSION = 2.0.0;
-				PRODUCT_BUNDLE_IDENTIFIER = vip.99chat.pro.NotificationService;
+				PRODUCT_BUNDLE_IDENTIFIER = vip.99chat.ios.NotificationService;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
-				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = Not;
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = NotificationService;
 				SKIP_INSTALL = YES;
 				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
 				SWIFT_VERSION = 5.0;

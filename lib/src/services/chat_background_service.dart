@@ -7,9 +7,9 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tencent_cloud_chat_demo/src/platform/permission_guard.dart';
 import 'package:tencent_cloud_chat_demo/src/services/app_gallery_picker.dart';
+import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_background_file_access.dart';
 import 'package:tencent_cloud_chat_demo/src/services/platform_official_account_service.dart';
-import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/tim_uikit_chat_background_registry.dart';
 
 class ChatBackgroundService {
@@ -79,9 +79,12 @@ class ChatBackgroundService {
   }
 
   String _resolveAccountScopeSync() {
-    final userId = TIMUIKitCore.getInstance().loginInfo.userID.trim();
+    final userId = ContactSocialCacheStore.safeLoginUserId();
     return _sanitizeAccountScope(userId);
   }
+
+  bool _isScopeCurrent(String scope) =>
+      scope != '_guest' && _resolveAccountScopeSync() == scope;
 
   Future<String> _ensureAccountScope() async {
     final scope = _resolveAccountScopeSync();
@@ -92,17 +95,20 @@ class ChatBackgroundService {
     return scope;
   }
 
-  Future<String> _backgroundFilesDir() async {
-    final scope = await _ensureAccountScope();
+  Future<String> _backgroundFilesDir(String scope) async {
+    if (!_isScopeCurrent(scope)) return '';
     final supportDir = await getApplicationSupportDirectory();
+    if (!_isScopeCurrent(scope)) return '';
     final targetDirPath = '${supportDir.path}/chat_backgrounds/$scope';
     await chatBackgroundEnsureDir(targetDirPath);
     return targetDirPath;
   }
 
-  Future<Map<String, String>> _readAll() async {
-    final scope = await _ensureAccountScope();
+  Future<Map<String, String>> _readAll({String? expectedScope}) async {
+    final scope = expectedScope ?? await _ensureAccountScope();
+    if (!_isScopeCurrent(scope)) return <String, String>{};
     final prefs = await SharedPreferences.getInstance();
+    if (!_isScopeCurrent(scope)) return <String, String>{};
     final raw = prefs.getString(_prefsKey(scope));
     if (raw == null || raw.isEmpty) {
       return <String, String>{};
@@ -121,20 +127,34 @@ class ChatBackgroundService {
     return <String, String>{};
   }
 
-  Future<void> _writeAll(Map<String, String> map) async {
-    final scope = await _ensureAccountScope();
+  Future<void> _writeAll(
+    Map<String, String> map, {
+    required String expectedScope,
+  }) async {
+    if (!_isScopeCurrent(expectedScope)) return;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_prefsKey(scope), jsonEncode(map));
+    if (!_isScopeCurrent(expectedScope)) return;
+    await prefs.setString(_prefsKey(expectedScope), jsonEncode(map));
   }
 
   Future<String?> getBackgroundPath(String conversationId) async {
+    final scope = await _ensureAccountScope();
+    return _getBackgroundPath(conversationId, scope: scope);
+  }
+
+  Future<String?> _getBackgroundPath(
+    String conversationId, {
+    required String scope,
+  }) async {
+    if (!_isScopeCurrent(scope)) return null;
     final id = conversationId.trim();
     if (id.isEmpty) return null;
     if (isOfficialAccountConversationId(id)) {
       TIMUIKitChatBackgroundRegistry.clearPath(id);
       return null;
     }
-    final map = await _readAll();
+    final map = await _readAll(expectedScope: scope);
+    if (!_isScopeCurrent(scope)) return null;
     final path = map[id]?.trim();
     if (path == null || path.isEmpty) {
       return null;
@@ -152,9 +172,10 @@ class ChatBackgroundService {
       return normalized;
     }
     final exists = await chatBackgroundFileExists(rawPath);
+    if (!_isScopeCurrent(scope)) return null;
     if (!exists) {
       map.remove(id);
-      await _writeAll(map);
+      await _writeAll(map, expectedScope: scope);
       TIMUIKitChatBackgroundRegistry.clearPath(id);
       return null;
     }
@@ -165,6 +186,8 @@ class ChatBackgroundService {
 
   Future<String?> getBackgroundPathWithGlobalFallback(
       String conversationId) async {
+    final scope = await _ensureAccountScope();
+    if (!_isScopeCurrent(scope)) return null;
     final id = conversationId.trim();
     if (id.isEmpty) return null;
     if (isOfficialAccountConversationId(id)) {
@@ -172,7 +195,7 @@ class ChatBackgroundService {
       return null;
     }
 
-    final directPath = await getBackgroundPath(id);
+    final directPath = await _getBackgroundPath(id, scope: scope);
     if (directPath != null && directPath.isNotEmpty) {
       return directPath;
     }
@@ -181,7 +204,11 @@ class ChatBackgroundService {
       return null;
     }
 
-    final globalPath = await getBackgroundPath(globalBackgroundConversationId);
+    final globalPath = await _getBackgroundPath(
+      globalBackgroundConversationId,
+      scope: scope,
+    );
+    if (!_isScopeCurrent(scope)) return null;
     if (globalPath == null || globalPath.isEmpty) {
       TIMUIKitChatBackgroundRegistry.clearPath(id);
       return null;
@@ -192,11 +219,14 @@ class ChatBackgroundService {
   }
 
   Future<void> clearBackground(String conversationId) async {
+    final scope = await _ensureAccountScope();
+    if (!_isScopeCurrent(scope)) return;
     final id = conversationId.trim();
     if (id.isEmpty) return;
-    final map = await _readAll();
+    final map = await _readAll(expectedScope: scope);
     final oldPath = map.remove(id);
-    await _writeAll(map);
+    await _writeAll(map, expectedScope: scope);
+    if (!_isScopeCurrent(scope)) return;
     TIMUIKitChatBackgroundRegistry.clearPath(id);
     if (!kIsWeb &&
         oldPath != null &&
@@ -210,6 +240,9 @@ class ChatBackgroundService {
 
   Future<String?> saveBackgroundFromGallery(
       BuildContext context, String conversationId) async {
+    final scope = await _ensureAccountScope();
+    if (!_isScopeCurrent(scope)) return null;
+    if (!context.mounted) return null;
     if (kIsWeb) {
       return null;
     }
@@ -217,7 +250,7 @@ class ChatBackgroundService {
     if (id.isEmpty) return null;
 
     final allowed = await PermissionGuard.photosForPick(context);
-    if (!allowed || !context.mounted) return null;
+    if (!allowed || !context.mounted || !_isScopeCurrent(scope)) return null;
 
     final picked = await AppGalleryPicker.pickSingleImage(context);
     final sourcePath = picked?.path;
@@ -225,7 +258,8 @@ class ChatBackgroundService {
       return null;
     }
 
-    final targetDirPath = await _backgroundFilesDir();
+    final targetDirPath = await _backgroundFilesDir(scope);
+    if (targetDirPath.isEmpty || !_isScopeCurrent(scope)) return null;
 
     final extension = sourcePath.contains('.')
         ? sourcePath.substring(sourcePath.lastIndexOf('.'))
@@ -235,10 +269,12 @@ class ChatBackgroundService {
         '$targetDirPath/$sanitizedId${DateTime.now().millisecondsSinceEpoch}$extension';
 
     final copiedPath = await chatBackgroundCopyFile(sourcePath, targetPath);
-    final map = await _readAll();
+    if (!_isScopeCurrent(scope)) return null;
+    final map = await _readAll(expectedScope: scope);
     final oldPath = map[id];
     map[id] = '$filePrefix$copiedPath';
-    await _writeAll(map);
+    await _writeAll(map, expectedScope: scope);
+    if (!_isScopeCurrent(scope)) return null;
     TIMUIKitChatBackgroundRegistry.setPath(id, '$filePrefix$copiedPath');
 
     if (oldPath != null &&
@@ -257,13 +293,16 @@ class ChatBackgroundService {
     String conversationId,
     Color color,
   ) async {
+    final scope = await _ensureAccountScope();
+    if (!_isScopeCurrent(scope)) return;
     final id = conversationId.trim();
     if (id.isEmpty) return;
-    final value = '$colorPrefix${color.value.toRadixString(16)}';
-    final map = await _readAll();
+    final value = '$colorPrefix${color.toARGB32().toRadixString(16)}';
+    final map = await _readAll(expectedScope: scope);
     final oldPath = map[id];
     map[id] = value;
-    await _writeAll(map);
+    await _writeAll(map, expectedScope: scope);
+    if (!_isScopeCurrent(scope)) return;
     TIMUIKitChatBackgroundRegistry.setPath(id, value);
     if (!kIsWeb &&
         oldPath != null &&
@@ -279,13 +318,16 @@ class ChatBackgroundService {
     String conversationId,
     String assetPath,
   ) async {
+    final scope = await _ensureAccountScope();
+    if (!_isScopeCurrent(scope)) return;
     final id = conversationId.trim();
     if (id.isEmpty) return;
     final value = '$assetPrefix$assetPath';
-    final map = await _readAll();
+    final map = await _readAll(expectedScope: scope);
     final oldPath = map[id];
     map[id] = value;
-    await _writeAll(map);
+    await _writeAll(map, expectedScope: scope);
+    if (!_isScopeCurrent(scope)) return;
     TIMUIKitChatBackgroundRegistry.setPath(id, value);
     if (!kIsWeb &&
         oldPath != null &&

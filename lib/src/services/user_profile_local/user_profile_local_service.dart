@@ -19,6 +19,8 @@ class UserProfileLocalService {
   final UserProfileLocalStore _store = UserProfileLocalStore.instance;
 
   final Map<String, UserProfileRecord> _memory = <String, UserProfileRecord>{};
+  final Map<String, Future<V2TimFriendInfo?>> _friendInfoInFlight =
+      <String, Future<V2TimFriendInfo?>>{};
 
   /// 页面同步渲染时的单聊资料真源。首次 [read] 后由所有写入统一维护。
   UserProfileRecord? readCached(String userId) => _memory[userId.trim()];
@@ -56,12 +58,28 @@ class UserProfileLocalService {
     if (previous == null ||
         previous.nickname != next.nickname ||
         previous.avatarUrl != next.avatarUrl ||
+        previous.avatarVersion != next.avatarVersion ||
         previous.friendRemark != next.friendRemark) {
       PeerProfileRefreshBus.instance.notify(id);
     }
   }
 
-  Future<V2TimFriendInfo?> loadFriendInfo(String userId) async {
+  Future<V2TimFriendInfo?> loadFriendInfo(String userId) {
+    final id = userId.trim();
+    if (id.isEmpty) return Future<V2TimFriendInfo?>.value();
+    final active = _friendInfoInFlight[id];
+    if (active != null) return active;
+    late final Future<V2TimFriendInfo?> task;
+    task = _loadFriendInfoImpl(id).whenComplete(() {
+      if (identical(_friendInfoInFlight[id], task)) {
+        _friendInfoInFlight.remove(id);
+      }
+    });
+    _friendInfoInFlight[id] = task;
+    return task;
+  }
+
+  Future<V2TimFriendInfo?> _loadFriendInfoImpl(String userId) async {
     final record = await read(userId);
     return mergeHostedFriendRemark(userId, record?.toV2TimFriendInfo());
   }
@@ -149,6 +167,9 @@ class UserProfileLocalService {
       avatarUrl: me.avatarUrl?.trim().isNotEmpty == true
           ? me.avatarUrl!.trim()
           : (existing?.avatarUrl ?? ''),
+      avatarVersion: me.avatarVersion > 0
+          ? me.avatarVersion
+          : (existing?.avatarVersion ?? 0),
       updatedAt: DateTime.now().toUtc().millisecondsSinceEpoch,
     );
     await _saveAndPublish(next);
@@ -159,6 +180,7 @@ class UserProfileLocalService {
     required String userId,
     String? nickname,
     String? avatarUrl,
+    int? avatarVersion,
   }) async {
     final id = userId.trim();
     if (id.isEmpty) {
@@ -172,6 +194,9 @@ class UserProfileLocalService {
       avatarUrl: avatarUrl?.trim().isNotEmpty == true
           ? avatarUrl!.trim()
           : (existing?.avatarUrl ?? ''),
+      avatarVersion: avatarVersion != null && avatarVersion > 0
+          ? avatarVersion
+          : (existing?.avatarVersion ?? 0),
       updatedAt: DateTime.now().toUtc().millisecondsSinceEpoch,
     );
     await _saveAndPublish(next);
@@ -190,6 +215,10 @@ class UserProfileLocalService {
       avatarUrl: record.friendAvatarUrl.trim().isNotEmpty
           ? record.friendAvatarUrl.trim()
           : (existing?.avatarUrl ?? ''),
+      avatarVersion:
+          record.friendAvatarVersion != null && record.friendAvatarVersion! > 0
+              ? record.friendAvatarVersion!
+              : (existing?.avatarVersion ?? 0),
       friendRemark: record.remark.trim(),
       updatedAt: DateTime.now().toUtc().millisecondsSinceEpoch,
     );
@@ -242,6 +271,7 @@ class UserProfileLocalService {
 
   Future<void> clearSession() {
     _memory.clear();
+    _friendInfoInFlight.clear();
     return _store.clearSession();
   }
 }

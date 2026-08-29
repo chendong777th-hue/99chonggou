@@ -78,13 +78,12 @@ class TIMUIKitSearchMsg extends TIMUIKitStatelessWidget {
           );
           final groupId = resolveGroupIdFromConversation(conversation) ?? '';
           String title = conversation.showName?.trim() ?? '';
-          final treatAsGroup = groupId.isNotEmpty ||
-              isGroupConversationId(conversationId);
+          final treatAsGroup =
+              groupId.isNotEmpty || isGroupConversationId(conversationId);
           if (treatAsGroup) {
             final resolvedGroupId = groupId.isNotEmpty
                 ? groupId
-                : (groupIdFromConversationId(conversationId) ??
-                    conversationId);
+                : (groupIdFromConversationId(conversationId) ?? conversationId);
             final searchModel = Provider.of<TUISearchViewModel>(
               context,
               listen: false,
@@ -162,10 +161,11 @@ class TIMUIKitSearchMsg extends TIMUIKitStatelessWidget {
             faceUrl: conversation.faceUrl ?? "",
             showName: title,
             lineOne: title,
-            lineTwo: TIM_t_para("{{option1}}条相关聊天记录", "$option1条相关聊天记录")(option1: option1),
+            lineTwo: TIM_t_para("{{option1}}条相关聊天记录", "$option1条相关聊天记录")(
+                option1: option1),
           );
         }).toList(),
-        _renderShowALl(totalMsgCount > msgList.length)
+        _renderShowALl(model.hasMoreGlobalMessageResults)
       ]);
     } else {
       return Container();

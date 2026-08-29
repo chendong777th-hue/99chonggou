@@ -42,19 +42,28 @@ class TUIConversationViewModelHooks {
 
 List<T> removeDuplicates<T>(
     List<T> list, bool Function(T first, T second) isEqual) {
-  List<T> output = [];
-  for (var i = 0; i < list.length; i++) {
-    bool found = false;
-    for (var j = 0; j < output.length; j++) {
-      if (isEqual(list[i], output[j])) {
-        found = true;
-      }
+  // O(N) dedup using a Set keyed by conversationID (extracted via isEqual).
+  // The original implementation was O(N²) without early-break, causing
+  // 250K+ comparisons for 500+ conversations.
+  //
+  // Since all call sites dedup by conversationID, we use a string key
+  // Set for O(1) lookup. The isEqual predicate is kept for API compat.
+  final seen = <String>{};
+  final output = <T>[];
+  for (final item in list) {
+    // Extract a dedup key: try to use conversationID if the item is a
+    // V2TimConversation, otherwise fall back to identityHashCode.
+    String key;
+    if (item is V2TimConversation?) {
+      key = item?.conversationID ?? '';
+      if (key.isEmpty) key = '__identity_${identityHashCode(item)}';
+    } else {
+      key = '__identity_${identityHashCode(item)}';
     }
-    if (!found) {
-      output.add(list[i]);
+    if (seen.add(key)) {
+      output.add(item);
     }
   }
-
   return output;
 }
 
@@ -78,6 +87,7 @@ class TUIConversationViewModel extends ChangeNotifier {
   bool _isLoadingConversationData = false;
   bool _hasLoadedOnce = false;
   int? _pendingLoadCount;
+  int _sessionGeneration = 0;
   DateTime? _lastUnreadQueryAt;
   static const Duration _unreadQueryMinInterval = Duration(seconds: 8);
   static V2TimConversation? _selectedConversation;
@@ -161,10 +171,11 @@ class TUIConversationViewModel extends ChangeNotifier {
     if (conversationID == null || conversationID.isEmpty) {
       return;
     }
+    final generation = _sessionGeneration;
     final conversation = await _conversationService.getConversation(
       conversationID: conversationID,
     );
-    if (conversation == null) {
+    if (conversation == null || generation != _sessionGeneration) {
       return;
     }
     DisplayNameStore.instance.applyToConversation(conversation);
@@ -336,6 +347,7 @@ class TUIConversationViewModel extends ChangeNotifier {
   }
 
   Future<void> loadData({required int count}) async {
+    final generation = _sessionGeneration;
     final isRefresh = _nextSeq == "0";
     if (!_haveMoreData) {
       return;
@@ -355,6 +367,9 @@ class TUIConversationViewModel extends ChangeNotifier {
       bool shouldNotify = false;
       final conversationResult = await _conversationService.getConversationList(
           nextSeq: _nextSeq, count: count);
+      if (generation != _sessionGeneration) {
+        return;
+      }
       _nextSeq = conversationResult?.nextSeq ?? "";
       final conversationList = conversationResult?.conversationList;
       if (conversationList != null) {
@@ -378,6 +393,9 @@ class TUIConversationViewModel extends ChangeNotifier {
               await _lifeCycle
                       ?.conversationListWillMount(combinedConversationList) ??
                   combinedConversationList;
+          if (generation != _sessionGeneration) {
+            return;
+          }
           _conversationList = removeDuplicates<V2TimConversation?>(
               finalConversationList,
               (item1, item2) => item1?.conversationID == item2?.conversationID);
@@ -392,7 +410,11 @@ class TUIConversationViewModel extends ChangeNotifier {
       if (lastUnread == null ||
           now.difference(lastUnread) > _unreadQueryMinInterval) {
         _lastUnreadQueryAt = now;
-        _totalUnReadCount = await _conversationService.getTotalUnreadCount();
+        final unread = await _conversationService.getTotalUnreadCount();
+        if (generation != _sessionGeneration) {
+          return;
+        }
+        _totalUnReadCount = unread;
         shouldNotify = true;
       }
       if (shouldNotify) {
@@ -408,9 +430,14 @@ class TUIConversationViewModel extends ChangeNotifier {
         hasLoadedOnce: _hasLoadedOnce,
       );
     } finally {
-      _isLoadingConversationData = false;
+      if (generation == _sessionGeneration) {
+        _isLoadingConversationData = false;
+      }
     }
 
+    if (generation != _sessionGeneration) {
+      return;
+    }
     final pending = _pendingLoadCount;
     _pendingLoadCount = null;
     if (pending != null) {
@@ -540,22 +567,58 @@ class TUIConversationViewModel extends ChangeNotifier {
 
   _onConversationListChanged(List<V2TimConversation> list) {
     _applyNameOverrides(list);
+    var changed = false;
     for (int element = 0; element < list.length; element++) {
       int index = _conversationList.indexWhere(
           (item) => item!.conversationID == list[element].conversationID);
       if (index > -1) {
+        final existing = _conversationList[index];
+        final incoming = list[element];
+        // Diff: skip setAll if key fields are unchanged to avoid
+        // unnecessary notifyListeners() rebuilds.
+        if (!_conversationFieldsChanged(existing, incoming)) {
+          continue;
+        }
         _conversationList.setAll(
             index, [list[element]] as List<V2TimConversation?>);
+        changed = true;
       } else {
         _conversationList.add(list[element]);
+        changed = true;
       }
     }
+
+    if (!changed) return;
 
     _markConversationListDirty();
     notifyListeners();
     TUIConversationViewModelHooks.onConversationsChanged?.call(
       list.map((e) => e).toList(growable: false),
     );
+    // C2C lastMessage verification: if onConversationChanged arrives but
+    // the message is not in the chat list (onRecvNewMessage push was lost),
+    // trigger a CLOUD_NEWER catch-up for the active C2C conversation.
+    _chatGlobalModel.verifyC2CLastMessage(list);
+  }
+
+  /// Returns true if any user-visible field differs between [existing]
+  /// and [incoming]. Used to suppress no-op notifyListeners() calls.
+  static bool _conversationFieldsChanged(
+      V2TimConversation? existing, V2TimConversation incoming) {
+    if (existing == null) return true;
+    if (existing.unreadCount != incoming.unreadCount) return true;
+    if (existing.orderkey != incoming.orderkey) return true;
+    if (existing.isPinned != incoming.isPinned) return true;
+    final exMsg = existing.lastMessage;
+    final inMsg = incoming.lastMessage;
+    if (exMsg == null && inMsg == null) return false;
+    if (exMsg == null || inMsg == null) return true;
+    if (exMsg.msgID != inMsg.msgID) return true;
+    if (exMsg.timestamp != inMsg.timestamp) return true;
+    if ((exMsg.textElem?.text ?? '') != (inMsg.textElem?.text ?? '')) {
+      return true;
+    }
+    return false;
   }
 
   _onConversationDeleted(List<String> list) {
@@ -710,9 +773,15 @@ class TUIConversationViewModel extends ChangeNotifier {
   }
 
   clearData() {
+    _sessionGeneration++;
     _conversationList = [];
     _markConversationListDirty();
     _selectedConversation = null;
+    _pendingLoadCount = null;
+    _isLoadingConversationData = false;
+    _totalUnReadCount = 0;
+    _lastUnreadQueryAt = null;
+    webDraftMap.clear();
     _nextSeq = "0";
     _haveMoreData = true;
     _hasLoadedOnce = false;

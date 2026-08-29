@@ -67,19 +67,19 @@ void main() {
       AndroidPerformanceProfile.conversationFeedCacheExtentForTier(
         AndroidPerformanceTier.low,
       ),
-      120,
+      240,
     );
     expect(
       AndroidPerformanceProfile.conversationFeedCacheExtentForTier(
         AndroidPerformanceTier.medium,
       ),
-      140,
+      360,
     );
     expect(
       AndroidPerformanceProfile.conversationFeedCacheExtentForTier(
         AndroidPerformanceTier.normal,
       ),
-      160,
+      480,
     );
   });
 }

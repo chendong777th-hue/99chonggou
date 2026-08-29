@@ -365,6 +365,48 @@ class TIMUIKitVideoPlayerState extends State<TIMUIKitVideoPlayer> {
     return true;
   }
 
+  /// 倍速播放：1.0 / 1.5 / 2.0。
+  /// AVP (Android) 走 BetterPlayerController.setSpeed；
+  /// iOS texture player 走 VideoPlayerController.setPlaybackSpeed。
+  double _playbackSpeed = 1.0;
+  double get playbackSpeed => _playbackSpeed;
+
+  Future<void> setPlaybackSpeed(double speed) async {
+    if (_disposed || _routeClosing || !_hasActiveController) {
+      return;
+    }
+    _playbackSpeed = speed;
+    if (_useIosTexturePlayer) {
+      try {
+        await _iosTextureController?.setPlaybackSpeed(speed);
+      } catch (_) {}
+      return;
+    }
+    try {
+      await _controller?.setSpeed(speed);
+    } catch (_) {}
+  }
+
+  /// PiP（画中画）：仅 Android（走 AVP 的 enablePictureInPicture）。
+  /// iOS 走 video_player texture，无原生 PiP 插件支持。
+  Future<bool> enablePictureInPicture() async {
+    if (_disposed || _routeClosing || _useIosTexturePlayer) {
+      return false;
+    }
+    try {
+      final supported = await _controller?.isPictureInPictureSupported() ?? false;
+      if (!supported) {
+        return false;
+      }
+      // AVP 需要 BetterPlayer widget 的 GlobalKey；当前全屏外壳未暴露。
+      // 启用 PiP 需要 native enterPictureInPictureMode；此处仅标记需求，
+      // 实际启动由 VideoScreen 调用原生 channel 或 Activity 代理完成。
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   dynamic get playbackController => _activePlaybackController;
 
   Future<void> seekPlaybackTo(Duration position) async {

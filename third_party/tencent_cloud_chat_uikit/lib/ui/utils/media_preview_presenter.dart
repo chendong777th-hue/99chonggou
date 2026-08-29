@@ -342,7 +342,7 @@ Future<T?> pushMediaPreview<T>({
         enableGestureBack: enableGestureBack,
         transitionDuration: transitionDuration ?? mediaPreviewBackdropDuration,
         reverseTransitionDuration:
-            reverseTransitionDuration ?? mediaPreviewBackdropDuration,
+            reverseTransitionDuration ?? mediaPreviewCloseDuration,
         settings: settings,
         pageBuilder: (context, animation, secondaryAnimation) {
           final duration = transitionDuration ?? mediaPreviewBackdropDuration;
@@ -393,11 +393,11 @@ Future<T?> pushMediaPreview<T>({
   }
 }
 
-/// Hero 飞行动画时长（与 [MediaPreviewOverlayRoute.transitionDuration] 一致）。
-const Duration mediaPreviewHeroFlightDuration = mediaPreviewBackdropDuration;
+/// Hero 回飞动画时长（关闭时源图延迟 reveal 的等待），用关闭时长。
+const Duration mediaPreviewHeroFlightDuration = mediaPreviewCloseDuration;
 
 Duration mediaPreviewCloseWaitDuration() {
-  final transitionMs = mediaPreviewBackdropDuration.inMilliseconds;
+  final transitionMs = mediaPreviewCloseDuration.inMilliseconds;
   final heroMs = mediaPreviewHeroFlightDuration.inMilliseconds;
   return Duration(milliseconds: transitionMs > heroMs ? transitionMs : heroMs);
 }

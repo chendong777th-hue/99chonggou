@@ -2,6 +2,7 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_group_info.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_group_info.dart';
+import 'package:tencent_cloud_chat_demo/src/models/me_group_record.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_local_store.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_demo/utils/user_avatar.dart';
@@ -9,6 +10,11 @@ import 'package:tencent_cloud_chat_demo/utils/user_avatar.dart';
 /// 群会话展示名/头像：优先群资料库，再 REST [groupList]，再回退 IM 会话字段。
 class GroupDisplayResolver {
   GroupDisplayResolver._();
+
+  /// Expando cache for O(1) group lookup by groupID, avoiding linear
+  /// scans through groupList on every conversation row build.
+  static final Expando<_GroupIndexSnapshot> _groupIndexCache =
+      Expando<_GroupIndexSnapshot>();
 
   static V2TimGroupInfo? findGroup(
     Iterable<V2TimGroupInfo>? groupList,
@@ -18,13 +24,34 @@ class GroupDisplayResolver {
     if (id.isEmpty || groupList == null) {
       return null;
     }
-    for (final item in groupList) {
-      final itemId = item.groupID.trim();
-      if (itemId.isEmpty) {
-        continue;
+    // Build/reuse an index keyed by groupID for O(1) lookup.
+    final list = groupList is List<V2TimGroupInfo>
+        ? groupList
+        : groupList.toList(growable: false);
+    var snapshot = _groupIndexCache[list];
+    if (snapshot == null || !snapshot.matches(list)) {
+      final byId = <String, V2TimGroupInfo>{};
+      for (final item in list) {
+        final itemId = item.groupID.trim();
+        if (itemId.isNotEmpty) {
+          byId[itemId] = item;
+        }
       }
-      if (itemId == id || ChatIdFormat.groupIdsEquivalent(itemId, id)) {
-        return item;
+      snapshot = _GroupIndexSnapshot(
+        length: list.length,
+        first: list.isEmpty ? null : list.first,
+        last: list.isEmpty ? null : list.last,
+        byId: byId,
+      );
+      _groupIndexCache[list] = snapshot;
+    }
+    // Fast path: exact ID match.
+    final exact = snapshot.byId[id];
+    if (exact != null) return exact;
+    // Fallback: equivalent ID match (community IDs etc).
+    for (final entry in snapshot.byId.entries) {
+      if (ChatIdFormat.groupIdsEquivalent(entry.key, id)) {
+        return entry.value;
       }
     }
     return null;
@@ -80,11 +107,18 @@ class GroupDisplayResolver {
     }
 
     final candidates = <String>[];
-    consider(localGroupName, candidates);
-    // 未显式传入时再读群资料库缓存（与列表传入 localGroupName 同优先级）。
-    if ((localGroupName?.trim() ?? '').isEmpty) {
-      final cachedName = _safeCachedGroupName(groupId);
-      consider(cachedName, candidates);
+    final cachedRecord = _safeCachedGroupRecord(groupId);
+    // 群资料库一旦存在，就是群展示字段的提交快照。SDK 群列表和会话
+    // showName 只能在没有本地记录时作为冷启动兜底，不能覆盖本地快照。
+    consider(cachedRecord?.groupName ?? localGroupName, candidates);
+    if (cachedRecord != null) {
+      if (candidates.isNotEmpty) {
+        return candidates.first;
+      }
+      final alias = ChatIdFormat.displayGroupAlias(
+        groupId,
+      );
+      return alias;
     }
     final fromRest = findGroup(groupList, groupId);
     consider(fromRest?.groupName, candidates);
@@ -130,6 +164,10 @@ class GroupDisplayResolver {
     required String? groupId,
     Iterable<V2TimGroupInfo>? groupList,
   }) {
+    final cachedRecord = _safeCachedGroupRecord(groupId?.trim() ?? '');
+    if (cachedRecord != null) {
+      return cachedRecord.memberCount;
+    }
     final fromRest = findGroup(groupList, groupId);
     return fromRest?.memberCount;
   }
@@ -142,9 +180,9 @@ class GroupDisplayResolver {
     return fromRest?.notification?.trim() ?? '';
   }
 
-  static String? _safeCachedGroupName(String groupId) {
+  static MeGroupRecord? _safeCachedGroupRecord(String groupId) {
     try {
-      return GroupLocalStore.instance.readCached(groupId: groupId)?.groupName;
+      return GroupLocalStore.instance.readCached(groupId: groupId);
     } catch (_) {
       return null;
     }
@@ -159,5 +197,25 @@ class GroupDisplayResolver {
     } catch (_) {
       return null;
     }
+  }
+}
+
+class _GroupIndexSnapshot {
+  const _GroupIndexSnapshot({
+    required this.length,
+    required this.first,
+    required this.last,
+    required this.byId,
+  });
+
+  final int length;
+  final V2TimGroupInfo? first;
+  final V2TimGroupInfo? last;
+  final Map<String, V2TimGroupInfo> byId;
+
+  bool matches(List<V2TimGroupInfo> list) {
+    return list.length == length &&
+        (list.isEmpty || identical(list.first, first)) &&
+        (list.isEmpty || identical(list.last, last));
   }
 }

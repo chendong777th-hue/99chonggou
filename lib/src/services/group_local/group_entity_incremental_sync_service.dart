@@ -6,11 +6,12 @@ import 'package:tencent_cloud_chat_demo/src/api/me_group_api.dart';
 import 'package:tencent_cloud_chat_demo/src/models/group_entity_change.dart';
 import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_membership_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_local/group_metadata_refresh_coordinator.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 
 /// 群展示 Entity 游标增量补偿（非全量）。
 ///
-/// `GET /me/groups/changes?since_seq=` → 只 upsert 变更群名/头像/公告。
+/// `GET /me/groups/changes?since_seq=` → 汇总变更群并刷新当前群详情。
 class GroupEntityIncrementalSyncService {
   GroupEntityIncrementalSyncService._();
 
@@ -124,6 +125,7 @@ class GroupEntityIncrementalSyncService {
   }) async {
     var since = await readCursor(ownerUserId: owner);
     var pages = 0;
+    final changedGroups = <String>{};
     while (pages < _maxPagesPerRun) {
       if (_ownerUserId() != owner) {
         return;
@@ -137,7 +139,12 @@ class GroupEntityIncrementalSyncService {
         if (_ownerUserId() != owner) {
           return;
         }
-        await _applyEvent(event);
+        if (event.isInfoUpdated) {
+          final groupId = ChatIdFormat.canonicalGroupStorageId(event.groupId);
+          if (groupId.isNotEmpty) {
+            changedGroups.add(groupId);
+          }
+        }
       }
       final next = page.nextSeq > since ? page.nextSeq : since;
       if (next != since) {
@@ -160,88 +167,19 @@ class GroupEntityIncrementalSyncService {
         break;
       }
     }
-  }
-
-  Future<void> _applyEvent(GroupEntityChangeEvent event) async {
-    if (!event.isInfoUpdated || event.groupId.isEmpty) {
-      return;
-    }
-    final sync = GroupMembershipSyncService.instance;
-    final name = event.groupName.trim();
-    final avatar = event.avatarUrl.trim();
-    final notice = event.notice.trim();
-    final type = event.type.trim().toLowerCase();
-
-    final wantName = name.isNotEmpty &&
-        (type.contains('name') ||
-            type.contains('info') ||
-            type == 'group_info_updated');
-    final wantAvatar = avatar.isNotEmpty &&
-        (type.contains('avatar') ||
-            type.contains('info') ||
-            type == 'group_info_updated');
-    final wantNotice = notice.isNotEmpty &&
-        (type.contains('notice') ||
-            type.contains('info') ||
-            type == 'group_info_updated');
-
-    // GROUP_INFO_UPDATED：有字段就写；专用 action 按字段。
-    if (type == 'group_info_updated' || type.contains('info_updated')) {
-      if (name.isNotEmpty) {
-        await sync.applyOptimisticGroupName(
-          groupId: event.groupId,
-          groupName: name,
-        );
-      }
-      if (avatar.isNotEmpty) {
-        await sync.upsertGroupAvatar(
-          groupId: event.groupId,
-          avatarUrl: avatar,
-        );
-      }
-      if (notice.isNotEmpty) {
-        await sync.applyOptimisticNotice(
-          groupId: event.groupId,
-          notice: notice,
-        );
-      }
-      if (name.isEmpty && avatar.isEmpty && notice.isEmpty) {
-        await sync.refreshGroupDetail(event.groupId, refresh: true);
-      }
-      return;
-    }
-
-    if (wantName || (type.contains('name') && name.isEmpty)) {
-      if (name.isNotEmpty) {
-        await sync.applyOptimisticGroupName(
-          groupId: event.groupId,
-          groupName: name,
-        );
-      } else {
-        await sync.refreshGroupDetail(event.groupId, refresh: true);
+    // A page may contain many historical changes for the same group. Fetch
+    // one current detail snapshot per group after consuming the cursor; never
+    // apply event payload fields in sequence.
+    for (final groupId in changedGroups) {
+      if (_ownerUserId() != owner) {
         return;
       }
-    }
-    if (wantAvatar || (type.contains('avatar') && avatar.isEmpty)) {
-      if (avatar.isNotEmpty) {
-        await sync.upsertGroupAvatar(
-          groupId: event.groupId,
-          avatarUrl: avatar,
-        );
-      } else {
-        await sync.refreshGroupDetail(event.groupId, refresh: true);
-        return;
-      }
-    }
-    if (wantNotice) {
-      await sync.applyOptimisticNotice(
-        groupId: event.groupId,
-        notice: notice,
-      );
+      await GroupMetadataRefreshCoordinator.instance
+          .refresh(groupId, force: true);
     }
   }
 
-  /// TCP 事件若带 seq，向前推进游标（不回退）。
+  /// TCP 事件若带 seq，仅连续时推进游标；有缺口时交给 Difference 补齐。
   Future<void> noteRealtimeSeq(int seq) async {
     if (seq <= 0) {
       return;
@@ -251,7 +189,7 @@ class GroupEntityIncrementalSyncService {
       return;
     }
     final current = await readCursor(ownerUserId: owner);
-    if (seq > current) {
+    if (seq == current + 1) {
       await writeCursor(seq, ownerUserId: owner);
     }
   }

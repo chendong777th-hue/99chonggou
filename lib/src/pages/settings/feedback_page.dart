@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -12,8 +13,7 @@ import 'package:tencent_cloud_chat_demo/src/pages/settings/settings_widgets.dart
 import 'package:tencent_cloud_chat_demo/src/provider/theme.dart';
 import 'package:tencent_cloud_chat_demo/src/theme/app_colors.dart';
 import 'package:provider/provider.dart';
-import 'package:tencent_cloud_chat_uikit/ui/utils/image_edit/editable_asset_picker.dart';
-import 'package:wechat_assets_picker/wechat_assets_picker.dart';
+import 'package:tencent_cloud_chat_demo/src/services/system_media_picker.dart';
 
 class FeedbackPage extends StatefulWidget {
   /// 外层已有标题栏（如桌面弹窗）时隐藏自身 AppBar。
@@ -101,28 +101,17 @@ class _FeedbackPageState extends State<FeedbackPage> {
     final allowed = await PermissionGuard.photosForPick(context);
     if (!allowed || !mounted) return;
 
-    final theme = Provider.of<DefaultThemeData>(context, listen: false).theme;
-    final pickedAssets = await EditableAssetPicker.pickAssets(
-      context,
-      pickerConfig: AssetPickerConfig(
-        maxAssets: remain,
-        requestType: RequestType.image,
-        themeColor: theme.primaryColor ?? AppColors.primaryBlue,
-        selectPredicate: (context, asset, isSelected) =>
-            asset.type == AssetType.image,
-      ),
-    );
+    final pickedAssets = await SystemMediaPicker.pickImages(maxAssets: remain);
     if (pickedAssets == null || pickedAssets.isEmpty) return;
 
     final next = <_FeedbackAttachment>[];
     for (final asset in pickedAssets.take(remain)) {
-      final file = await EditableAssetPicker.resolveFile(asset);
-      if (file == null) continue;
+      final file = File(asset.path);
       final bytes = await file.readAsBytes();
       next.add(
         _FeedbackAttachment(
-          filename: asset.title?.trim().isNotEmpty == true
-              ? asset.title!.trim()
+          filename: asset.name?.trim().isNotEmpty == true
+              ? asset.name!.trim()
               : 'screenshot.jpg',
           bytes: bytes,
         ),

@@ -60,17 +60,55 @@ class ConversationLastMessagePrefer {
       return tipped;
     }
 
+    // A later SDK callback may enrich the same message with a missing or
+    // lower timestamp. Resolve same-ID upgrades before timestamp ordering.
+    final existingId = existing.msgID?.trim() ?? '';
+    final incomingId = incoming?.msgID?.trim() ?? '';
+    if (existingId.isNotEmpty && existingId == incomingId) {
+      final eligibleIncoming = GroupTipsMessageHelper.pickPreferredLastMessage(
+        existing: null,
+        incoming: incoming,
+      );
+      if (eligibleIncoming != null) {
+        if (isWeakCustomLastMessage(eligibleIncoming) &&
+            isStrongLastMessage(existing)) {
+          return existing;
+        }
+        preserveRevokedLastMessageState(
+          existing: existing,
+          incoming: eligibleIncoming,
+          preferred: eligibleIncoming,
+        );
+        if (GroupTipsMessageHelper.shouldUpgradeSameIdLastMessage(
+          existing: existing,
+          incoming: eligibleIncoming,
+        )) {
+          preservePeerReadLastMessageState(
+            existing: existing,
+            incoming: eligibleIncoming,
+            preferred: eligibleIncoming,
+          );
+          return eligibleIncoming;
+        }
+        preservePeerReadLastMessageState(
+          existing: existing,
+          incoming: eligibleIncoming,
+          preferred: existing,
+        );
+        return existing;
+      }
+    }
+
     preserveRevokedLastMessageState(
       existing: existing,
       incoming: incoming,
       preferred: tipped,
     );
-
-    final existingId = existing.msgID?.trim() ?? '';
+    final existingMessageId = existing.msgID?.trim() ?? '';
     final tippedId = tipped.msgID?.trim() ?? '';
-    if (existingId.isNotEmpty &&
+    if (existingMessageId.isNotEmpty &&
         tippedId.isNotEmpty &&
-        existingId == tippedId &&
+        existingMessageId == tippedId &&
         GroupTipsMessageHelper.shouldUpgradeSameIdLastMessage(
           existing: existing,
           incoming: tipped,
@@ -85,6 +123,11 @@ class ConversationLastMessagePrefer {
     if (isWeakCustomLastMessage(tipped) && isStrongLastMessage(existing)) {
       return existing;
     }
+    preservePeerReadLastMessageState(
+      existing: existing,
+      incoming: incoming,
+      preferred: tipped,
+    );
     return tipped;
   }
 }

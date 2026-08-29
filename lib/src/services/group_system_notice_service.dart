@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tencent_cloud_chat_demo/src/api/group_notice_api.dart';
 import 'package:tencent_cloud_chat_demo/src/i18n/app_i18n.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_feed_log.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_demo/utils/toast.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
@@ -25,6 +26,8 @@ class GroupSystemNoticeService extends ChangeNotifier {
   int _unreadCount = 0;
   Set<String> _dismissedNoticeIds = <String>{};
   bool _dismissedNoticeIdsLoaded = false;
+  String _dismissedNoticeOwner = '';
+  int _sessionClearGeneration = 0;
 
   List<GroupSystemNoticeItem> get notices =>
       List<GroupSystemNoticeItem>.unmodifiable(_notices);
@@ -35,31 +38,59 @@ class GroupSystemNoticeService extends ChangeNotifier {
 
   int get unreadCount => _unreadCount;
 
-  String _dismissedStorageKey() {
-    final userId = ChatIdFormat.rawUserUid(
-      serviceLocator<CoreServicesImpl>().loginUserInfo?.userID ?? '',
+  Future<Set<String>> _loadDismissedNoticeIds({
+    bool force = false,
+    String? ownerUserId,
+    SessionIdentity? identity,
+    int? clearGeneration,
+  }) async {
+    final owner = ChatIdFormat.rawUserUid(
+      ownerUserId ??
+          serviceLocator<CoreServicesImpl>().loginUserInfo?.userID ??
+          '',
     );
-    if (userId.isEmpty) {
-      return 'groupSystemNoticeDismissedIds';
-    }
-    return 'groupSystemNoticeDismissedIds_$userId';
-  }
-
-  Future<Set<String>> _loadDismissedNoticeIds({bool force = false}) async {
-    if (_dismissedNoticeIdsLoaded && !force) {
+    if (_dismissedNoticeIdsLoaded && !force && _dismissedNoticeOwner == owner) {
       return _dismissedNoticeIds;
     }
     final prefs = await SharedPreferences.getInstance();
-    final stored = prefs.getStringList(_dismissedStorageKey()) ?? const [];
+    if (identity != null &&
+        !_isCurrentRefresh(
+            identity, clearGeneration ?? _sessionClearGeneration)) {
+      return _dismissedNoticeIds;
+    }
+    final stored =
+        prefs.getStringList(_dismissedStorageKeyForOwner(owner)) ?? const [];
     _dismissedNoticeIds = stored
         .map((item) => item.trim())
         .where((item) => item.isNotEmpty)
         .toSet();
     _dismissedNoticeIdsLoaded = true;
+    _dismissedNoticeOwner = owner;
     return _dismissedNoticeIds;
   }
 
-  Future<void> _saveDismissedNoticeIds(Set<String> ids) async {
+  String _dismissedStorageKeyForOwner(String owner) {
+    if (owner.isEmpty) {
+      return 'groupSystemNoticeDismissedIds';
+    }
+    return 'groupSystemNoticeDismissedIds_$owner';
+  }
+
+  Future<void> _saveDismissedNoticeIds(
+    Set<String> ids, {
+    required String ownerUserId,
+    SessionIdentity? identity,
+    int? clearGeneration,
+  }) async {
+    final owner = ChatIdFormat.rawUserUid(ownerUserId);
+    if (owner.isEmpty ||
+        (identity != null &&
+            !_isCurrentRefresh(
+              identity,
+              clearGeneration ?? _sessionClearGeneration,
+            ))) {
+      return;
+    }
     final normalized = ids
         .map((item) => item.trim())
         .where((item) => item.isNotEmpty)
@@ -67,8 +98,14 @@ class GroupSystemNoticeService extends ChangeNotifier {
         .toList(growable: false);
     _dismissedNoticeIds = normalized.toSet();
     _dismissedNoticeIdsLoaded = true;
+    _dismissedNoticeOwner = owner;
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(_dismissedStorageKey(), normalized);
+    if (identity != null &&
+        !_isCurrentRefresh(
+            identity, clearGeneration ?? _sessionClearGeneration)) {
+      return;
+    }
+    await prefs.setStringList(_dismissedStorageKeyForOwner(owner), normalized);
   }
 
   bool _isDismissed(String noticeId) {
@@ -89,8 +126,7 @@ class GroupSystemNoticeService extends ChangeNotifier {
 
   void _syncUnreadCount() {
     final watermark = _lastReadAtMs ?? 0;
-    _unreadCount =
-        _notices.where((item) => item.timestamp > watermark).length;
+    _unreadCount = _notices.where((item) => item.timestamp > watermark).length;
   }
 
   Future<void> refresh({bool force = false}) async {
@@ -101,6 +137,11 @@ class GroupSystemNoticeService extends ChangeNotifier {
       });
       return;
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) {
+      return;
+    }
+    final clearGeneration = _sessionClearGeneration;
     GroupNoticeFeedLog.log('service_refresh_begin', extras: {
       'force': force,
       'beforeCount': _notices.length,
@@ -108,10 +149,16 @@ class GroupSystemNoticeService extends ChangeNotifier {
     _loading = true;
     notifyListeners();
     try {
-      await _loadDismissedNoticeIds();
+      await _loadDismissedNoticeIds(ownerUserId: identity.ownerUserId);
+      if (!_isCurrentRefresh(identity, clearGeneration)) {
+        return;
+      }
       final page = await GroupNoticeApi.instance.fetchMyGroupNotices(
         limit: 200,
       );
+      if (!_isCurrentRefresh(identity, clearGeneration)) {
+        return;
+      }
       final next = _filterDismissed(
         page.items.map((item) => item.toUIKitNotice()).toList()
           ..sort((a, b) => b.timestamp.compareTo(a.timestamp)),
@@ -143,9 +190,16 @@ class GroupSystemNoticeService extends ChangeNotifier {
         'error': '$error',
       });
     } finally {
-      _loading = false;
-      notifyListeners();
+      if (_isCurrentRefresh(identity, clearGeneration)) {
+        _loading = false;
+        notifyListeners();
+      }
     }
+  }
+
+  bool _isCurrentRefresh(SessionIdentity identity, int clearGeneration) {
+    return clearGeneration == _sessionClearGeneration &&
+        SessionIdentityService.instance.isCurrent(identity);
   }
 
   void upsertFromDetail(Map<String, dynamic>? detail) {
@@ -202,11 +256,25 @@ class GroupSystemNoticeService extends ChangeNotifier {
     if (id.isEmpty) {
       return;
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
+    final clearGeneration = _sessionClearGeneration;
     if (markDismissed) {
-      final dismissed = await _loadDismissedNoticeIds();
+      final dismissed = await _loadDismissedNoticeIds(
+        ownerUserId: identity.ownerUserId,
+        identity: identity,
+        clearGeneration: clearGeneration,
+      );
+      if (!_isCurrentRefresh(identity, clearGeneration)) return;
       final nextDismissed = Set<String>.from(dismissed)..add(id);
-      await _saveDismissedNoticeIds(nextDismissed);
+      await _saveDismissedNoticeIds(
+        nextDismissed,
+        ownerUserId: identity.ownerUserId,
+        identity: identity,
+        clearGeneration: clearGeneration,
+      );
     }
+    if (!_isCurrentRefresh(identity, clearGeneration)) return;
     final before = _notices.length;
     _notices =
         _notices.where((item) => item.id.trim() != id).toList(growable: false);
@@ -234,6 +302,9 @@ class GroupSystemNoticeService extends ChangeNotifier {
     if (readAtMs <= 0) {
       return;
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
+    final clearGeneration = _sessionClearGeneration;
     try {
       await GroupNoticeApi.instance.markGroupNoticesRead(readAt: readAtMs);
     } catch (error, stack) {
@@ -241,6 +312,7 @@ class GroupSystemNoticeService extends ChangeNotifier {
         debugPrint('GroupSystemNoticeService.markRead failed: $error\n$stack');
       }
     }
+    if (!_isCurrentRefresh(identity, clearGeneration)) return;
     _lastReadAtMs = readAtMs;
     _syncUnreadCount();
     notifyListeners();
@@ -250,6 +322,9 @@ class GroupSystemNoticeService extends ChangeNotifier {
     if (_notices.isEmpty) {
       return true;
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return false;
+    final clearGeneration = _sessionClearGeneration;
     final snapshot = List<GroupSystemNoticeItem>.from(_notices);
     try {
       try {
@@ -261,12 +336,24 @@ class GroupSystemNoticeService extends ChangeNotifier {
           );
         }
       }
-      final dismissed = await _loadDismissedNoticeIds();
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
+      final dismissed = await _loadDismissedNoticeIds(
+        ownerUserId: identity.ownerUserId,
+        identity: identity,
+        clearGeneration: clearGeneration,
+      );
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
       final nextDismissed = Set<String>.from(dismissed)
         ..addAll(
           snapshot.map((item) => item.id.trim()).where((id) => id.isNotEmpty),
         );
-      await _saveDismissedNoticeIds(nextDismissed);
+      await _saveDismissedNoticeIds(
+        nextDismissed,
+        ownerUserId: identity.ownerUserId,
+        identity: identity,
+        clearGeneration: clearGeneration,
+      );
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
       _notices = const [];
       _syncUnreadCount();
       notifyListeners();
@@ -282,6 +369,9 @@ class GroupSystemNoticeService extends ChangeNotifier {
       _toastDeleteFailed();
       return false;
     }
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return false;
+    final clearGeneration = _sessionClearGeneration;
     try {
       try {
         await GroupNoticeApi.instance.deleteMyGroupNotice(id);
@@ -292,11 +382,24 @@ class GroupSystemNoticeService extends ChangeNotifier {
           );
         }
       }
-      final dismissed = await _loadDismissedNoticeIds();
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
+      final dismissed = await _loadDismissedNoticeIds(
+        ownerUserId: identity.ownerUserId,
+        identity: identity,
+        clearGeneration: clearGeneration,
+      );
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
       final nextDismissed = Set<String>.from(dismissed)..add(id);
-      await _saveDismissedNoticeIds(nextDismissed);
-      _notices =
-          _notices.where((item) => item.id.trim() != id).toList(growable: false);
+      await _saveDismissedNoticeIds(
+        nextDismissed,
+        ownerUserId: identity.ownerUserId,
+        identity: identity,
+        clearGeneration: clearGeneration,
+      );
+      if (!_isCurrentRefresh(identity, clearGeneration)) return false;
+      _notices = _notices
+          .where((item) => item.id.trim() != id)
+          .toList(growable: false);
       _syncUnreadCount();
       notifyListeners();
       _toastDeleteSuccess();
@@ -328,13 +431,28 @@ class GroupSystemNoticeService extends ChangeNotifier {
   }
 
   void clearSession() {
+    _sessionClearGeneration++;
     _notices = const [];
     _loading = false;
     _lastReadAtMs = null;
     _unreadCount = 0;
     _dismissedNoticeIds = <String>{};
     _dismissedNoticeIdsLoaded = false;
+    _dismissedNoticeOwner = '';
     notifyListeners();
+  }
+
+  Future<void> clearForOwner(String? ownerUserId) async {
+    final owner = ChatIdFormat.rawUserUid(ownerUserId);
+    if (owner.isEmpty) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_dismissedStorageKeyForOwner(owner));
+    final currentOwner = ChatIdFormat.rawUserUid(
+      SessionIdentityService.instance.capture().ownerUserId,
+    );
+    if (currentOwner == owner) {
+      clearSession();
+    }
   }
 
   bool _sameNotices(

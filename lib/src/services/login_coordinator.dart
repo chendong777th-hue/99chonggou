@@ -21,6 +21,8 @@ import 'package:tencent_cloud_chat_demo/src/services/login_state.dart';
 import 'package:tencent_cloud_chat_demo/src/platform/listener_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/login_credential_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/native_post_home_bootstrap_queue.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_diagnostics.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_game/privileged_game_user_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_game/sangong_my_config_service.dart';
 import 'package:tencent_cloud_chat_demo/utils/auth_error_codes.dart';
@@ -30,13 +32,9 @@ import 'package:tencent_cloud_chat_demo/utils/toast.dart';
 
 class LoginCoordinator extends ChangeNotifier {
   LoginCoordinator._();
-  static const bool _sessionLogEnabled = false;
-
   void _sessionLog(String message) {
-    if (!_sessionLogEnabled) return;
-    print(message);
+    SessionDiagnostics.log(message);
   }
-
 
   static final LoginCoordinator instance = LoginCoordinator._();
 
@@ -372,6 +370,7 @@ class LoginCoordinator extends ChangeNotifier {
   }
 
   Future<LoginRecoveryResult> restoreColdStartSession() async {
+    final sessionGeneration = SessionIdentityService.instance.generation;
     _sessionLog(
       '>>>> COLD_START restoreColdStartSession BEGIN <<<<',
     );
@@ -399,6 +398,11 @@ class LoginCoordinator extends ChangeNotifier {
       ]);
       me = results[0] as MeResult;
       sig = results[1] as UserSigResult;
+      if (!SessionIdentityService.instance
+          .isGenerationCurrent(sessionGeneration)) {
+        _sessionLog('SESSION_LOG coldStart abort stale profile response');
+        return const LoginRecoveryResult.restartColdStart();
+      }
       if (!_isSameUserId(me.userId, sig.userId)) {
         // UserSig 为 IM 真源；与 /me 暂不一致时仍继续冷启，避免直接踢回登录页。
         _sessionLog(
@@ -410,7 +414,24 @@ class LoginCoordinator extends ChangeNotifier {
           'me=${me.userId} sig=${sig.userId}; proceed with userSig',
         );
       }
-      await ImSessionCache.instance.save(sig);
+      final ownerSaved =
+          await ApiClient.instance.saveAuthenticatedUserIdIfCurrent(
+        expectedToken: token,
+        userId: sig.userId,
+      );
+      if (!ownerSaved ||
+          !SessionIdentityService.instance.isGenerationCurrent(
+            sessionGeneration,
+          ) ||
+          !await ImSessionCache.instance.saveIfCurrent(
+            sig,
+            () => SessionIdentityService.instance.isGenerationCurrent(
+              sessionGeneration,
+            ),
+          )) {
+        _sessionLog('SESSION_LOG coldStart abort stale credential response');
+        return const LoginRecoveryResult.restartColdStart();
+      }
     } on DioError catch (e) {
       if (DioErrorMessage.isAuthFailure(e)) {
         _sessionLog(
@@ -435,8 +456,37 @@ class LoginCoordinator extends ChangeNotifier {
     }
 
     if (me == null || sig == null) {
-      final cached = await ImSessionCache.instance.loadIfValid();
+      final cachedOwner = ApiClient.instance.authenticatedUserId;
+      final cached = await ImSessionCache.instance.loadIfValidForUser(
+        cachedOwner,
+      );
       if (cached == null) {
+        final owner = cachedOwner;
+        if (shouldEnterDegradedHomeWithoutUserSig(
+          hasValidJwt: ApiClient.isValidJwt(token),
+          authenticatedUserId: owner,
+        )) {
+          _sessionLog(
+            'SESSION_LOG coldStart -> goHome '
+            'reason=no_usersig_cache_retry owner=$owner',
+          );
+          markFailed(
+            LoginErrorType.restoreFailed,
+            message: 'Cold start IM credential temporarily unavailable',
+            userId: owner,
+            isBusinessAuthenticated: true,
+            isHomeEntered: true,
+            isImReady: false,
+            isRecovering: true,
+          );
+          unawaited(
+            AuthBootstrapService.instance.syncImSessionAfterBusinessLogin(),
+          );
+          return LoginRecoveryResult.goHome(
+            userId: owner,
+            me: _meStubFromUserId(owner),
+          );
+        }
         _sessionLog(
           'SESSION_LOG coldStart -> goLogin reason=no_offline_usersig_cache',
         );
@@ -449,6 +499,17 @@ class LoginCoordinator extends ChangeNotifier {
       }
       sig = cached;
       me = _meStubFromCachedSig(cached);
+      final ownerSaved =
+          await ApiClient.instance.saveAuthenticatedUserIdIfCurrent(
+        expectedToken: token,
+        userId: cached.userId,
+      );
+      if (!ownerSaved ||
+          !SessionIdentityService.instance.isGenerationCurrent(
+            sessionGeneration,
+          )) {
+        return const LoginRecoveryResult.restartColdStart();
+      }
       usedOfflineCachedSig = true;
       _sessionLog(
         'SESSION_LOG coldStart offline cache hit userId=${cached.userId}',
@@ -471,6 +532,7 @@ class LoginCoordinator extends ChangeNotifier {
     var imCode = await AuthBootstrapService.instance.loginImStack(
       sig,
       forceLogin: true,
+      expectedSessionGeneration: sessionGeneration,
     );
     _sessionLog(
       'SESSION_LOG coldStart loginImStack DONE code=$imCode '
@@ -480,33 +542,29 @@ class LoginCoordinator extends ChangeNotifier {
       sig,
       imCode,
     );
+    final imLoginReady = imCode == 0;
     if (imCode != 0) {
-      if (!usedOfflineCachedSig) {
-        _sessionLog(
-          'LoginCoordinator: cold start IM restore failed code=$imCode',
-        );
-        AuthBootstrapService.instance.resetImLoginState();
-        markFailed(
-          LoginErrorType.imLoginFailed,
-          message: 'Cold start IM restore failed',
-          userId: sig.userId,
-          isRecovering: true,
-        );
-        return const LoginRecoveryResult.goLogin();
-      }
-      // 断网：IM 登录失败仍进首页看本地会话；历史依赖 SDK 本地库，能登则可读。
+      // A valid business token remains authenticated when IM is temporarily
+      // unavailable. Enter the local home and retry IM in the background.
       _sessionLog(
-        'SESSION_LOG coldStart offline IM login failed code=$imCode '
-        'continue_local_home userId=${sig.userId}',
+        'SESSION_LOG coldStart IM login failed code=$imCode '
+        'continue_degraded_home userId=${sig.userId} '
+        'offline=$usedOfflineCachedSig',
       );
+      AuthBootstrapService.instance.resetImLoginState();
     }
 
     // Web：IM 已登录即先进首页，列表/通讯录后台补齐，避免首屏长时间白屏。
     if (kIsWeb) {
-      markImReady(
+      _applyColdStartImState(
         userId: sig.userId,
-        isHomeEntered: true,
+        imLoginReady: imLoginReady,
       );
+      if (!imLoginReady) {
+        unawaited(
+          AuthBootstrapService.instance.syncImSessionAfterBusinessLogin(),
+        );
+      }
       unawaited(_finishWebColdStartBackground(sig: sig, me: me));
       _sessionLog(
         'SESSION_LOG coldStart -> goHome(web_fast) userId=${sig.userId}',
@@ -521,6 +579,7 @@ class LoginCoordinator extends ChangeNotifier {
       sig: sig,
       me: me,
       usedOfflineCachedSig: usedOfflineCachedSig,
+      imLoginReady: imLoginReady,
     );
   }
 
@@ -529,32 +588,65 @@ class LoginCoordinator extends ChangeNotifier {
     required UserSigResult sig,
     required MeResult me,
     required bool usedOfflineCachedSig,
+    required bool imLoginReady,
   }) async {
+    final identity = SessionIdentityService.instance.capture(
+      ownerUserId: sig.userId,
+    );
     unawaited(
-      ListenerStore.afterLogin().timeout(
-        const Duration(seconds: 4),
-        onTimeout: () {},
-      ),
+      () async {
+        await ListenerStore.afterLogin(expectedIdentity: identity).timeout(
+          const Duration(seconds: 4),
+          onTimeout: () {},
+        );
+        if (!SessionIdentityService.instance.isCurrent(identity)) return;
+      }(),
     );
 
-    if (!AuthBootstrapService.instance.isCoreServicesUserReady()) {
-      await AuthBootstrapService.instance.primeUIKitSession(sig);
-    }
-    await ConversationPinSyncService.instance.hydrateLocalAndApplyUi(
-      reloadUi: false,
-    );
-    await ConversationListNotifier.instance.reloadFromLocal();
-    ConversationListNotifier.instance.beginSuppressNotify();
     try {
-      // 再刷一次：确保首屏装载时置顶集合已在内存，漏网冷置顶被并入。
-      await ConversationPinSyncService.instance.hydrateLocalAndApplyUi();
-    } finally {
-      ConversationListNotifier.instance.endSuppressNotify();
+      if (!AuthBootstrapService.instance.isCoreServicesUserReady()) {
+        await AuthBootstrapService.instance.primeUIKitSession(sig);
+      }
+      if (!SessionIdentityService.instance.isCurrent(identity)) {
+        return const LoginRecoveryResult.restartColdStart();
+      }
+      await ConversationPinSyncService.instance.hydrateLocalAndApplyUi(
+        reloadUi: false,
+      );
+      if (!SessionIdentityService.instance.isCurrent(identity)) {
+        return const LoginRecoveryResult.restartColdStart();
+      }
+      await ConversationListNotifier.instance.restoreStoreProjection(
+        reason: ConversationStoreProjectionReason.accountSwitch,
+      );
+      ConversationListNotifier.instance.beginSuppressNotify();
+      try {
+        // 再刷一次：确保首屏装载时置顶集合已在内存，漏网冷置顶被并入。
+        await ConversationPinSyncService.instance.hydrateLocalAndApplyUi();
+      } finally {
+        ConversationListNotifier.instance.endSuppressNotify();
+      }
+    } catch (error, stack) {
+      // Local hydration is an optimization. A valid business credential must
+      // not be converted into a logout because SQLite/UIKit is temporarily
+      // unavailable during process restart.
+      _sessionLog(
+        'SESSION_LOG coldStart local hydration failed; continue degraded home '
+        'userId=${sig.userId} error=$error\n$stack',
+      );
     }
-    markImReady(
+    if (!SessionIdentityService.instance.isCurrent(identity)) {
+      return const LoginRecoveryResult.restartColdStart();
+    }
+    _applyColdStartImState(
       userId: sig.userId,
-      isHomeEntered: true,
+      imLoginReady: imLoginReady,
     );
+    if (!imLoginReady) {
+      unawaited(
+        AuthBootstrapService.instance.syncImSessionAfterBusinessLogin(),
+      );
+    }
     if (!usedOfflineCachedSig) {
       unawaited(() async {
         try {
@@ -598,13 +690,39 @@ class LoginCoordinator extends ChangeNotifier {
     );
   }
 
+  void _applyColdStartImState({
+    required String userId,
+    required bool imLoginReady,
+  }) {
+    if (imLoginReady) {
+      markImReady(
+        userId: userId,
+        isHomeEntered: true,
+      );
+      return;
+    }
+    markFailed(
+      LoginErrorType.imLoginFailed,
+      message: 'Cold start IM restore temporarily unavailable',
+      userId: userId,
+      isBusinessAuthenticated: true,
+      isHomeEntered: true,
+      isImReady: false,
+      isRecovering: true,
+    );
+  }
+
   @visibleForTesting
   static MeResult meStubFromCachedSig(UserSigResult sig) {
     return _meStubFromCachedSig(sig);
   }
 
   static MeResult _meStubFromCachedSig(UserSigResult sig) {
-    final id = sig.userId.trim();
+    return _meStubFromUserId(sig.userId);
+  }
+
+  static MeResult _meStubFromUserId(String userId) {
+    final id = userId.trim();
     return MeResult(
       userId: id,
       phone: '',
@@ -627,13 +745,21 @@ class LoginCoordinator extends ChangeNotifier {
         hasCachedUserSig;
   }
 
-  /// 离线缓存路径：IM 登录失败仍可进首页读本地列表（历史取决于 SDK 是否已本地登录）。
+  @visibleForTesting
+  static bool shouldEnterDegradedHomeWithoutUserSig({
+    required bool hasValidJwt,
+    required String authenticatedUserId,
+  }) {
+    return hasValidJwt && authenticatedUserId.trim().isNotEmpty;
+  }
+
+  /// IM failure does not invalidate an otherwise valid business session.
   @visibleForTesting
   static bool shouldEnterHomeDespiteImLoginFailure({
-    required bool usedOfflineCachedSig,
+    required bool hasValidJwt,
     required int imCode,
   }) {
-    return usedOfflineCachedSig && imCode != 0;
+    return hasValidJwt && imCode != 0;
   }
 
   Future<LoginRecoveryResult> recoverOnForeground() async {
@@ -920,12 +1046,26 @@ class LoginCoordinator extends ChangeNotifier {
       'SESSION_LOG PWD_LOGIN _completeForegroundLoginAndEnterHome START '
       'nickname=$nickname',
     );
-    final sdkReady =
-        await AuthBootstrapService.instance.ensureImSdkInitialized();
-    if (!sdkReady) {
+    // A visible login success must also be restart-safe. Persist the new
+    // account's UserSig before removing the login route; IM login and list
+    // hydration can still continue in the background.
+    final sig =
+        await AuthSessionService.instance.bootstrapAuthenticatedSession();
+    final generation = SessionIdentityService.instance.generation;
+    final sdkReady = await AuthBootstrapService.instance.ensureImSdkInitialized(
+      sdkAppId: sig.sdkAppId,
+    );
+    if (!sdkReady ||
+        !SessionIdentityService.instance.isGenerationCurrent(generation)) {
       throw _handleFailure(
         LoginErrorType.imLoginFailed,
         message: '聊天服务初始化失败，请稍后重试',
+      );
+    }
+    if (!context.mounted) {
+      throw _handleFailure(
+        LoginErrorType.restoreFailed,
+        message: '登录页面已关闭，请重试',
       );
     }
     // 业务已鉴权：原生/Web 一致先进首页，再后台完成 IM 会话就绪，
@@ -935,11 +1075,17 @@ class LoginCoordinator extends ChangeNotifier {
       syncingIm: true,
     );
     unawaited(() async {
+      if (!SessionIdentityService.instance.isGenerationCurrent(generation)) {
+        return;
+      }
       final ready =
           await AuthBootstrapService.instance.prepareReadySessionForHome(
         registerNickname: nickname,
         timeout: const Duration(seconds: 25),
       );
+      if (!SessionIdentityService.instance.isGenerationCurrent(generation)) {
+        return;
+      }
       if (!ready) {
         markFailed(
           LoginErrorType.imLoginFailed,
@@ -969,12 +1115,18 @@ class LoginCoordinator extends ChangeNotifier {
     required UserSigResult sig,
     required MeResult me,
   }) async {
+    final identity = SessionIdentityService.instance.capture(
+      ownerUserId: sig.userId,
+    );
     try {
-      await ListenerStore.afterLogin().timeout(const Duration(seconds: 6));
+      await ListenerStore.afterLogin(expectedIdentity: identity)
+          .timeout(const Duration(seconds: 6));
     } catch (_) {}
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     if (!AuthBootstrapService.instance.isCoreServicesUserReady()) {
       await AuthBootstrapService.instance.primeUIKitSession(sig);
     }
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     unawaited(AuthBootstrapService.instance.refreshImUIKitLists());
     try {
       await PrivilegedGameUserService.instance.activateSession(

@@ -7,7 +7,11 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 
-/// 进聊 ViewportReady 状态机：Prepare → Ready → Push（轻壳仅作 miss 兜底）。
+/// 进聊首窗预热状态机。
+///
+/// 导航不再等待 ViewportReady：Prepare 与 route transition 并行，Chat 页
+/// 从首帧开始挂载稳定真实树。该协调器只负责预热、取消和性能观测，不能
+/// 决定页面是否允许 push。
 enum ChatOpenViewportPhase {
   idle,
   preparing,
@@ -28,9 +32,6 @@ class ChatOpenViewportCoordinator {
   String? _activeKey;
   ChatOpenViewportPhase _phase = ChatOpenViewportPhase.idle;
 
-  /// Chat initState 一次性消费：该会话是否以 ViewportReady 进页。
-  final Map<String, bool> _pendingReadyByKey = <String, bool>{};
-
   int get currentRequestId => _requestId;
 
   ChatOpenViewportPhase get phase => _phase;
@@ -48,15 +49,6 @@ class ChatOpenViewportCoordinator {
     return requestId == _requestId &&
         key.isNotEmpty &&
         key == (_activeKey ?? '');
-  }
-
-  /// 消费进页 Ready 标记（只读一次）。
-  bool takeOpenWasViewportReady(String conversationKey) {
-    final key = conversationKey.trim();
-    if (key.isEmpty) {
-      return false;
-    }
-    return _pendingReadyByKey.remove(key) == true;
   }
 
   void markTransitioning(String conversationKey) {
@@ -79,24 +71,23 @@ class ChatOpenViewportCoordinator {
     _requestId = 0;
     _activeKey = null;
     _phase = ChatOpenViewportPhase.idle;
-    _pendingReadyByKey.clear();
   }
 
-  /// 进页前最多等这么久把本地首屏窗灌满。已齐则立刻返回。
-  /// 冷开超时后仍 push，由页内轻壳兜底——不要再加长到网络 RTT。
+  /// 后台最多尝试这么久把本地首屏窗灌满。它不阻塞 Navigator.push，
+  /// 也不要加长到网络 RTT。
   static const Duration prepareTimeout = Duration(milliseconds: 400);
 
-  /// Prepare + 等待暖窗完整或 [timeout]。返回快照；可能 `!isViewportReady`。
+  /// Prepare + 等待暖窗完整或 [timeout]。调用方应 fire-and-forget，返回快照
+  /// 仅用于观测/测试，可能 `!isViewportReady`。
   Future<ChatEntrySnapshot> prepareForOpen({
     required V2TimConversation conversation,
     Duration timeout = prepareTimeout,
   }) async {
     final requestId = ++_requestId;
-    final cacheKey =
-        ConversationPreviewHistorySync.conversationMessageCacheKey(
-              conversation,
-            ) ??
-            conversation.conversationID.trim();
+    final cacheKey = ConversationPreviewHistorySync.conversationMessageCacheKey(
+          conversation,
+        ) ??
+        conversation.conversationID.trim();
     final conversationID = conversation.conversationID.trim();
     _activeKey = cacheKey;
     _phase = ChatOpenViewportPhase.preparing;
@@ -136,13 +127,21 @@ class ChatOpenViewportCoordinator {
       return snap;
     }
 
-    _phase = ChatOpenViewportPhase.prepared;
+    // Prepare 可能在 route 已 transitioning/visible 后完成。不能把状态倒退
+    // 回 prepared/viewportReady，否则后续生命周期判断会误以为页面尚未出现。
+    final alreadyTransitioning =
+        _phase == ChatOpenViewportPhase.transitioning ||
+            _phase == ChatOpenViewportPhase.visible;
+    if (!alreadyTransitioning) {
+      _phase = ChatOpenViewportPhase.prepared;
+    }
     final ready = snap.isViewportReady;
-    _pendingReadyByKey[cacheKey] = ready;
     if (ready) {
-      _phase = ChatOpenViewportPhase.viewportReady;
+      if (!alreadyTransitioning) {
+        _phase = ChatOpenViewportPhase.viewportReady;
+      }
       ChatOpenPerfLog.mark(
-        'viewport_ready',
+        alreadyTransitioning ? 'viewport_ready_background' : 'viewport_ready',
         conversationID: cacheKey,
         extras: <String, Object?>{
           'requestId': requestId,

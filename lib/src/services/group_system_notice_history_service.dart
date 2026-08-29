@@ -4,9 +4,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
-import 'package:tencent_cloud_chat_uikit/data_services/core/core_services_implements.dart';
-import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 
 /// 群系统通知（管理员变更等）按账号持久化，重启或其它端登录同一账号后可恢复展示。
 class GroupSystemNoticeHistoryService {
@@ -21,19 +20,21 @@ class GroupSystemNoticeHistoryService {
   Timer? _persistDebounce;
   TUIChatGlobalModel? _attachedModel;
   VoidCallback? _modelListener;
+  SessionIdentity? _attachedIdentity;
 
-  String _storageKey() {
-    final userId = ChatIdFormat.rawUserUid(
-      serviceLocator<CoreServicesImpl>().loginUserInfo?.userID ?? '',
-    );
-    if (userId.isEmpty) {
+  String _storageKeyForOwner(String userId) {
+    final owner = ChatIdFormat.rawUserUid(userId);
+    if (owner.isEmpty) {
       return '${_storagePrefix}anonymous';
     }
-    return '$_storagePrefix$userId';
+    return '$_storagePrefix$owner';
   }
 
   Future<void> hydrate(TUIChatGlobalModel model) async {
-    final saved = await _load();
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
+    final saved = await _load(identity);
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
     if (saved.isEmpty) {
       return;
     }
@@ -52,10 +53,17 @@ class GroupSystemNoticeHistoryService {
     }
     detachPersistence();
     _attachedModel = model;
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
+    _attachedIdentity = identity;
     _modelListener = () {
       _persistDebounce?.cancel();
       _persistDebounce = Timer(const Duration(milliseconds: 250), () {
-        unawaited(_save(model.groupSystemNoticeList));
+        if (_attachedIdentity != identity ||
+            !SessionIdentityService.instance.isCurrent(identity)) {
+          return;
+        }
+        unawaited(_save(model.groupSystemNoticeList, identity));
       });
     };
     model.addListener(_modelListener!);
@@ -69,11 +77,23 @@ class GroupSystemNoticeHistoryService {
     }
     _attachedModel = null;
     _modelListener = null;
+    _attachedIdentity = null;
   }
 
-  Future<List<GroupSystemNoticeItem>> _load() async {
+  Future<void> clearForOwner(String? ownerUserId) async {
+    final owner = ChatIdFormat.rawUserUid(ownerUserId);
+    detachPersistence();
+    if (owner.isEmpty) return;
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_storageKey());
+    await prefs.remove(_storageKeyForOwner(owner));
+  }
+
+  Future<List<GroupSystemNoticeItem>> _load(SessionIdentity identity) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!SessionIdentityService.instance.isCurrent(identity)) {
+      return const [];
+    }
+    final raw = prefs.getString(_storageKeyForOwner(identity.ownerUserId));
     if (raw == null || raw.isEmpty) {
       return const [];
     }
@@ -94,10 +114,18 @@ class GroupSystemNoticeHistoryService {
     }
   }
 
-  Future<void> _save(List<GroupSystemNoticeItem> notices) async {
+  Future<void> _save(
+    List<GroupSystemNoticeItem> notices,
+    SessionIdentity identity,
+  ) async {
     final prefs = await SharedPreferences.getInstance();
-    final payload = notices.take(_maxItems).map(_toJson).toList(growable: false);
-    await prefs.setString(_storageKey(), jsonEncode(payload));
+    if (!SessionIdentityService.instance.isCurrent(identity)) return;
+    final payload =
+        notices.take(_maxItems).map(_toJson).toList(growable: false);
+    await prefs.setString(
+      _storageKeyForOwner(identity.ownerUserId),
+      jsonEncode(payload),
+    );
   }
 
   Map<String, dynamic> _toJson(GroupSystemNoticeItem notice) {

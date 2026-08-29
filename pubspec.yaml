@@ -58,6 +58,7 @@ dependencies:
   package_info_plus: ^9.0.0
   uuid: ^4.5.1
   flutter_svg: ^2.0.6
+  path: ^1.9.0
   path_drawing: ^1.0.1
   image_picker: ^0.8.9
   image_picker_android: ^0.8.13+17
@@ -96,7 +97,11 @@ dependencies:
   geocoding: ^4.0.0
   open_file: ^3.5.11
   provider: ^6.1.5+1
-  live_flutter_plugin: ^12.6.1
+  media_kit: ^1.2.5
+  media_kit_video: ^2.0.1
+  media_kit_libs_video: ^1.0.7
+  awesome_video_player:
+    path: third_party/awesome_video_player
 
 dependency_overrides:
   geolocator_android: ^4.6.2
@@ -111,11 +116,12 @@ dependency_overrides:
   # See: https://github.com/simolus3/sqlite3.dart/issues/336
   sqlite3: 2.9.4
   sqflite_common_ffi: 2.3.7+1
-  awesome_video_player:
-    path: third_party/awesome_video_player
   path_provider_foundation: 2.4.1
   tencent_cloud_chat_uikit:
     path: third_party/tencent_cloud_chat_uikit
+  # 本地修复 file_picker iOS 的通用 FileUtils 类名，避免与 OSAnalytics 冲突。
+  file_picker:
+    path: third_party/file_picker
   # 3.9.0 本地补丁：fetchThumb 在 fastFormat 下接受降质图、不允许等 iCloud，
   # 避免 PHImageResultIsDegradedKey 把方法通道永久挂起。
   photo_manager:

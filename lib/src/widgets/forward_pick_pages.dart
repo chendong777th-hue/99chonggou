@@ -4,6 +4,9 @@ import 'package:provider/provider.dart';
 import 'package:tencent_cloud_chat_demo/src/i18n/app_i18n.dart';
 import 'package:tencent_cloud_chat_demo/src/provider/theme.dart';
 import 'package:tencent_cloud_chat_demo/src/services/platform_official_account_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im_connect_status_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/network_status_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/message_history_coverage_store.dart';
 import 'package:tencent_cloud_chat_demo/src/ui/components/app_search_bar.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/contact_list_with_presence.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/message_notification_banner.dart';
@@ -16,10 +19,24 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_group_info.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_group_info.dart';
 import 'package:tencent_cloud_chat_sdk/tencent_im_sdk_plugin.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_reconciliation_coordinator.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitGroup/tim_uikit_group.dart';
 
 void registerAppUIKitExtensions(TUIChatGlobalModel globalModel) {
+  globalModel.appMessageHistoryCoverageRepository ??=
+      MessageHistoryCoverageStore.instance;
+  globalModel.appMessageReconciliationNetworkStateProvider ??= () {
+    final reachability = NetworkStatusService.instance.status.value;
+    if (reachability == NetworkReachability.offline) {
+      return MessageReconciliationNetworkState.offline;
+    }
+    if (reachability == NetworkReachability.online &&
+        ImConnectStatusService.isSocketReady) {
+      return MessageReconciliationNetworkState.online;
+    }
+    return MessageReconciliationNetworkState.unknown;
+  };
   globalModel.appSearchBarBuilder ??=
       (context, controller, onChanged) {
     return buildAppSearchBarInset(

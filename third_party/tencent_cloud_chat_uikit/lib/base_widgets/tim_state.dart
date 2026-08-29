@@ -3,7 +3,6 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'dart:io';
 import 'package:tencent_cloud_chat_uikit/base_widgets/tim_callback.dart';
 
-
 abstract class TIMState<T extends StatefulWidget> extends State<T> {
   @override
   initState() {
@@ -17,15 +16,15 @@ abstract class TIMState<T extends StatefulWidget> extends State<T> {
     // TODO: 这里后续看看要不要默认加上报逻辑。
   }
 
-  bool isAndroidDevice(){
+  bool isAndroidDevice() {
     return !kIsWeb && Platform.isAndroid;
   }
 
-  bool isIosDevice(){
+  bool isIosDevice() {
     return !kIsWeb && Platform.isIOS;
   }
 
-  bool isWebDevice(){
+  bool isWebDevice() {
     return kIsWeb;
   }
 
@@ -39,17 +38,14 @@ abstract class TIMState<T extends StatefulWidget> extends State<T> {
         stackText.contains('mouse_tracker.dart');
   }
 
-  setTIMState(VoidCallback fn){
+  setTIMState(VoidCallback fn) {}
 
-  }
-  
   @override
   Widget build(BuildContext context) {
     FlutterError.onError = (FlutterErrorDetails details) {
       if (_ignoreWebMouseTrackerError(details)) {
         return;
       }
-      FlutterError.dumpErrorToConsole(details, forceReport: true);
       onTIMCallback(TIMCallback(
           type: TIMCallbackType.FLUTTER_ERROR,
           stackTrace: details.stack,

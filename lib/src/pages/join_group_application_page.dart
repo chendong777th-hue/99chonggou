@@ -3,8 +3,10 @@ import 'package:provider/provider.dart';
 import 'package:tencent_cloud_chat_demo/src/i18n/app_i18n.dart';
 import 'package:tencent_cloud_chat_demo/src/navigation/app_chat_route.dart';
 import 'package:tencent_cloud_chat_demo/src/provider/theme.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_local/group_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/theme/app_colors.dart';
 import 'package:tencent_cloud_chat_demo/src/api/group_join_api.dart';
+import 'package:tencent_cloud_chat_demo/src/api/me_group_api.dart';
 import 'package:tencent_cloud_chat_demo/src/models/group_join_source.dart';
 import 'package:tencent_cloud_chat_demo/utils/group_invite_message.dart';
 import 'package:tencent_cloud_chat_demo/utils/toast.dart';
@@ -53,6 +55,28 @@ class _JoinGroupApplicationPageState extends State<JoinGroupApplicationPage> {
   bool _loadingDetail = true;
   bool _hasJoined = false;
   bool _acting = false;
+  String _avatarPreviewUrl = '';
+  Future<String?>? _avatarPreviewRequest;
+
+  Future<String?> _resolveGroupPreviewUrl() async {
+    final cached = _avatarPreviewUrl.trim();
+    if (cached.isNotEmpty) return cached;
+    final inFlight = _avatarPreviewRequest;
+    if (inFlight != null) return inFlight;
+    final request = MeGroupApi.instance
+        .fetchGroupAvatarPreview(_group.groupID)
+        .then((result) {
+      final url = result.previewUrl.trim();
+      if (url.isNotEmpty) _avatarPreviewUrl = url;
+      return url.isEmpty ? null : url;
+    }).catchError((_) => null);
+    _avatarPreviewRequest = request;
+    return request.whenComplete(() {
+      if (identical(_avatarPreviewRequest, request)) {
+        _avatarPreviewRequest = null;
+      }
+    });
+  }
 
   @override
   void initState() {
@@ -193,10 +217,7 @@ class _JoinGroupApplicationPageState extends State<JoinGroupApplicationPage> {
         Navigator.of(context).pop();
         return;
       }
-      await Navigator.push(
-        context,
-        appChatRoute(conversation),
-      );
+      await openOrReuseAppChat(context, conversation);
     } finally {
       if (mounted) {
         setState(() => _acting = false);
@@ -251,7 +272,8 @@ class _JoinGroupApplicationPageState extends State<JoinGroupApplicationPage> {
                   code: desc,
                   outcome: 'pending',
                 )
-              : (GroupJoinApi.isSelfHostedGovernanceGroupType(_group.groupType) &&
+              : (GroupJoinApi.isSelfHostedGovernanceGroupType(
+                          _group.groupType) &&
                       desc == 'ok'
                   ? AppI18n.current.t(
                       zhHans: '已加入群聊',
@@ -323,6 +345,10 @@ class _JoinGroupApplicationPageState extends State<JoinGroupApplicationPage> {
             ja: 'グループに参加',
             ko: '그룹 가입',
           );
+    final avatarVersion = GroupLocalStore.instance
+            .readCached(groupId: _group.groupID)
+            ?.avatarVersion ??
+        0;
 
     return Scaffold(
       backgroundColor: pageBackgroundColor,
@@ -359,6 +385,11 @@ class _JoinGroupApplicationPageState extends State<JoinGroupApplicationPage> {
                             type: 2,
                             borderRadius: BorderRadius.circular(48),
                             isShowBigWhenClick: true,
+                            previewUrlResolver: _resolveGroupPreviewUrl,
+                            avatarCacheKey:
+                                'avatar|group|${_group.groupID}|$avatarVersion|thumb',
+                            previewCacheKey:
+                                'avatar|group|${_group.groupID}|$avatarVersion|preview',
                           ),
                         ),
                         const SizedBox(height: 20),

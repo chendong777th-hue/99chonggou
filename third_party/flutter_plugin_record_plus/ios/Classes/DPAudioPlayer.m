@@ -44,12 +44,10 @@ static DPAudioPlayer *gPlayerManager = nil;
             [[NSData data] writeToFile:amrPlayerFilePath atomically:YES];
         }
         
-        [[NSNotificationCenter defaultCenter] addObserver:self 
-            selector:@selector(proximityStateDidChange) 
-            name:UIDeviceProximityStateDidChangeNotification 
+        [[NSNotificationCenter defaultCenter] addObserver:self
+            selector:@selector(proximityStateDidChange)
+            name:UIDeviceProximityStateDidChangeNotification
             object:nil];
-        [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayAndRecord error:nil];
-        [[AVAudioSession sharedInstance] setActive:YES error:nil];
 
     }
     return self;
@@ -60,9 +58,9 @@ static DPAudioPlayer *gPlayerManager = nil;
 //    if (isPlaying) return;
     //打开红外传感器
     [[UIDevice currentDevice] setProximityMonitoringEnabled:YES];
-    AVAudioSession *session = [AVAudioSession sharedInstance];
-    [session setActive:true error:nil];
-    [session setCategory:AVAudioSessionCategoryPlayback error:nil];
+    // The app-level audio-session owner configures/activates the session.
+    // This legacy player must not overwrite a CallKit/LiveKit/recording
+    // session while it is being handed off.
 //    //默认情况下扬声器播放
 //    AVAudioSessionPortOverride portOverride = AVAudioSessionPortOverrideNone;
 //    [[AVAudioSession sharedInstance] overrideOutputAudioPort:portOverride error:nil];
@@ -163,13 +161,9 @@ static DPAudioPlayer *gPlayerManager = nil;
 
 - (void)proximityStateDidChange
 {
-    if ([UIDevice currentDevice].proximityState) {
-        NSLog(@"有物品靠近");
-        [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayAndRecord error:nil];
-    } else {
-        NSLog(@"有物品离开");
-        [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback error:nil];
-    }
+    // Do not change AVAudioSession from a proximity notification. The Dart
+    // route/session coordinator owns that transition and serializes it with
+    // recording and CallKit/LiveKit handoffs.
 }
 
 

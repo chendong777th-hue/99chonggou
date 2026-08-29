@@ -198,7 +198,7 @@ class _WalletTransferScreenState extends State<WalletTransferScreen> {
       if (!mounted || ret == null) return;
       ctl.setReceiver(
         userId: ret.userId,
-        name: ret.name,
+        name: ret.publicNameOrFallback,
         avatarUrl: ret.avatar,
         convId: ctl.conversationId,
         group: true,

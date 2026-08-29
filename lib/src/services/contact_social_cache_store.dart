@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:tencent_cloud_chat_demo/src/api/api_client.dart';
 import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 
 /// 通讯录相关本地缓存：星标好友、最近上线时间（按登录账号隔离）。
@@ -16,11 +17,19 @@ class ContactSocialCacheStore {
 
   /// IM SDK 未 init 时 [loginInfo] 会抛 LateError，启动阶段需安全读取。
   static String safeLoginUserId() {
-    try {
-      return TIMUIKitCore.getInstance().loginInfo.userID.trim();
-    } catch (_) {
-      return '';
+    // The business credential is the account authority. UIKit can retain its
+    // previous userID briefly while an account boundary is tearing down.
+    final authenticatedUserId = ApiClient.instance.authenticatedUserId.trim();
+    if (authenticatedUserId.isNotEmpty) {
+      return authenticatedUserId;
     }
+    try {
+      final uikitUserId = TIMUIKitCore.getInstance().loginInfo.userID.trim();
+      if (uikitUserId.isNotEmpty) {
+        return uikitUserId;
+      }
+    } catch (_) {}
+    return '';
   }
 
   static String accountScope() {
@@ -74,7 +83,8 @@ class ContactSocialCacheStore {
           return;
         }
         if (value is num) {
-          out[id] = DateTime.fromMillisecondsSinceEpoch(value.toInt(), isUtc: true);
+          out[id] =
+              DateTime.fromMillisecondsSinceEpoch(value.toInt(), isUtc: true);
         }
       });
       return out;

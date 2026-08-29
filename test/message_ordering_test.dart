@@ -93,6 +93,34 @@ String _stableIdData(String stableId, {int? localSeq}) {
 }
 
 void main() {
+  test('same image batch keeps selection order despite server completion order', () {
+    V2TimMessage image(String id, int index, String serverSeq) {
+      final message = _msg(
+        elemType: MessageElemType.V2TIM_ELEM_TYPE_IMAGE,
+        id: id,
+        msgID: 'server_$id',
+        timestamp: 1700000000 + (3 - index),
+        seq: serverSeq,
+        imageElem: V2TimImageElem(),
+        localCustomData: jsonEncode(<String, dynamic>{
+          kChatMediaBatchIdKey: 'batch_1',
+          kChatMediaBatchIndexKey: index,
+        }),
+      );
+      message.status = MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC;
+      return message;
+    }
+
+    final sorted = TUIChatGlobalModel.sortMessagesChronologicallyAsc([
+      image('c', 2, '1'),
+      image('a', 0, '99'),
+      image('d', 3, '2'),
+      image('b', 1, '50'),
+    ]);
+
+    expect(sorted.map((item) => item.id).toList(), ['a', 'b', 'c', 'd']);
+  });
+
   test('findOutgoingPlaceholderIndex matches by random', () {
     final list = <V2TimMessage>[
       _msg(
@@ -853,7 +881,7 @@ void main() {
     );
   });
 
-  test('dedupeMessages still merges group copies with the same seq', () {
+  test('dedupeMessages preserves conflicting group server IDs at same seq', () {
     const groupID = '@TGS#2BXXNKM5CS';
     final first = _msg(
       elemType: MessageElemType.V2TIM_ELEM_TYPE_TEXT,
@@ -878,7 +906,7 @@ void main() {
       TUIChatGlobalModel.dedupeMessagesForTesting(
         <V2TimMessage>[first, second],
       ),
-      hasLength(1),
+      hasLength(2),
     );
   });
 
@@ -1650,6 +1678,42 @@ void main() {
     expect(
       batched.map((message) => message.seq).toList(),
       <String?>['103', '102', '101'],
+    );
+  });
+
+  test('inbound batch dedupes group copies by canonical seq identity', () {
+    const groupID = '@TGS#BATCHDEDUP';
+    V2TimMessage groupText({
+      required String msgID,
+      required String id,
+      required String seq,
+    }) {
+      final message = _msg(
+        elemType: MessageElemType.V2TIM_ELEM_TYPE_TEXT,
+        isSelf: false,
+        msgID: msgID,
+        id: id,
+        seq: seq,
+        timestamp: 100,
+        groupID: groupID,
+      );
+      message.textElem = V2TimTextElem(text: 'same');
+      return message;
+    }
+
+    final batched = TUIChatGlobalModel.appendDistinctIncomingBatchForTesting(
+      existing: const <V2TimMessage>[],
+      incoming: <V2TimMessage>[
+        groupText(msgID: 'sdk-10', id: 'id-10', seq: '10'),
+        groupText(msgID: 'archive-10', id: 'archive-id-10', seq: '10'),
+        groupText(msgID: 'sdk-11', id: 'id-11', seq: '11'),
+      ],
+    );
+
+    expect(batched, hasLength(2));
+    expect(
+      batched.map((message) => message.seq).toSet(),
+      <String>{'10', '11'},
     );
   });
 

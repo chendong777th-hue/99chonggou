@@ -9,6 +9,7 @@ import 'package:tencent_cloud_chat_demo/src/services/group_local/group_change_ev
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_entity_incremental_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_member_incremental_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_membership_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_local/group_metadata_refresh_coordinator.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_feed_log.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_incremental_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
@@ -79,6 +80,12 @@ class GroupSyncService {
     'group_notice_changed',
   };
 
+  static const Set<String> _metadataRefreshActions = <String>{
+    'group_name_changed',
+    'group_avatar_changed',
+    'group_notice_changed',
+  };
+
   /// 自建群无 IM GroupTips 时，需要本地注入灰字的操作。
   static const Set<String> _grayTipActions = <String>{
     'member_muted',
@@ -125,6 +132,22 @@ class GroupSyncService {
       return;
     }
 
+    final memberStreamSeq = _readMemberStreamSeqFromDetail(event.detail);
+    if (memberStreamSeq > 0 && memberCountRefreshActions.contains(action)) {
+      final shouldApply = await GroupMemberIncrementalSyncService.instance
+          .shouldApplyRealtimeSeq(
+        groupId: groupId,
+        seq: memberStreamSeq,
+      );
+      if (!shouldApply) {
+        _log(
+          'skip already-applied membership event groupId=$groupId '
+          'action=$action seq=$memberStreamSeq',
+        );
+        return;
+      }
+    }
+
     final changed =
         await GroupMembershipSyncService.instance.applyGroupChanged(event);
     if (changed) {
@@ -144,7 +167,6 @@ class GroupSyncService {
         );
       }
     }
-    final memberStreamSeq = _readMemberStreamSeqFromDetail(event.detail);
     if (memberStreamSeq > 0 && memberCountRefreshActions.contains(action)) {
       unawaited(
         GroupMemberIncrementalSyncService.instance.noteRealtimeSeq(
@@ -175,38 +197,57 @@ class GroupSyncService {
           reason: 'tcp_$action',
         ),
       );
-      // 先成员首屏 + total，再通知 UI，避免聊天头读到旧人数。
-      await GroupMembershipSyncService.instance.syncMembersAfterMembershipChange(
+      // 先同步成员首屏，再触发唯一的群详情刷新；成员分页 total 不写群资料。
+      await GroupMembershipSyncService.instance
+          .syncMembersAfterMembershipChange(
         groupId,
         reason: 'tcp_$action',
       );
+      // 群详情是群名/人数的唯一权威来源。成员分页只维护成员名单；
+      // 这里统一强制拉取一次详情，结果写入 GroupLocalStore 后由 Chat 消费。
+      _publishMemberMetadataChanged(
+        groupId: groupId,
+        action: action,
+        operatorUserId: event.operatorUserId,
+        memberUserIds: notice.memberUserIds,
+        pushTs: event.ts,
+        changeEventId: event.changeEventId,
+        occurredAtMs: event.resolvedOccurredAtMs,
+        timelineRank: notice.timelineRank,
+        detail: event.detail,
+      );
+      _notifyGroupProfileRefresh(
+        groupId: groupId,
+        action: action,
+      );
+    } else if (_metadataRefreshActions.contains(action)) {
+      // Event payloads are invalidation hints only. The group detail endpoint
+      // is the sole authority for the metadata read model.
       unawaited(
-        GroupMembershipSyncService.instance.refreshGroupDetail(groupId),
+        GroupMetadataRefreshCoordinator.instance
+            .refresh(groupId, force: true)
+            .then<void>((_) {}),
       );
+      if (action == 'group_notice_changed') {
+        GroupNoticeFeedLog.log('tcp_group_notice_changed', extras: {
+          'groupId': groupId,
+          'hasNotification': (notice.notification?.trim().isNotEmpty ?? false),
+          'pushTs': notice.pushTs,
+          'note': 'marquee_only_not_inbox_entry',
+        });
+      }
       _notifyGroupProfileRefresh(
         groupId: groupId,
         action: action,
       );
       lastChanged.value = notice;
-    } else if (action == 'group_notice_changed') {
-      GroupNoticeFeedLog.log('tcp_group_notice_changed', extras: {
-        'groupId': groupId,
-        'hasNotification':
-            (notice.notification?.trim().isNotEmpty ?? false),
-        'pushTs': notice.pushTs,
-        'note': 'marquee_only_not_inbox_entry',
-      });
-      _notifyGroupProfileRefresh(
-        groupId: groupId,
-        action: action,
-      );
-      await _prefetchGroupInfo(groupId, event: event);
-      lastChanged.value = notice;
-      GroupNoticeRefreshBus.instance.notifyRefresh(
-        groupId,
-        notification: notice.notification,
-        pushTs: notice.pushTs,
-      );
+      if (action == 'group_notice_changed') {
+        GroupNoticeRefreshBus.instance.notifyRefresh(
+          groupId,
+          notification: notice.notification,
+          pushTs: notice.pushTs,
+        );
+      }
     } else {
       _notifyGroupProfileRefresh(
         groupId: groupId,
@@ -319,9 +360,6 @@ class GroupSyncService {
       normalizedGroupId,
       reason: 'local_$normalizedAction',
     );
-    unawaited(
-      GroupMembershipSyncService.instance.refreshGroupDetail(normalizedGroupId),
-    );
     _notifyGroupProfileRefresh(
       groupId: normalizedGroupId,
       action: normalizedAction,
@@ -345,10 +383,71 @@ class GroupSyncService {
         reason: 'local_$normalizedAction',
       ),
     );
-    lastChanged.value = notice;
+    _publishMemberMetadataChanged(
+      groupId: normalizedGroupId,
+      action: normalizedAction,
+      operatorUserId: operatorUserId,
+      memberUserIds: memberUserIds,
+      pushTs: notice.pushTs,
+      changeEventId: changeEventId,
+      occurredAtMs: occurredAtMs,
+      timelineRank: notice.timelineRank,
+    );
     ConversationRefreshBus.instance.requestRefresh(
       reason: 'group_changed_$normalizedAction',
       delay: const Duration(milliseconds: 300),
+    );
+  }
+
+  /// Emits a member-list change and starts the single authoritative metadata
+  /// refresh. Callers must not derive or write memberCount from event payloads.
+  void notifyMemberMetadataChanged({
+    required String groupId,
+    required String action,
+    List<String> memberUserIds = const <String>[],
+  }) {
+    _publishMemberMetadataChanged(
+      groupId: groupId,
+      action: action,
+      memberUserIds: memberUserIds,
+      pushTs: DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  void _publishMemberMetadataChanged({
+    required String groupId,
+    required String action,
+    String? operatorUserId,
+    List<String> memberUserIds = const <String>[],
+    int? pushTs,
+    String? changeEventId,
+    int? occurredAtMs,
+    int? timelineRank,
+    Map<String, dynamic>? detail,
+  }) {
+    final id = groupId.trim();
+    final normalizedAction = action.trim().toLowerCase();
+    if (id.isEmpty || !memberCountRefreshActions.contains(normalizedAction)) {
+      return;
+    }
+    unawaited(
+      GroupMetadataRefreshCoordinator.instance
+          .refresh(id, force: true)
+          .then<void>((_) {}),
+    );
+    lastChanged.value = GroupChangedNotice(
+      groupId: id,
+      action: normalizedAction,
+      operatorUserId: operatorUserId,
+      memberUserIds: memberUserIds,
+      pushTs: pushTs,
+      changeEventId: changeEventId,
+      occurredAtMs: occurredAtMs,
+      timelineRank: timelineRank ??
+          GroupChangeEventMetadata.defaultTimelineRankForAction(
+            normalizedAction,
+          ),
+      detail: detail,
     );
   }
 

@@ -352,9 +352,11 @@ final class SelfHostedVoipCallKit: NSObject, CXProviderDelegate {
         let session = AVAudioSession.sharedInstance()
         let isVideo = activeUUID.flatMap { uuidToHasVideo[$0] } ?? false
         do {
+            // A2DP is a playback-only option and is not valid for the
+            // playAndRecord CallKit session. Passing it here can surface as
+            // OSStatus -50 during CallKit/LiveKit audio handoff.
             var options: AVAudioSession.CategoryOptions = [
                 .allowBluetooth,
-                .allowBluetoothA2DP,
             ]
             if isVideo {
                 options.insert(.defaultToSpeaker)

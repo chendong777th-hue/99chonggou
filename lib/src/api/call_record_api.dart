@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:tencent_cloud_chat_demo/src/services/call_result_record.dart';
 import 'package:tencent_cloud_chat_demo/src/services/call_result_repository.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_realtime/friend_realtime_event.dart';
 import 'package:tencent_cloud_chat_demo/utils/api_response_util.dart';
 import 'package:tencent_cloud_chat_demo/utils/custom_message/calling_message/calling_message_data_provider.dart';
@@ -83,7 +84,7 @@ class CallRecordItem {
     );
   }
 
-factory CallRecordItem.fromJson(Map<String, dynamic> json) {
+  factory CallRecordItem.fromJson(Map<String, dynamic> json) {
     return CallRecordItem(
       callId: _asStringAny(json, const [
         'callId',
@@ -217,9 +218,9 @@ class CallRecordPageResult {
       'content',
     ]);
     final items = rawItems
-            .whereType<Map>()
-            .map((e) => CallRecordItem.fromJson(Map<String, dynamic>.from(e)))
-            .toList();
+        .whereType<Map>()
+        .map((e) => CallRecordItem.fromJson(Map<String, dynamic>.from(e)))
+        .toList();
     return CallRecordPageResult(
       items: items,
       page: _asIntAny(map, const ['page', 'pageIndex', 'current']),
@@ -264,6 +265,7 @@ class CallRecordApi {
     int page = 0,
     int pageSize = 20,
   }) async {
+    final identity = SessionIdentityService.instance.capture();
     final res = await _dio.get(
       '/calls/recent',
       queryParameters: {
@@ -280,13 +282,23 @@ class CallRecordApi {
             : <String, dynamic>{};
     final result = CallRecordPageResult.fromJson(map);
     // Best-effort: seed chat-bubble canonical cache from recent page.
+    if (!_isCurrent(identity)) {
+      return result;
+    }
     for (final item in result.items) {
       final record = item.toCallResultRecord();
       if (record != null) {
-        CallResultRepository.instance.save(record);
+        CallResultRepository.instance.save(record, identity: identity);
       }
     }
     return result;
+  }
+
+  bool _isCurrent(SessionIdentity identity) {
+    if (identity.ownerUserId.isEmpty) {
+      return true;
+    }
+    return SessionIdentityService.instance.isCurrent(identity);
   }
 
   /// GET /calls/{callId} —— 按 callId 拉取单条权威通话结果。
@@ -402,9 +414,7 @@ int _asTimestampMs(Object? raw) {
   }
   final numeric = int.tryParse(text);
   if (numeric != null) {
-    return numeric > 0 && numeric < 1000000000000
-        ? numeric * 1000
-        : numeric;
+    return numeric > 0 && numeric < 1000000000000 ? numeric * 1000 : numeric;
   }
   return DateTime.tryParse(text)?.millisecondsSinceEpoch ?? 0;
 }

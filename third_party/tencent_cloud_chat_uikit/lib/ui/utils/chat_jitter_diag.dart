@@ -2,14 +2,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
 import 'package:flutter/scheduler.dart';
 
-/// 聊天页进场抖动专项诊断。过滤关键字：`[CHAT_JITTER]`。
-///
-/// 默认 [enabled]=false。发布版排查滑动/进页尖刺时临时改为 true
-///（`print` 在 release 也会进 logcat）；测完务必改回 false，避免热路径刷屏。
+/// 聊天页进场抖动专项诊断。
 class ChatJitterDiag {
   ChatJitterDiag._();
 
-  /// 排查包临时 true；合入/日常默认 false。
   static const bool enabled = false;
 
   /// 气泡 decode 运行时探针（需同时 [enabled]=true）。
@@ -61,34 +57,7 @@ class ChatJitterDiag {
     String? conv,
     String? msgId,
     Map<String, Object?> extras = const <String, Object?>{},
-  }) {
-    if (!enabled) return;
-    final buffer = StringBuffer('[CHAT_JITTER] event=$event');
-    final id = conv?.trim() ?? '';
-    if (id.isNotEmpty) {
-      buffer.write(' conv=$id');
-    } else if (_openConv.isNotEmpty) {
-      buffer.write(' conv=$_openConv');
-    }
-    if (_openSeq > 0) {
-      buffer.write(' openSeq=$_openSeq');
-    }
-    final elapsed = elapsedSinceOpenMs();
-    if (elapsed >= 0) {
-      buffer.write(' t+${elapsed}ms');
-    }
-    final mid = msgId?.trim() ?? '';
-    if (mid.isNotEmpty) {
-      buffer.write(' msgId=$mid');
-    }
-    for (final entry in extras.entries) {
-      final value = entry.value;
-      if (value == null) continue;
-      buffer.write(' ${entry.key}=$value');
-    }
-    // ignore: avoid_print
-    print(buffer.toString());
-  }
+  }) {}
 
   static int beginInboundSession(String conversationID) {
     if (!enabled) return 0;

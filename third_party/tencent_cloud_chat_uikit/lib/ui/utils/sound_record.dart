@@ -10,7 +10,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:tencent_cloud_chat_uikit/import_proxy/import_proxy.dart';
-import 'package:tencent_cloud_chat_demo/src/services/voice_output_route_service.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/sound_player_voice_route_bridge.dart';
 
 typedef PlayStateListener = void Function(PlayState playState);
 typedef SoundInterruptListener = void Function();
@@ -38,7 +38,7 @@ class SoundPlayer {
   static final AudioPlayer _audioPlayer = AudioPlayer(
     handleAudioSessionActivation: false,
   );
-  static bool _speakerOn = VoiceOutputRouteService.isSpeaker;
+  static bool _speakerOn = soundPlayerVoiceRouteBridge.isSpeaker;
   static String? _currentUrl;
   static String? playingMessageId;
   static final Set<String> _activeMessageKeys = {};
@@ -69,7 +69,7 @@ class SoundPlayer {
 
   static Stream<Duration?> get durationStream => _audioPlayer.durationStream;
 
-  static bool get speakerOn => VoiceOutputRouteService.isSpeaker;
+  static bool get speakerOn => soundPlayerVoiceRouteBridge.isSpeaker;
 
   static bool get isVoiceActive =>
       _activeMessageKeys.isNotEmpty &&
@@ -157,23 +157,23 @@ class SoundPlayer {
 
   /// 与 TRTC 对齐：playAndRecord + voiceChat。
   static AudioSessionConfiguration _sharedVoiceSessionConfig() {
-    return VoiceOutputRouteService.voiceChatConfigFor(
-      VoiceOutputRouteService.currentRoute,
+    return soundPlayerVoiceRouteBridge.voiceChatConfigFor(
+      soundPlayerVoiceRouteBridge.currentRoute,
     );
   }
 
   static AudioSessionConfiguration _playbackSessionConfig() {
-    return VoiceOutputRouteService.playbackConfigFor(
-      VoiceOutputRouteService.currentRoute,
+    return soundPlayerVoiceRouteBridge.playbackConfigFor(
+      soundPlayerVoiceRouteBridge.currentRoute,
     );
   }
 
   static AudioSessionConfiguration _recordSessionConfig() {
     if (!kIsWeb && Platform.isIOS) {
-      final route = VoiceOutputRouteService.currentRoute;
+      final route = soundPlayerVoiceRouteBridge.currentRoute;
       return AudioSessionConfiguration(
         avAudioSessionCategory: AVAudioSessionCategory.playAndRecord,
-        avAudioSessionCategoryOptions: route == VoiceOutputRoute.speaker
+        avAudioSessionCategoryOptions: route == SoundPlayerVoiceRoute.speaker
             ? AVAudioSessionCategoryOptions.defaultToSpeaker |
                 AVAudioSessionCategoryOptions.allowBluetooth
             : AVAudioSessionCategoryOptions.allowBluetooth,
@@ -209,18 +209,18 @@ class SoundPlayer {
   }
 
   static Listenable get outputRouteListenable =>
-      VoiceOutputRouteService.routeNotifier;
+      soundPlayerVoiceRouteBridge.routeNotifier;
 
   static Future<void> _applyOutputRoute({
     bool forRecording = false,
     bool configureSession = false,
   }) async {
-    await VoiceOutputRouteService.applyCurrentRoute(
+    await soundPlayerVoiceRouteBridge.applyCurrentRoute(
       configureSession: configureSession,
       forRecording: forRecording,
       activate: false,
     );
-    _speakerOn = VoiceOutputRouteService.isSpeaker;
+    _speakerOn = soundPlayerVoiceRouteBridge.isSpeaker;
   }
 
   /// 仅在首次播放或录音结束后配置 session；播放/暂停切换时不触碰 session。
@@ -270,13 +270,24 @@ class SoundPlayer {
   }
 
   static Future<void> _ensureRecordSession() async {
+    // ignore: avoid_print
+    print('[SoundPlayer] _ensureRecordSession start');
     final session = await AudioSession.instance;
     try {
       await session.configure(_recordSessionConfig());
       _usingRecordSession = true;
       _playbackSessionConfigured = false;
       await _applyOutputRoute(forRecording: true);
-      await session.setActive(true);
+      // 根因 E：session.setActive 在系统音频服务忙时可能同步阻塞数百毫秒。
+      // 加 2s 超时：超时不阻塞录音链，让 _recorder.start() 自行处理。
+      await session.setActive(true).timeout(
+        const Duration(seconds: 2),
+        onTimeout: () {
+          // ignore: avoid_print
+          print('[SoundPlayer] session.setActive TIMED OUT');
+          return false;
+        },
+      );
     } catch (e) {
       if (kDebugMode) {
         debugPrint('SoundPlayer: configure record session failed ($e)');
@@ -798,7 +809,7 @@ class SoundPlayer {
 
   static Future<bool> _setSpeakerOnInternal(bool enabled) async {
     final targetRoute =
-        enabled ? VoiceOutputRoute.speaker : VoiceOutputRoute.earpiece;
+        enabled ? SoundPlayerVoiceRoute.speaker : SoundPlayerVoiceRoute.earpiece;
     if (speakerOn == enabled &&
         !_playbackSessionConfigured &&
         !_usingRecordSession) {
@@ -827,7 +838,7 @@ class SoundPlayer {
         }
       }
 
-      final success = await VoiceOutputRouteService.setRoute(
+      final success = await soundPlayerVoiceRouteBridge.setRoute(
         targetRoute,
         configureSession: true,
         forRecording: _usingRecordSession,
@@ -905,25 +916,36 @@ class SoundPlayer {
           ResponseListener listener) =>
       _recorder.responseFromAmplitude.listen(listener);
 
-  static Future<bool> startRecord() async {
+  static Future<bool> startRecord({bool permissionAlreadyChecked = false}) async {
+    // ignore: avoid_print
+    print('[SoundPlayer] startRecord begin perm=$permissionAlreadyChecked');
     try {
-      if (!await hasMicrophonePermission()) {
-        if (kDebugMode) {
-          debugPrint('SoundPlayer: skip startRecord — microphone not granted');
-        }
+      if (!permissionAlreadyChecked && !await hasMicrophonePermission()) {
+        // ignore: avoid_print
+        print('[SoundPlayer] startRecord skip — no mic permission');
         return false;
       }
       await initSoundPlayer();
       if (!isInit) {
+        // ignore: avoid_print
+        print('[SoundPlayer] startRecord fail — not isInit');
         return false;
       }
       if (_activeMessageKeys.isNotEmpty || _audioPlayer.playing) {
+        // ignore: avoid_print
+        print('[SoundPlayer] startRecord — stopping playback first');
         await _stopInternal(resetCancel: true);
       }
       if (!_usingRecordSession) {
+        // ignore: avoid_print
+        print('[SoundPlayer] startRecord — ensuring record session');
         await _ensureRecordSession();
       }
+      // ignore: avoid_print
+      print('[SoundPlayer] startRecord — calling _recorder.start()');
       _recorder.start();
+      // ignore: avoid_print
+      print('[SoundPlayer] startRecord — _recorder.start() returned');
       return true;
     } catch (e) {
       if (kDebugMode) {

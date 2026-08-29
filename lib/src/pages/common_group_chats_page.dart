@@ -102,8 +102,7 @@ class _CommonGroupChatsPageState extends State<CommonGroupChatsPage> {
     final name = _displayName(group);
     final pinyin = PinyinHelper.getPinyinE(name).toLowerCase();
     final short = PinyinHelper.getShortPinyin(name).toLowerCase();
-    final haystack =
-        '${group.groupId} $name $pinyin $short'.toLowerCase();
+    final haystack = '${group.groupId} $name $pinyin $short'.toLowerCase();
     return haystack.contains(keyword);
   }
 
@@ -235,7 +234,7 @@ class _CommonGroupChatsPageState extends State<CommonGroupChatsPage> {
       ));
       return;
     }
-    await Navigator.of(context).push(appChatRoute(conversation));
+    await openOrReuseAppChat(context, conversation);
   }
 
   Widget _buildRow({

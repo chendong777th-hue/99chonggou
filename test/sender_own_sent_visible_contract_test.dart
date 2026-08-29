@@ -368,7 +368,7 @@ void main() {
     expect(pagination.contains('mergeC2cOfficialOlderPage'), isTrue);
     expect(pagination.contains('load_chat_record_c2c_official_cursor'), isTrue);
     final paginationCommit = pagination.indexOf(
-      'model.globalModel.setMessageList(',
+      'model.globalModel.completeHistoryReconciliation(',
     );
     final paginationRemember = pagination.indexOf(
       'model._rememberC2cSdkOlderPage(response.messageList)',
@@ -460,5 +460,8 @@ void main() {
     final body = source.substring(start, end);
     expect(body.contains('haveMoreLatestData'), isTrue);
     expect(body.contains('reloadNewestMessageWindow'), isTrue);
+    expect(body.contains('var reloadedNewest = false;'), isTrue);
+    expect(body.contains('if (reloadedNewest && !readingHistory)'), isTrue);
+    expect(body.contains("'reload_newest_pin_skipped'"), isTrue);
   });
 }

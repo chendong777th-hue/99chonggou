@@ -5,7 +5,9 @@ import 'package:flutter/widgets.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_request_notice_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_entry_settings_service.dart';
-import 'package:tencent_cloud_chat_demo/src/services/group_notice_unread_service.dart';
+import "package:tencent_cloud_chat_demo/src/services/group_notice_unread_service.dart";
+import "package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_unread_aggregate.dart";
+import "package:tencent_cloud_chat_demo/src/services/local_system_notification_service.dart";
 import 'package:tencent_cloud_chat_demo/src/utils/app_badge_unread_utils.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/core/core_services.dart';
 import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
@@ -37,11 +39,10 @@ class AppBadgeSyncService {
     }
     _listenersAttached = true;
     void onUnreadSourcesChanged() {
-      if (_isBackground) {
-        unawaited(syncBadgeIfNeeded(reason: 'unread_source_changed'));
-      }
+      unawaited(syncBadgeIfNeeded(reason: "unread_source_changed"));
     }
 
+    ConversationUnreadAggregate.instance.addListener(onUnreadSourcesChanged);
     ConversationListNotifier.instance.addListener(onUnreadSourcesChanged);
     archivedConversationC2cIDsNotifier.addListener(onUnreadSourcesChanged);
     archivedConversationGroupIDsNotifier.addListener(onUnreadSourcesChanged);
@@ -56,11 +57,13 @@ class AppBadgeSyncService {
     if (kIsWeb || !PlatformUtils().isMobile) {
       return;
     }
-    _lastSyncedCount = 0;
+    final count = AppBadgeUnreadUtils.totalAppBadgeUnreadCount();
+    _lastSyncedCount = count;
     try {
       await TIMUIKitCore.getInstance().setOfflinePushStatus(
         status: AppStatus.foreground,
       );
+      await LocalSystemNotificationService.instance.setAppBadge(count);
       if (kDebugMode) {
         debugPrint('AppBadgeSync: foreground reason=$reason');
       }
@@ -82,7 +85,7 @@ class AppBadgeSyncService {
     required String reason,
     bool force = false,
   }) async {
-    if (kIsWeb || !PlatformUtils().isMobile || !_isBackground) {
+    if (kIsWeb || !PlatformUtils().isMobile) {
       return;
     }
     final count = AppBadgeUnreadUtils.totalAppBadgeUnreadCount();
@@ -90,6 +93,10 @@ class AppBadgeSyncService {
       return;
     }
     _lastSyncedCount = count;
+    await LocalSystemNotificationService.instance.setAppBadge(count);
+    if (!_isBackground) {
+      return;
+    }
     try {
       await TIMUIKitCore.getInstance().setOfflinePushStatus(
         status: AppStatus.background,

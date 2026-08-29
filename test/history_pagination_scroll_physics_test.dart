@@ -7,6 +7,7 @@ class _FixedMetrics with ScrollMetrics {
     required this.pixels,
     required this.minScrollExtent,
     required this.maxScrollExtent,
+    this.axisDirection = AxisDirection.down,
   });
 
   @override
@@ -22,7 +23,7 @@ class _FixedMetrics with ScrollMetrics {
   double get viewportDimension => 600;
 
   @override
-  AxisDirection get axisDirection => AxisDirection.down;
+  final AxisDirection axisDirection;
 
   @override
   bool get outOfRange => false;
@@ -95,6 +96,90 @@ void main() {
       expect(adjusted, closeTo(1150, 0.01));
     });
 
+    test('keeps reverse-list pixels stable while prepend grows extent', () {
+      final physics = HistoryPaginationScrollPhysics(
+        shouldCompensate: () => true,
+      );
+      final oldPosition = _FixedMetrics(
+        pixels: 2200,
+        minScrollExtent: 0,
+        maxScrollExtent: 2600,
+        axisDirection: AxisDirection.up,
+      );
+      final newPosition = _FixedMetrics(
+        pixels: 2200,
+        minScrollExtent: 0,
+        maxScrollExtent: 3400,
+        axisDirection: AxisDirection.up,
+      );
+
+      final adjusted = physics.adjustPositionForNewDimensions(
+        oldPosition: oldPosition,
+        newPosition: newPosition,
+        isScrolling: false,
+        velocity: 0,
+      );
+
+      expect(adjusted, closeTo(2200, 0.01));
+    });
+
+    test('preserves reverse-list rows when newest messages are inserted', () {
+      final physics = HistoryPaginationScrollPhysics(
+        shouldCompensate: () => false,
+        shouldPreserveNewestInsertExtent: () => true,
+      );
+      const oldPosition = _FixedMetrics(
+        pixels: 0,
+        minScrollExtent: 0,
+        maxScrollExtent: 2600,
+        axisDirection: AxisDirection.up,
+      );
+      const newPosition = _FixedMetrics(
+        pixels: 0,
+        minScrollExtent: 0,
+        maxScrollExtent: 2840,
+        axisDirection: AxisDirection.up,
+      );
+
+      final adjusted = physics.adjustPositionForNewDimensions(
+        oldPosition: oldPosition,
+        newPosition: newPosition,
+        isScrolling: false,
+        velocity: 0,
+      );
+
+      expect(adjusted, closeTo(240, 0.01));
+    });
+
+    test('does not preserve newest insert extent after restore lock clears',
+        () {
+      final physics = HistoryPaginationScrollPhysics(
+        shouldCompensate: () => false,
+        shouldPreserveNewestInsertExtent: () => false,
+      );
+      const oldPosition = _FixedMetrics(
+        pixels: 0,
+        minScrollExtent: 0,
+        maxScrollExtent: 2600,
+        axisDirection: AxisDirection.up,
+      );
+      const newPosition = _FixedMetrics(
+        pixels: 0,
+        minScrollExtent: 0,
+        maxScrollExtent: 2840,
+        axisDirection: AxisDirection.up,
+      );
+
+      final adjusted = physics.adjustPositionForNewDimensions(
+        oldPosition: oldPosition,
+        newPosition: newPosition,
+        isScrolling: false,
+        velocity: 0,
+      );
+
+      expect(adjusted, 0);
+    });
+
     test('does not compensate prepend growth when overscrolling past top', () {
       var compensate = true;
       final physics = HistoryPaginationScrollPhysics(
@@ -148,8 +233,8 @@ void main() {
     });
 
     test('computeExtentDeltaRestorePixels matches prepend growth', () {
-      final restored = HistoryPaginationScrollPhysics
-          .computeExtentDeltaRestorePixels(
+      final restored =
+          HistoryPaginationScrollPhysics.computeExtentDeltaRestorePixels(
         anchorPixels: 22521.44,
         anchorMaxExtent: 22437.92,
         newMaxScrollExtent: 26185.56,
@@ -173,6 +258,32 @@ void main() {
         ),
         isFalse,
       );
+    });
+
+    test('viewport anchor correction respects reverse vertical axis', () {
+      final restored =
+          HistoryPaginationScrollPhysics.restorePixelsForViewportAnchor(
+        axisDirection: AxisDirection.up,
+        currentPixels: 1800,
+        currentAnchorTop: 260,
+        desiredAnchorTop: 100,
+        minScrollExtent: 0,
+        maxScrollExtent: 3000,
+      );
+      expect(restored, 1640);
+    });
+
+    test('viewport anchor correction respects normal vertical axis', () {
+      final restored =
+          HistoryPaginationScrollPhysics.restorePixelsForViewportAnchor(
+        axisDirection: AxisDirection.down,
+        currentPixels: 1800,
+        currentAnchorTop: 260,
+        desiredAnchorTop: 100,
+        minScrollExtent: 0,
+        maxScrollExtent: 3000,
+      );
+      expect(restored, 1960);
     });
   });
 }

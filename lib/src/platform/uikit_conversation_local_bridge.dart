@@ -30,13 +30,10 @@ class UikitConversationLocalBridge {
         ),
       );
     };
-    TUIConversationViewModelHooks.onConversationsChanged = (conversations) {
-      unawaited(
-        ConversationSyncService.instance.onViewModelConversationsChanged(
-          conversations,
-        ),
-      );
-    };
+    // SDK realtime callbacks are registered directly by ConversationSyncService.
+    // UIKit's changed hook mirrors those same objects and must not be a second
+    // persistence writer. Page-loaded remains the UIKit-owned pagination source.
+    TUIConversationViewModelHooks.onConversationsChanged = null;
     TUIConversationViewModelHooks.onConversationsDeleted = (conversationIds) {
       unawaited(
         ConversationSyncService.instance.onViewModelConversationsDeleted(

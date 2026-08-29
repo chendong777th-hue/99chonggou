@@ -25,7 +25,9 @@ void main() {
       'lib/src/services/voice_output_route_service.dart',
     ).readAsStringSync();
     final activate = source.indexOf('await session.setActive(true)');
-    final nativeRoute = source.indexOf('await _applyNativeRoute(route)');
+    final nativeRoute = source.indexOf(
+      'await _applyNativeRoute(requestedRoute)',
+    );
 
     expect(activate, greaterThan(-1));
     expect(nativeRoute, greaterThan(activate));
@@ -112,6 +114,29 @@ void main() {
       'third_party/tencent_cloud_chat_uikit/lib/ui/utils/sound_record.dart',
     ).readAsStringSync();
     expect(source, contains('if (_applyingRouteChange) {\n        return;'));
+  });
+
+  test('legacy iOS recorder/player do not mutate the shared audio session', () {
+    for (final path in <String>[
+      'third_party/flutter_plugin_record_plus/ios/Classes/DPAudioRecorder.m',
+      'third_party/flutter_plugin_record_plus/ios/Classes/DPAudioPlayer.m',
+    ]) {
+      final source = File(path).readAsStringSync();
+      expect(source, isNot(contains('setCategory:')));
+      expect(source, isNot(contains('setActive:')));
+      expect(source, isNot(contains('overrideOutputAudioPort(')));
+    }
+  });
+
+  test('CallKit playAndRecord configuration does not request A2DP', () {
+    final source = File(
+      'ios/Runner/SelfHostedVoipCallKit.swift',
+    ).readAsStringSync();
+    final start = source.indexOf('private func configureAudioSession()');
+    final end = source.indexOf('private func deactivateAudioSession()', start);
+    expect(start, greaterThan(-1));
+    expect(end, greaterThan(start));
+    expect(source.substring(start, end), isNot(contains('allowBluetoothA2DP')));
   });
 
   test('tooltip rebuilds speaker/earpiece labels from route notifier', () {

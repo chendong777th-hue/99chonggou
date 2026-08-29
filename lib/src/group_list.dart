@@ -94,7 +94,7 @@ class _GroupListState extends State<GroupList> {
     if (res.code == 0) {
       final conversationData = res.data;
       if (conversationData != null && context.mounted) {
-        Navigator.push(context, appChatRoute(conversationData));
+        openOrReuseAppChat(context, conversationData);
       }
     }
   }
@@ -157,8 +157,9 @@ class _GroupListState extends State<GroupList> {
     final faceUrl = skeleton.avatarUrl;
     final isDesktopScreen = kIsWeb ||
         TUIKitScreenUtils.getFormFactor(context) == DeviceType.Desktop;
-    final itemBackgroundColor =
-        theme.conversationItemBgColor ?? theme.weakBackgroundColor ?? Colors.white;
+    final itemBackgroundColor = theme.conversationItemBgColor ??
+        theme.weakBackgroundColor ??
+        Colors.white;
     final memberCount = skeleton.memberCount;
     final i18n = AppI18n.of(context);
     final memberCountLabel = i18n.format(
@@ -353,8 +354,8 @@ class _GroupListState extends State<GroupList> {
 
   Widget _buildSearchBar(AppI18n i18n) {
     final theme = Provider.of<DefaultThemeData>(context).theme;
-    final iconColor =
-        (theme.appbarTextColor ?? const Color(0xFF979797)).withValues(alpha: 0.7);
+    final iconColor = (theme.appbarTextColor ?? const Color(0xFF979797))
+        .withValues(alpha: 0.7);
     final textColor = theme.darkTextColor ?? Colors.black;
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
@@ -432,7 +433,8 @@ class _GroupListState extends State<GroupList> {
               ko: '그룹',
             ),
             style: TextStyle(
-              color: theme.appbarTextColor ?? theme.darkTextColor ?? Colors.black,
+              color:
+                  theme.appbarTextColor ?? theme.darkTextColor ?? Colors.black,
               fontSize: 18,
               fontWeight: FontWeight.w700,
             ),

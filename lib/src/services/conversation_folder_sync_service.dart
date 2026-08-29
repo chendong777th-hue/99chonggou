@@ -8,6 +8,7 @@ import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.
 import 'package:tencent_cloud_chat_demo/src/services/conversation_folder_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_realtime/friend_realtime_event.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/archived_conversation_ref.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
@@ -29,27 +30,56 @@ class ConversationFolderSyncService {
   static const _uuid = Uuid();
 
   DateTime? _lastLoginSyncAt;
+  SessionIdentity? _lastLoginSyncIdentity;
+  SessionIdentity? _loginSyncIdentity;
   Future<void>? _loginSyncInFlight;
+  SessionIdentity? _refreshIdentity;
   Future<void>? _refreshInFlight;
 
   Future<void> syncOnLogin({bool force = false}) {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) {
+      return Future<void>.value();
+    }
     if (!force &&
+        _lastLoginSyncIdentity == identity &&
         _lastLoginSyncAt != null &&
         DateTime.now().difference(_lastLoginSyncAt!) < _loginSyncCooldown) {
       return Future<void>.value();
     }
-    return _loginSyncInFlight ??= _syncOnLogin(force: force).whenComplete(() {
-      _loginSyncInFlight = null;
+    final running = _loginSyncInFlight;
+    if (running != null && _loginSyncIdentity == identity) {
+      return running;
+    }
+    late final Future<void> task;
+    task = _syncOnLogin(force: force, identity: identity).whenComplete(() {
+      if (identical(_loginSyncInFlight, task)) {
+        _loginSyncInFlight = null;
+        _loginSyncIdentity = null;
+      }
     });
+    _loginSyncIdentity = identity;
+    _loginSyncInFlight = task;
+    return task;
   }
 
-  Future<void> _syncOnLogin({required bool force}) async {
+  Future<void> _syncOnLogin({
+    required bool force,
+    required SessionIdentity identity,
+  }) async {
     try {
-      await ConversationFolderStore.instance.ensureLoaded();
-      await _migrateLocalToServerIfNeeded();
-      await refreshFromServer();
-      await _migrateFoldersToSharedScopeIfNeeded();
+      await ConversationFolderStore.instance.ensureLoaded(
+        expectedIdentity: identity,
+      );
+      if (!_isCurrent(identity)) return;
+      await _migrateLocalToServerIfNeeded(identity);
+      if (!_isCurrent(identity)) return;
+      await refreshFromServer(expectedIdentity: identity);
+      if (!_isCurrent(identity)) return;
+      await _migrateFoldersToSharedScopeIfNeeded(identity);
+      if (!_isCurrent(identity)) return;
       _lastLoginSyncAt = DateTime.now();
+      _lastLoginSyncIdentity = identity;
     } catch (e, st) {
       debugPrint('ConversationFolderSync: login sync failed: $e\n$st');
       if (force) {
@@ -59,25 +89,47 @@ class ConversationFolderSyncService {
   }
 
   /// 将历史 c2c/group 分组元数据重写为 scope=all（后端需已放宽）。
-  Future<void> _migrateFoldersToSharedScopeIfNeeded() async {
-    if (await _isSharedScopeMigrated()) {
+  Future<void> _migrateFoldersToSharedScopeIfNeeded(
+    SessionIdentity identity,
+  ) async {
+    if (await _isSharedScopeMigrated(identity)) {
       return;
     }
+    if (!_isCurrent(identity)) return;
     final folders = ConversationFolderStore.instance.folders;
     for (final folder in folders) {
-      await _reportUpsertFolder(folder);
+      await _reportUpsertFolder(folder, identity: identity);
+      if (!_isCurrent(identity)) return;
     }
-    await _markSharedScopeMigrated();
+    await _markSharedScopeMigrated(identity);
   }
 
-  Future<void> refreshFromServer() {
-    return _refreshInFlight ??= _refreshFromServerCore().whenComplete(() {
-      _refreshInFlight = null;
+  Future<void> refreshFromServer({SessionIdentity? expectedIdentity}) {
+    final identity =
+        expectedIdentity ?? SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty || !_isCurrent(identity)) {
+      return Future<void>.value();
+    }
+    final running = _refreshInFlight;
+    if (running != null && _refreshIdentity == identity) {
+      return running;
+    }
+    late final Future<void> task;
+    task = _refreshFromServerCore(identity).whenComplete(() {
+      if (identical(_refreshInFlight, task)) {
+        _refreshInFlight = null;
+        _refreshIdentity = null;
+      }
     });
+    _refreshIdentity = identity;
+    _refreshInFlight = task;
+    return task;
   }
 
-  Future<void> _refreshFromServerCore() async {
+  Future<void> _refreshFromServerCore(SessionIdentity identity) async {
+    if (!_isCurrent(identity)) return;
     final page = await ConversationFolderApi.instance.fetch();
+    if (!_isCurrent(identity)) return;
     final folders = page.folders
         .map(ConversationFolder.fromDto)
         .where((folder) => folder.folderId.isNotEmpty && folder.name.isNotEmpty)
@@ -85,18 +137,29 @@ class ConversationFolderSyncService {
     // 服务端历史脏数据可能一会话多组：本地折叠并尽量上报移出。
     final collapsed =
         ConversationFolderStore.collapseExclusiveMembership(folders);
-    await ConversationFolderStore.instance.replaceAll(collapsed.folders);
-    await _reportExclusiveMembershipRemovals(collapsed.removedByFolderId);
+    await ConversationFolderStore.instance.replaceAll(
+      collapsed.folders,
+      expectedIdentity: identity,
+    );
+    if (!_isCurrent(identity)) return;
+    await _reportExclusiveMembershipRemovals(
+      collapsed.removedByFolderId,
+      identity: identity,
+    );
+    if (!_isCurrent(identity)) return;
     ConversationRefreshBus.instance.requestRefresh(
       reason: 'conversation_folder_remote',
     );
   }
 
   Future<void> handleRealtimeEvent(FriendRealtimeEvent event) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty || !_isCurrent(identity)) return;
     if (event.event.trim() != 'conversation_folder_changed') {
       return;
     }
-    await refreshFromServer();
+    await refreshFromServer(expectedIdentity: identity);
+    if (!_isCurrent(identity)) return;
     ConversationRefreshBus.instance.requestRefresh(
       reason: event.folderBatch == true
           ? 'conversation_folder_remote_batch'
@@ -110,11 +173,18 @@ class ConversationFolderSyncService {
   Future<ConversationFolder> createFolder({
     required String name,
   }) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty || !_isCurrent(identity)) {
+      throw StateError('No active account session');
+    }
     final trimmed = name.trim();
     if (trimmed.isEmpty) {
       throw ArgumentError('name is required');
     }
-    await ConversationFolderStore.instance.ensureLoaded();
+    await ConversationFolderStore.instance.ensureLoaded(
+      expectedIdentity: identity,
+    );
+    if (!_isCurrent(identity)) throw StateError('Account session changed');
     if (ConversationFolderStore.instance.isNameTaken(trimmed)) {
       throw DuplicateConversationFolderNameException(trimmed);
     }
@@ -131,9 +201,13 @@ class ConversationFolderSyncService {
       updatedAt: DateTime.now().millisecondsSinceEpoch,
       createdAt: DateTime.now().millisecondsSinceEpoch,
     );
-    await ConversationFolderStore.instance.upsertFolder(folder);
+    await ConversationFolderStore.instance.upsertFolder(
+      folder,
+      expectedIdentity: identity,
+    );
+    if (!_isCurrent(identity)) return folder;
     // 后端已上线：创建后等待上报，便于多端尽快对齐；失败仍保留本地。
-    await _reportUpsertFolder(folder);
+    await _reportUpsertFolder(folder, identity: identity);
     return ConversationFolderStore.instance.folderById(folder.folderId) ??
         folder;
   }
@@ -142,6 +216,8 @@ class ConversationFolderSyncService {
     required String folderId,
     required String name,
   }) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty || !_isCurrent(identity)) return;
     final folder = ConversationFolderStore.instance.folderById(folderId);
     if (folder == null) {
       return;
@@ -166,18 +242,28 @@ class ConversationFolderSyncService {
       name: trimmed,
       updatedAt: DateTime.now().millisecondsSinceEpoch,
     );
-    await ConversationFolderStore.instance.upsertFolder(updated);
-    await _reportUpsertFolder(updated);
+    await ConversationFolderStore.instance.upsertFolder(
+      updated,
+      expectedIdentity: identity,
+    );
+    if (!_isCurrent(identity)) return;
+    await _reportUpsertFolder(updated, identity: identity);
   }
 
   Future<void> deleteFolder(String folderId) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty || !_isCurrent(identity)) return;
     final id = folderId.trim();
     if (id.isEmpty) {
       return;
     }
-    await ConversationFolderStore.instance.removeFolder(id);
+    await ConversationFolderStore.instance.removeFolder(
+      id,
+      expectedIdentity: identity,
+    );
     unawaited(() async {
       try {
+        if (!_isCurrent(identity)) return;
         await ConversationFolderApi.instance.deleteFolder(id);
       } catch (e) {
         debugPrint('ConversationFolderSync: delete failed: $e');
@@ -192,6 +278,8 @@ class ConversationFolderSyncService {
     required String folderId,
     required List<V2TimConversation> conversations,
   }) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty || !_isCurrent(identity)) return;
     final folder = ConversationFolderStore.instance.folderById(folderId);
     if (folder == null || conversations.isEmpty) {
       return;
@@ -246,13 +334,16 @@ class ConversationFolderSyncService {
         conversationId: ref.conversationId,
         folderIds: {folder.folderId},
         memberUpdatedAt: stamp,
+        expectedIdentity: identity,
       );
+      if (!_isCurrent(identity)) return;
     }
     final touched =
         ConversationFolderStore.instance.folderById(folder.folderId);
     if (touched != null) {
       await ConversationFolderStore.instance.upsertFolder(
         touched.copyWith(updatedAt: stamp),
+        expectedIdentity: identity,
       );
     }
 
@@ -264,12 +355,15 @@ class ConversationFolderSyncService {
     await ArchivedConversationSyncService.instance.setArchivedForConversations(
       conversationsToUnarchive,
       archived: false,
+      expectedIdentity: identity,
     );
+    if (!_isCurrent(identity)) return;
 
     final joinOk = await _reportMembers(
       folderId: folder.folderId,
       refs: refs,
       inFolder: true,
+      identity: identity,
     );
     if (!joinOk) {
       // 先恢复归档（会顺带清当前分组成员），再还原分组快照。
@@ -278,9 +372,13 @@ class ConversationFolderSyncService {
             .setArchivedForConversations(
           previouslyArchived,
           archived: true,
+          expectedIdentity: identity,
         );
       }
-      await ConversationFolderStore.instance.replaceAll(snapshot);
+      await ConversationFolderStore.instance.replaceAll(
+        snapshot,
+        expectedIdentity: identity,
+      );
       debugPrint(
         'ConversationFolderSync: join failed, membership+archive rolled back',
       );
@@ -293,6 +391,7 @@ class ConversationFolderSyncService {
         refs: entry.value,
         inFolder: false,
         retries: 2,
+        identity: identity,
       );
       if (!leaveOk) {
         debugPrint(
@@ -307,6 +406,8 @@ class ConversationFolderSyncService {
     required String folderId,
     required List<V2TimConversation> conversations,
   }) async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty || !_isCurrent(identity)) return;
     final folder = ConversationFolderStore.instance.folderById(folderId);
     if (folder == null || conversations.isEmpty) {
       return;
@@ -337,23 +438,33 @@ class ConversationFolderSyncService {
         members: members,
         updatedAt: DateTime.now().millisecondsSinceEpoch,
       ),
+      expectedIdentity: identity,
     );
+    if (!_isCurrent(identity)) return;
     await _reportMembers(
       folderId: folder.folderId,
       refs: refs,
       inFolder: false,
       retries: 2,
+      identity: identity,
     );
   }
 
   /// 归档前调用：从全部分组移除这些会话（本地 + 上报）。
   Future<void> removeConversationsFromAllFolders(
-    List<V2TimConversation> conversations,
-  ) async {
+    List<V2TimConversation> conversations, {
+    SessionIdentity? expectedIdentity,
+  }) async {
+    final identity =
+        expectedIdentity ?? SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty || !_isCurrent(identity)) return;
     if (conversations.isEmpty) {
       return;
     }
-    await ConversationFolderStore.instance.ensureLoaded();
+    await ConversationFolderStore.instance.ensureLoaded(
+      expectedIdentity: identity,
+    );
+    if (!_isCurrent(identity)) return;
     final byFolder = <String, List<ArchivedConversationRef>>{};
     final touchedConversationIds = <String>{};
     for (final conversation in conversations) {
@@ -375,6 +486,7 @@ class ConversationFolderSyncService {
     for (final conversationId in touchedConversationIds) {
       await ConversationFolderStore.instance.removeConversationFromAllFolders(
         conversationId,
+        expectedIdentity: identity,
       );
     }
     for (final entry in byFolder.entries) {
@@ -383,6 +495,7 @@ class ConversationFolderSyncService {
           folderId: entry.key,
           refs: entry.value,
           inFolder: false,
+          identity: identity,
         ),
       );
     }
@@ -390,12 +503,19 @@ class ConversationFolderSyncService {
 
   Future<void> clearSession() async {
     _lastLoginSyncAt = null;
+    _lastLoginSyncIdentity = null;
     _loginSyncInFlight = null;
+    _loginSyncIdentity = null;
     _refreshInFlight = null;
+    _refreshIdentity = null;
     await ConversationFolderStore.instance.clearSession();
   }
 
-  Future<void> _reportUpsertFolder(ConversationFolder folder) async {
+  Future<void> _reportUpsertFolder(
+    ConversationFolder folder, {
+    SessionIdentity? identity,
+  }) async {
+    if (identity != null && !_isCurrent(identity)) return;
     try {
       final result = await ConversationFolderApi.instance.upsertFolder(
         folderId: folder.folderId,
@@ -403,13 +523,14 @@ class ConversationFolderSyncService {
         scope: ConversationFolder.sharedScope,
         sortOrder: folder.sortOrder,
       );
+      if (identity != null && !_isCurrent(identity)) return;
       final serverFolder = result.folder;
       if (serverFolder == null || serverFolder.folderId.isEmpty) {
         return;
       }
       if (serverFolder.folderId != folder.folderId) {
         // 服务端分配了新 ID：全量刷新对齐。
-        await refreshFromServer();
+        await refreshFromServer(expectedIdentity: identity);
         return;
       }
       // 合并服务端时间戳；若响应带 members 则一并覆盖。
@@ -419,6 +540,7 @@ class ConversationFolderSyncService {
           : Map<String, int?>.from(merged.members);
       await ConversationFolderStore.instance.upsertFolder(
         merged.copyWith(members: keepMembers),
+        expectedIdentity: identity,
       );
     } catch (e, st) {
       debugPrint('ConversationFolderSync: upsert folder failed: $e\n$st');
@@ -433,6 +555,7 @@ class ConversationFolderSyncService {
     required List<ArchivedConversationRef> refs,
     required bool inFolder,
     int retries = 0,
+    SessionIdentity? identity,
   }) async {
     if (refs.isEmpty) {
       return true;
@@ -442,6 +565,7 @@ class ConversationFolderSyncService {
     while (attempt < maxAttempts) {
       attempt += 1;
       try {
+        if (identity != null && !_isCurrent(identity)) return false;
         final result = await ConversationFolderApi.instance.updateMembers(
           folderId: folderId,
           members: refs
@@ -456,6 +580,7 @@ class ConversationFolderSyncService {
               .toList(growable: false),
           inFolder: inFolder,
         );
+        if (identity != null && !_isCurrent(identity)) return false;
         if (!result.ok) {
           debugPrint(
             'ConversationFolderSync: members report ok:false '
@@ -497,16 +622,16 @@ class ConversationFolderSyncService {
   }
 
   Future<void> _reportExclusiveMembershipRemovals(
-    Map<String, List<String>> removedByFolderId,
-  ) async {
+    Map<String, List<String>> removedByFolderId, {
+    SessionIdentity? identity,
+  }) async {
     if (removedByFolderId.isEmpty) {
       return;
     }
     for (final entry in removedByFolderId.entries) {
       final refs = <ArchivedConversationRef>[];
       for (final conversationId in entry.value) {
-        final ref =
-            ArchivedConversationRef.fromConversationId(conversationId);
+        final ref = ArchivedConversationRef.fromConversationId(conversationId);
         if (ref != null) {
           refs.add(ref);
         }
@@ -519,6 +644,7 @@ class ConversationFolderSyncService {
         refs: refs,
         inFolder: false,
         retries: 2,
+        identity: identity,
       );
       if (!ok) {
         debugPrint(
@@ -528,10 +654,11 @@ class ConversationFolderSyncService {
     }
   }
 
-  Future<void> _migrateLocalToServerIfNeeded() async {
-    if (await _isMigrated()) {
+  Future<void> _migrateLocalToServerIfNeeded(SessionIdentity identity) async {
+    if (await _isMigrated(identity)) {
       return;
     }
+    if (!_isCurrent(identity)) return;
     final local = ConversationFolderStore.instance.foldersNotifier.value;
     if (local.isNotEmpty) {
       try {
@@ -539,42 +666,72 @@ class ConversationFolderSyncService {
             ConversationFolderStore.collapseExclusiveMembership(local);
         if (collapsed.removedByFolderId.isNotEmpty) {
           await ConversationFolderStore.instance
-              .replaceAll(collapsed.folders);
+              .replaceAll(collapsed.folders, expectedIdentity: identity);
         }
+        if (!_isCurrent(identity)) return;
         await ConversationFolderApi.instance.replaceAll(
           collapsed.folders
               .map((folder) => folder.toDto())
               .toList(growable: false),
         );
+        if (!_isCurrent(identity)) return;
       } catch (e, st) {
         debugPrint('ConversationFolderSync: migrate failed: $e\n$st');
         // 迁移失败不阻断登录；下次仍可重试。
         return;
       }
     }
-    await _markMigrated();
+    await _markMigrated(identity);
   }
 
-  String _prefsScope() => ContactSocialCacheStore.accountScope();
+  bool _isCurrent(SessionIdentity identity) =>
+      SessionIdentityService.instance.isCurrent(identity);
 
-  Future<bool> _isMigrated() async {
+  String _prefsScope(SessionIdentity identity) =>
+      ContactSocialCacheStore.accountScopeForUserId(identity.ownerUserId);
+
+  Future<bool> _isMigrated(SessionIdentity identity) async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool('$_migratedPrefix${_prefsScope()}') == true;
+    if (!_isCurrent(identity)) return true;
+    return prefs.getBool('$_migratedPrefix${_prefsScope(identity)}') == true;
   }
 
-  Future<void> _markMigrated() async {
+  Future<void> _markMigrated(SessionIdentity identity) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('$_migratedPrefix${_prefsScope()}', true);
+    if (!_isCurrent(identity)) return;
+    await prefs.setBool('$_migratedPrefix${_prefsScope(identity)}', true);
   }
 
-  Future<bool> _isSharedScopeMigrated() async {
+  Future<bool> _isSharedScopeMigrated(SessionIdentity identity) async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool('$_sharedScopeMigratedPrefix${_prefsScope()}') == true;
+    if (!_isCurrent(identity)) return true;
+    return prefs.getBool(
+          '$_sharedScopeMigratedPrefix${_prefsScope(identity)}',
+        ) ==
+        true;
   }
 
-  Future<void> _markSharedScopeMigrated() async {
+  Future<void> _markSharedScopeMigrated(SessionIdentity identity) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('$_sharedScopeMigratedPrefix${_prefsScope()}', true);
+    if (!_isCurrent(identity)) return;
+    await prefs.setBool(
+      '$_sharedScopeMigratedPrefix${_prefsScope(identity)}',
+      true,
+    );
+  }
+
+  Future<void> clearForOwner(String? ownerUserId) async {
+    final scope = ContactSocialCacheStore.accountScopeForUserId(ownerUserId);
+    if (scope.isEmpty || scope == '_guest') {
+      return;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('$_migratedPrefix$scope');
+    await prefs.remove('$_sharedScopeMigratedPrefix$scope');
+    await ConversationFolderStore.instance.clearForOwner(ownerUserId);
+    if (_prefsScope(SessionIdentityService.instance.capture()) == scope) {
+      await clearSession();
+    }
   }
 }
 

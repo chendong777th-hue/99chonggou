@@ -8,12 +8,14 @@ import 'package:tencent_cloud_chat_demo/src/models/me_group_record.dart';
 import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_member_local_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_local/group_member_realtime_cursor_policy.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_membership_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 
 /// 群成员流游标增量补偿（按群）。
 ///
-/// `GET /me/groups/{id}/members/changes?since_seq=` → upsert/删除成员 + 权威人数。
+/// `GET /me/groups/{id}/members/changes?since_seq=` → 仅 upsert/删除成员。
+/// 群名和人数由群详情刷新统一写入 [GroupLocalStore]。
 class GroupMemberIncrementalSyncService {
   GroupMemberIncrementalSyncService._();
 
@@ -95,7 +97,22 @@ class GroupMemberIncrementalSyncService {
     }
   }
 
-  /// TCP `detail.seq`（成员流，勿用 groupSeq）前进游标。
+  Future<bool> shouldApplyRealtimeSeq({
+    required String groupId,
+    required int seq,
+  }) async {
+    if (seq <= 0) {
+      return true;
+    }
+    final current = await readCursor(groupId: groupId);
+    return GroupMemberRealtimeCursorPolicy.shouldApply(
+      cursor: current,
+      seq: seq,
+    );
+  }
+
+  /// TCP `detail.seq`（成员流，勿用 groupSeq）仅连续时前进游标。
+  /// 若出现缺口，保留旧游标，让 Difference 接口补齐缺失事件。
   Future<void> noteRealtimeSeq({
     required String groupId,
     required int seq,
@@ -109,7 +126,10 @@ class GroupMemberIncrementalSyncService {
       return;
     }
     final current = await readCursor(groupId: gid, ownerUserId: owner);
-    if (seq > current) {
+    if (GroupMemberRealtimeCursorPolicy.shouldAdvance(
+      cursor: current,
+      seq: seq,
+    )) {
       await writeCursor(seq, groupId: gid, ownerUserId: owner);
     }
   }
@@ -266,13 +286,6 @@ class GroupMemberIncrementalSyncService {
           }
         }
       }
-      if (page.memberCount > 0) {
-        await GroupMembershipSyncService.instance.patchMemberCountForSync(
-          groupId: groupId,
-          memberCount: page.memberCount,
-        );
-        applied = true;
-      }
       final next = page.nextSeq > since ? page.nextSeq : since;
       if (next != since) {
         since = next;
@@ -325,12 +338,6 @@ class GroupMemberIncrementalSyncService {
         groupId: gid,
         userIds: <String>[uid],
       );
-      if (event.memberCount > 0) {
-        await GroupMembershipSyncService.instance.patchMemberCountForSync(
-          groupId: gid,
-          memberCount: event.memberCount,
-        );
-      }
       return true;
     }
     if (event.isUpserted) {
@@ -343,12 +350,6 @@ class GroupMemberIncrementalSyncService {
         groupId: gid,
         records: <GroupMemberRecord>[record],
       );
-      if (event.memberCount > 0) {
-        await GroupMembershipSyncService.instance.patchMemberCountForSync(
-          groupId: gid,
-          memberCount: event.memberCount,
-        );
-      }
       return true;
     }
     return false;

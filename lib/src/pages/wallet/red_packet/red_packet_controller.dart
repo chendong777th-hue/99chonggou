@@ -263,21 +263,21 @@ class RedPacketController extends ChangeNotifier {
     if (type == RpType.exclusive && isSelfUserId(v.userId)) {
       return;
     }
+    final publicName = TransferPartyNameResolver.nicknameOf(
+      userId: v.userId,
+      nickHint: v.publicNameOrFallback,
+    );
+    final nextReceiverName =
+        publicName.isNotEmpty ? publicName : v.publicNameOrFallback;
     if (receiverId == v.userId &&
-        receiverName == v.name &&
+        receiverName == nextReceiverName &&
         receiverAvatar == v.avatar) {
       unawaited(_enrichReceiverAvatar(v.userId, v.avatar));
       unawaited(_enrichReceiverNickname(v.userId));
       return;
     }
     receiverId = v.userId;
-    receiverName = TransferPartyNameResolver.nicknameOf(
-      userId: v.userId,
-      nickHint: v.name,
-    );
-    if (receiverName.isEmpty) {
-      receiverName = v.name;
-    }
+    receiverName = nextReceiverName;
     receiverAvatar = UserAvatarHelper.usableAvatarOrEmpty(v.avatar);
     notifyListeners();
     unawaited(_enrichReceiverAvatar(v.userId, v.avatar));
@@ -467,13 +467,16 @@ class RedPacketController extends ChangeNotifier {
     final members =
         await WalletStore.instance.getMembers(convId, repo: _repo);
     final named = members.map((member) {
-      final nick = TransferPartyNameResolver.nicknameOf(
+      final publicName = TransferPartyNameResolver.nicknameOf(
         userId: member.userId,
-        nickHint: member.name,
+        nickHint: member.publicNameOrFallback,
       );
+      final displayName = member.name.trim();
       return RedPacketMember(
         userId: member.userId,
-        name: nick.isNotEmpty ? nick : member.userId,
+        name: displayName.isNotEmpty ? displayName : member.userId,
+        publicName:
+            publicName.isNotEmpty ? publicName : member.publicNameOrFallback,
         avatar: member.avatar,
         qq: member.qq,
       );

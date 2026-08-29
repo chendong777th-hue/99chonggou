@@ -72,6 +72,20 @@ void main() {
       expect(gate.previousLoadConsumedThisTopReach, isTrue);
       expect(gate.shouldAllowLoadPreviousAtTopReach(), isFalse);
     });
+
+    test('retryable zero-growth page releases latch when history remains', () {
+      gate.markTopReachConsumedForPreviousLoad('seq:716557');
+      gate.releaseTopReachConsumedAfterRetryableNoGrowth(haveMoreData: true);
+      expect(gate.previousLoadConsumedThisTopReach, isFalse);
+      expect(gate.lastTopReachConsumedAnchorKey, isNull);
+      expect(gate.shouldAllowLoadPreviousAtTopReach(), isTrue);
+    });
+
+    test('terminal zero-growth page keeps latch', () {
+      gate.markTopReachConsumedForPreviousLoad('seq:1');
+      gate.releaseTopReachConsumedAfterRetryableNoGrowth(haveMoreData: false);
+      expect(gate.previousLoadConsumedThisTopReach, isTrue);
+    });
   });
 
   group('source contracts', () {
@@ -79,13 +93,17 @@ void main() {
       final src = File(
         'third_party/tencent_cloud_chat_uikit/lib/ui/views/TIMUIKitChat/TIMUIKItMessageList/tim_uikit_chat_history_message_list.dart',
       ).readAsStringSync();
-      expect(src.contains('releaseTopReachConsumedAfterSuccessfulPage'), isTrue);
+      expect(
+          src.contains('releaseTopReachConsumedAfterSuccessfulPage'), isTrue);
       final implIdx = src.indexOf('Future<void> _loadPreviousImpl');
-      final releaseIdx = src.indexOf('releaseTopReachConsumedAfterSuccessfulPage');
+      final releaseIdx =
+          src.indexOf('releaseTopReachConsumedAfterSuccessfulPage');
       expect(implIdx, greaterThanOrEqualTo(0));
       expect(releaseIdx, greaterThan(implIdx));
-      expect(src.contains('保留贴顶消费位'), isTrue);
+      expect(src.contains('下一次上滑重试'), isTrue);
       expect(src.contains('effectiveLoaded'), isTrue);
+      expect(src.contains('releaseTopReachConsumedAfterRetryableNoGrowth'),
+          isTrue);
     });
   });
 }

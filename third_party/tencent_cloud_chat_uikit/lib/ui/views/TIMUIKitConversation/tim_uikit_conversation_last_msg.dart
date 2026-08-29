@@ -83,50 +83,19 @@ class TIMUIKitLastMsg extends StatefulWidget {
 class _TIMUIKitLastMsgState extends TIMUIKitState<TIMUIKitLastMsg> {
   String groupTipsAbstractText = "";
   String groupSenderName = "";
-  late final VoidCallback _liveCacheListener;
   int _previewResolveGeneration = 0;
   String _resolvedPreviewKey = "";
 
   @override
   void initState() {
     super.initState();
-    GroupMemberStore.instance.addListener(_onSenderNameCacheChanged);
-    DisplayNameStore.instance.addListener(_onSenderNameCacheChanged);
-    _liveCacheListener = () {
-      final lastMsg = widget.lastMsg;
-      if (lastMsg == null ||
-          lastMsg.elemType != MessageElemType.V2TIM_ELEM_TYPE_GROUP_TIPS) {
-        return;
-      }
-      _getMsgElem();
-    };
-    GroupTipsOperatorLiveCache.instance.revision
-        .addListener(_liveCacheListener);
     _getMsgElem(notify: false);
   }
 
   @override
   void dispose() {
     _previewResolveGeneration++;
-    GroupTipsOperatorLiveCache.instance.revision
-        .removeListener(_liveCacheListener);
-    GroupMemberStore.instance.removeListener(_onSenderNameCacheChanged);
-    DisplayNameStore.instance.removeListener(_onSenderNameCacheChanged);
     super.dispose();
-  }
-
-  void _onSenderNameCacheChanged() {
-    final lastMsg = widget.lastMsg;
-    if (lastMsg == null) {
-      return;
-    }
-    final nextName = _getGroupSenderName(lastMsg);
-    if (nextName == groupSenderName || !mounted) {
-      return;
-    }
-    setState(() {
-      groupSenderName = nextName;
-    });
   }
 
   String _currentPreviewKey(V2TimMessage? message) {

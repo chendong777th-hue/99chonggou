@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:developer' as developer;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
@@ -73,10 +72,7 @@ class GroupProfileButtonArea extends TIMUIKitStatelessWidget {
     if (desc != null) {
       line.write(' desc=$desc');
     }
-    final text = line.toString();
-    developer.log(text, name: 'GroupGovernance');
-    // ignore: avoid_print
-    print(text);
+    line.toString();
   }
 
   Future<void> _performGroupClearHistory(BuildContext context) async {
@@ -397,8 +393,7 @@ class GroupProfileButtonArea extends TIMUIKitStatelessWidget {
     if (!context.mounted) {
       return false;
     }
-    final name =
-        displayName.trim().isEmpty ? TIM_t('该成员') : displayName.trim();
+    final name = displayName.trim().isEmpty ? TIM_t('该成员') : displayName.trim();
     final message = TIM_t_para(
       '确定将群主转让给 {{option1}}？',
       '确定将群主转让给 $name？',

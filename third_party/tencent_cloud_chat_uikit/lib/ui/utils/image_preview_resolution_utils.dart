@@ -12,12 +12,13 @@ const double imagePreviewPanEnabledMinScale = 1.001;
 const double imagePreviewPanSpeed = 1.0;
 
 /// 双指可暂时缩到此比例（欠缩橡胶带），松手后弹回 fit（1x）。
-const double imagePreviewAnimationMinScale = 0.75;
+/// 微信手感：允许缩到 0.55x，松手平稳回弹，无 overshoot/bounce。
+const double imagePreviewAnimationMinScale = 0.55;
 
-/// 欠缩 / 超限回弹动画时长（松手后应几乎立刻贴回 fit）。
-const Duration imagePreviewScaleSnapDuration = Duration(milliseconds: 80);
+/// 欠缩 / 超限回弹动画时长。微信风格：稳快顺，100ms 内贴回，无过冲。
+const Duration imagePreviewScaleSnapDuration = Duration(milliseconds: 100);
 
-/// 欠缩 / 超限回弹曲线：尾段少拖沓。
+/// 欠缩 / 超限回弹曲线：平稳缓出（微信手感），无过冲/弹簧感。
 const Curve imagePreviewScaleSnapCurve = Curves.easeOut;
 
 /// 长图进入预览时的初始缩放（视觉上等同 1x，但允许平移）。
@@ -25,7 +26,7 @@ double imagePreviewInitialScale({required bool verticallyScrollable}) {
   return verticallyScrollable ? imagePreviewPanEnabledMinScale : 1.0;
 }
 
-/// 预览图片展示类型（七类策略，见产品手势表）。
+/// 预览图片展示类型。
 enum ImagePreviewDisplayMode {
   /// 普通图：接近屏幕比例。
   normal,
@@ -33,11 +34,9 @@ enum ImagePreviewDisplayMode {
   tall,
   /// 超长图（聊天截图等）：FitWidth。
   extraTall,
-  /// 横图：宽度 ≥ 高度×1.6。
+  /// 横图（含超宽全景）：宽度 ≥ 高度×1.6。
+  /// 先 contain 完整入画；双击再按高度铺满细读，手势偏横向。
   wide,
-  /// 超宽全景：与横图一样先 contain 完整入画（避免 FitHeight 只露中间一条）；
-  /// 双击再按宽度铺满细读，手势偏横向。
-  panorama,
   /// 小图：屏上占比很小。
   small,
 }
@@ -50,12 +49,6 @@ const double imagePreviewExtraTallAspectRatio = 3.5;
 
 /// 横图：宽高比下限（width ≥ height × 1.6）。
 const double imagePreviewWideAspectRatio = 1.6;
-
-/// 全景：宽高比下限（width ≥ height × 2.8）。
-const double imagePreviewPanoramaAspectRatio = 2.8;
-
-/// 全景屏上高度占比上限（判定超宽图）。
-const double imagePreviewPanoramaMaxDisplayHeightFactor = 0.28;
 
 /// 小图判定：contain 后屏上面积占比上限。
 const double imagePreviewSmallDisplayCoverage = 0.42;
@@ -121,15 +114,6 @@ ImagePreviewGestureProfile imagePreviewGestureProfileFor(
       );
     case ImagePreviewDisplayMode.wide:
       return const ImagePreviewGestureProfile(
-        panDamping: 0.80,
-        inertialMinVelocity: 300,
-        inertialDecayPerFrame: 0.95,
-        panAxisPreference: ImagePreviewPanAxisPreference.horizontal,
-        allowPanAt1x: true,
-        inertialSpeed: 400,
-      );
-    case ImagePreviewDisplayMode.panorama:
-      return const ImagePreviewGestureProfile(
         panDamping: 0.78,
         inertialMinVelocity: 300,
         inertialDecayPerFrame: 0.93,
@@ -161,7 +145,6 @@ class ImagePreviewDisplayConfig {
     this.isWideImage = false,
     this.isSmallImage = false,
     this.isExtraTallImage = false,
-    this.isPanorama = false,
     this.imageWidth = 0,
     this.imageHeight = 0,
   });
@@ -175,7 +158,6 @@ class ImagePreviewDisplayConfig {
   final bool isWideImage;
   final bool isSmallImage;
   final bool isExtraTallImage;
-  final bool isPanorama;
   final int imageWidth;
   final int imageHeight;
 
@@ -224,11 +206,6 @@ ImagePreviewDisplayMode imagePreviewResolveDisplayMode({
     screenHeight: screenHeight,
     fit: BoxFit.contain,
   );
-  if (inverseAspect >= imagePreviewPanoramaAspectRatio &&
-      containDisplay.height <
-          screenHeight * imagePreviewPanoramaMaxDisplayHeightFactor) {
-    return ImagePreviewDisplayMode.panorama;
-  }
   if (inverseAspect >= imagePreviewWideAspectRatio) {
     return ImagePreviewDisplayMode.wide;
   }
@@ -298,18 +275,12 @@ ImagePreviewDisplayConfig imagePreviewDisplayConfig({
         initialAlignment = InitialAlignment.center;
       }
       break;
-    case ImagePreviewDisplayMode.panorama:
-      // 结算明细等超宽图若 FitHeight+居中，手机上只剩中间几列，观感像「竖条裁切」。
-      // 先完整 contain；需要细节时靠双击铺宽（见 imagePreviewDoubleTapScale）。
-      // 原图小于屏幕时用 scaleDown，绝不把小图拉满全屏。
-      fit = BoxFit.scaleDown;
-      alignment = Alignment.center;
-      initialAlignment = InitialAlignment.center;
-      break;
     case ImagePreviewDisplayMode.wide:
     case ImagePreviewDisplayMode.small:
     case ImagePreviewDisplayMode.normal:
-      fit = BoxFit.scaleDown;
+      // contain: 大图等比缩入屏内（长边贴边、短边留黑）；小图不放大。
+      // 之前用 scaleDown 导致竖图按高度缩后两侧露出全屏黑底，观感差。
+      fit = BoxFit.contain;
       alignment = Alignment.center;
       initialAlignment = InitialAlignment.center;
       break;
@@ -338,7 +309,6 @@ ImagePreviewDisplayConfig imagePreviewDisplayConfig({
     isWideImage: mode == ImagePreviewDisplayMode.wide,
     isSmallImage: mode == ImagePreviewDisplayMode.small,
     isExtraTallImage: mode == ImagePreviewDisplayMode.extraTall,
-    isPanorama: mode == ImagePreviewDisplayMode.panorama,
     imageWidth: imageWidth,
     imageHeight: imageHeight,
   );
@@ -415,25 +385,14 @@ ImagePreviewDisplayConfig imagePreviewDisplayConfigResolved({
 
 /// 预览绘制 [BoxFit]。
 ///
-/// - 可竖滑长图：用 [display.fit]（聊天贴宽 / 头像 scaleDown）。
-/// - 头像 / 群头 / 朋友圈（[fitTallImagesToScreenWidth] == false）：始终用
-///   [display.fit]，禁止 [BoxFit.fill] 把任意尺寸拧成全屏。
-/// - 未知像素尺寸：用 contain，避免整屏盒子 + fill 拉伸。
-/// - 聊天普通图：fill 已按比例算好的手势框，避免框内留白。
+/// 非长图始终用 [display.fit]（contain）。之前对聊天普通图用 fill 是为了
+/// 消除 boxSize 与图片比例的亚像素间隙，但 fill 会把图片锁死在框内，
+/// 放大时无法超出框边界——contain 让手势变换自然溢出框外。
 BoxFit imagePreviewPaintFit(
   ImagePreviewDisplayConfig display, {
   bool fitTallImagesToScreenWidth = true,
 }) {
-  if (display.verticallyScrollable) {
-    return display.fit;
-  }
-  if (!fitTallImagesToScreenWidth) {
-    return display.fit;
-  }
-  if (display.imageWidth <= 0 || display.imageHeight <= 0) {
-    return BoxFit.contain;
-  }
-  return BoxFit.fill;
+  return display.fit;
 }
 
 Size imagePreviewBoxSizeFor({
@@ -604,7 +563,8 @@ bool isImagePreviewResolutionTooLow({
 ///
 /// - [BoxFit.fitWidth] / [BoxFit.fitHeight]：按对应边铺满视口（允许放大），
 ///   供长图贴宽、避免窄长截图两侧黑边。
-/// - 其它 fit（如 scaleDown/contain）：大图缩小到屏内，小图不强制拉满。
+/// - [BoxFit.contain]：大图等比缩入屏内（短边贴边、长边不超），小图不放大。
+/// - [BoxFit.scaleDown]：仅缩小不放大，小图保持原比例居中。
 Size imagePreviewInitialDisplaySize({
   required int imageWidth,
   required int imageHeight,
@@ -636,7 +596,10 @@ Size imagePreviewInitialDisplaySize({
     screenWidth / imageWidth,
     screenHeight / imageHeight,
   );
-  final scale = math.min(1.0, containScale);
+  // contain: 大图缩小到屏内（长边贴边），小图保持原尺寸不放大。
+  final scale = fit == BoxFit.scaleDown
+      ? math.min(1.0, containScale)
+      : containScale;
   return Size(imageWidth * scale, imageHeight * scale);
 }
 
@@ -836,7 +799,7 @@ double imagePreviewDoubleTapScale({
   double target;
   switch (resolvedMode) {
     case ImagePreviewDisplayMode.normal:
-      target = 2.75;
+      target = 2.0;
       break;
     case ImagePreviewDisplayMode.tall:
       target = 1.75;
@@ -845,14 +808,14 @@ double imagePreviewDoubleTapScale({
       target = 1.5;
       break;
     case ImagePreviewDisplayMode.wide:
-    case ImagePreviewDisplayMode.panorama:
       final fillWidth = screenWidth / initialDisplay.width;
       final fillHeight = screenHeight / initialDisplay.height;
-      // contain 后通常已铺满屏宽；此时双击改为高度铺满（旧 panorama 观感），横向细读。
-      target = fillWidth > 1.05 ? fillWidth : fillHeight;
+      // contain 后通常已铺满屏宽；此时双击改为高度铺满（横向细读），但限制
+      // 在 3x 内，避免极宽图一次跳变到 10x+ 造成迷失感。
+      target = (fillWidth > 1.05 ? fillWidth : fillHeight).clamp(1.0, 3.0);
       break;
     case ImagePreviewDisplayMode.small:
-      target = 3.5;
+      target = 2.0;
       break;
   }
   return math.min(maxScale, math.max(1.0, target));

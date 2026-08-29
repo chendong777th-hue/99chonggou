@@ -186,10 +186,8 @@ class TIMUIKitTextFieldLayoutNarrowState
         oldWidget.conversationID != widget.conversationID ||
             oldWidget.conversationType != widget.conversationType;
     if (conversationChanged) {
-      _panelDiag('conversation_changed_before_reset');
       widget.focusNode.unfocus();
       _panel.resetAll();
-      _panelDiag('conversation_changed_after_reset');
       bottomPadding = null;
       widget.controller?.updateInputPanelOpen(false);
     }
@@ -218,12 +216,6 @@ class TIMUIKitTextFieldLayoutNarrowState
   bool get isAnyPanelOpen =>
       _panel.isAnyPanelOpen(hasFocus: widget.focusNode.hasFocus);
 
-  void _panelDiag(String event) {
-    print('[ChatInputDiag] panel=$event conv=${widget.conversationID} '
-        'more=$showMore emoji=$showEmojiPanel voice=$showSendSoundText '
-        'keyboard=$showKeyboard focus=${widget.focusNode.hasFocus}');
-  }
-
   void _syncInputPanelOpenState() {
     widget.controller?.updateInputPanelOpen(isAnyPanelOpen);
   }
@@ -234,7 +226,6 @@ class TIMUIKitTextFieldLayoutNarrowState
         return;
       }
       setState(update);
-      _panelDiag('state_changed');
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           _syncInputPanelOpenState();
@@ -287,7 +278,6 @@ class TIMUIKitTextFieldLayoutNarrowState
   @override
   void initState() {
     super.initState();
-    _panelDiag('init');
     widget.controller?.attachNarrowState(this);
     WidgetsBinding.instance.addObserver(this);
     widget.textEditingController.addListener(_syncSendButtonFromController);
@@ -418,15 +408,8 @@ class TIMUIKitTextFieldLayoutNarrowState
     _syncSendButtonFromController();
   }
 
-  int _lastKeyboardSendAtMs = 0;
-
   void _submitOutgoingMessage({required bool fromKeyboard}) {
     if (fromKeyboard) {
-      final now = DateTime.now().millisecondsSinceEpoch;
-      if (now - _lastKeyboardSendAtMs < 120) {
-        return;
-      }
-      _lastKeyboardSendAtMs = now;
       widget.controller?.markKeyboardSendRetain();
     }
 
@@ -835,17 +818,11 @@ class TIMUIKitTextFieldLayoutNarrowState
     }, const Duration(seconds: 1));
 
     final debounceFunc = _debounce((value) {
-      print('[ChatInputDiag] narrow=on_changed len=${value.length} '
-          'focus=${widget.focusNode.hasFocus} composing='
-          '${widget.textEditingController.value.composing.start},'
-          '${widget.textEditingController.value.composing.end}');
       final composing = widget.textEditingController.value.composing;
       if (widget.textEditingController.text != value) {
-        print('[ChatInputDiag] narrow=on_changed_skip_stale');
         return;
       }
       if (composing.isValid && composing.start < composing.end) {
-        print('[ChatInputDiag] narrow=on_changed_skip_composing');
         return;
       }
       _syncSendButtonFromController();

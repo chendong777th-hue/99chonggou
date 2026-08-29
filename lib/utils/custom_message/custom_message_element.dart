@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -38,6 +37,7 @@ import 'package:tencent_cloud_chat_demo/utils/custom_message/official_account_ar
 import 'package:tencent_cloud_chat_demo/utils/custom_message/official_account_article_message.dart';
 import 'package:tencent_cloud_chat_demo/utils/custom_message/platform_wallet_notice_message.dart';
 import 'package:tencent_cloud_chat_demo/utils/custom_message/platform_wallet_notice_message_item.dart';
+import 'package:tencent_cloud_chat_demo/utils/custom_message/custom_message_parse_cache.dart';
 import 'package:tencent_cloud_chat_demo/utils/custom_message/web_link_message.dart';
 import 'package:tencent_cloud_chat_demo/src/api/wallet_api.dart';
 import 'package:tencent_cloud_chat_demo/src/api/wallet_amount.dart';
@@ -110,9 +110,12 @@ class CustomMessageElem extends StatefulWidget {
     try {
       final raw = message.customElem?.data;
       if (raw == null || raw.trim().isEmpty) return null;
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) return null;
-      final data = Map<String, dynamic>.from(decoded);
+      final data = CustomMessageParseCache.instance.decodeMap(
+        message: message,
+        payload: raw,
+        parserVersion: 'wallet-envelope-v1',
+      );
+      if (data == null) return null;
       final clientOrderId = data['clientOrderId']?.toString().trim() ?? '';
       final orderId = data['orderId']?.toString().trim() ?? '';
       final fallback =
@@ -146,9 +149,12 @@ class CustomMessageElem extends StatefulWidget {
     try {
       final raw = message.customElem?.data;
       if (raw == null || raw.trim().isEmpty) return false;
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) return false;
-      final data = Map<String, dynamic>.from(decoded);
+      final data = CustomMessageParseCache.instance.decodeMap(
+        message: message,
+        payload: raw,
+        parserVersion: 'wallet-envelope-v1',
+      );
+      if (data == null) return false;
       if (isPlatformWalletNoticePayload(data)) return false;
       if (data['businessID']?.toString() == kRedPacketClaimNoticeBusinessID) {
         return false;
@@ -172,11 +178,12 @@ class CustomMessageElem extends StatefulWidget {
     try {
       final raw = message.customElem?.data;
       if (raw == null || raw.trim().isEmpty) return false;
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) return false;
-      return isPlatformWalletNoticePayload(
-        Map<String, dynamic>.from(decoded),
+      final data = CustomMessageParseCache.instance.decodeMap(
+        message: message,
+        payload: raw,
+        parserVersion: 'wallet-envelope-v1',
       );
+      return data != null && isPlatformWalletNoticePayload(data);
     } catch (_) {
       return false;
     }
@@ -1469,9 +1476,12 @@ class _CustomMessageElemState extends State<CustomMessageElem> {
   Map<String, dynamic>? _walletPayload(String? raw) {
     if (raw == null || raw.trim().isEmpty) return null;
     try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) return null;
-      final data = Map<String, dynamic>.from(decoded);
+      final data = CustomMessageParseCache.instance.decodeMap(
+        message: widget.message,
+        payload: raw,
+        parserVersion: 'wallet-envelope-v1',
+      );
+      if (data == null) return null;
 
       final customType = data['customType']?.toString() ?? '';
       final legacyType = data['type']?.toString() ?? '';
@@ -3014,8 +3024,8 @@ class _CustomMessageElemState extends State<CustomMessageElem> {
               border: messageBorderOverride ??
                   MessageBubbleTextColor.othersBubbleBorder(
                     isFromSelf: isFromSelf,
-                    bubbleBackground:
-                        widget.messageBackgroundColor ?? resolvedBackgroundColor,
+                    bubbleBackground: widget.messageBackgroundColor ??
+                        resolvedBackgroundColor,
                   ),
             ),
       constraints: BoxConstraints(maxWidth: resolvedMaxWidth),

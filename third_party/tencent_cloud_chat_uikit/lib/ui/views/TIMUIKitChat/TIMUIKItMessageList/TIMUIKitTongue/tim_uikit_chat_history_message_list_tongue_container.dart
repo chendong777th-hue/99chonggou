@@ -17,6 +17,7 @@ import 'package:tencent_cloud_chat_uikit/business_logic/view_models/chat_message
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_jitter_diag.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_history_trace.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKItMessageList/TIMUIKitTongue/back_to_bottom_capsule_policy.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKItMessageList/TIMUIKitTongue/tim_uikit_chat_history_message_list_tongue.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitChat/TIMUIKItMessageList/TIMUIKitTongue/unread_tongue_policy.dart';
@@ -26,6 +27,7 @@ class TIMUIKitHistoryMessageListTongueContainer extends StatefulWidget {
       tongueItemBuilder;
   final List<V2TimGroupAtInfo?>? groupAtInfoList;
   final List<V2TimMessage?> messageList;
+
   /// Returns true only when the @ target was centered (or already on screen).
   final Future<bool> Function(String targetSeq) scrollToIndexBySeq;
   final Future<bool> Function(int unreadCount) scrollToFirstUnread;
@@ -61,6 +63,7 @@ class _TongueUnreadSelectorData {
   final bool unreadBelow;
   final int lockedUnreadCount;
   final bool haveMoreLatestData;
+  final bool memoryWindowMissingNewer;
 
   const _TongueUnreadSelectorData({
     required this.messageListPosition,
@@ -68,6 +71,7 @@ class _TongueUnreadSelectorData {
     required this.unreadBelow,
     required this.lockedUnreadCount,
     required this.haveMoreLatestData,
+    required this.memoryWindowMissingNewer,
   });
 }
 
@@ -84,6 +88,9 @@ class _TIMUIKitHistoryMessageListTongueContainerState
   bool _showScrollToBottomCapsule = false;
   bool _scrollingToBottomInFlight = false;
   bool _userDraggedSinceLastSettle = false;
+  int _conversationWidgetGeneration = 0;
+  int _bottomScrollTransactionToken = 0;
+  int _unreadJumpTransactionToken = 0;
 
   /// 用户主动上滑并超出一屏后为 true；贴底后清零。用来区分 list-push 程序滚动。
   bool _userLeftBottomIntentionally = false;
@@ -137,44 +144,41 @@ class _TIMUIKitHistoryMessageListTongueContainerState
         globalModel.isUserScrollToBottomInProgress(widget.model.conversationID);
   }
 
-  void _kickStartScrollToLatest(String conversationID) {
-    final position = _singleScrollPositionOrNull();
-    if (position == null ||
-        !position.hasPixels ||
-        !position.hasContentDimensions) {
+  bool _isCurrentConversationGeneration(
+    String conversationID,
+    int conversationGeneration,
+  ) {
+    return mounted &&
+        conversationGeneration == _conversationWidgetGeneration &&
+        TUIChatGlobalModel.isSameConversationIdForHistory(
+          widget.model.conversationID,
+          conversationID,
+        );
+  }
+
+  void _cancelScrollActivity(AutoScrollController controller) {
+    if (!controller.hasClients) {
       return;
     }
-    final target = position.minScrollExtent;
-    final distance = (position.pixels - target).abs();
-    if (distance <= 1.0) {
-      return;
+    for (final position in controller.positions.toList()) {
+      if (position.hasPixels) {
+        // jumpTo the current pixels cancels an old animateTo future before the
+        // reused controller can be driven by the next conversation.
+        position.jumpTo(position.pixels);
+      }
     }
-    final animationMs = (120 + distance * 0.18).clamp(120.0, 260.0).round();
-    ChatJitterDiag.logInboundFlow(
-      action: 'bottom_capsule_kick_start',
-      conv: conversationID,
-      extras: <String, Object?>{
-        'distance': distance.toStringAsFixed(1),
-        'durationMs': animationMs,
-      },
-    );
-    unawaited(
-      widget.scrollController
-          .animateTo(
-            target,
-            duration: Duration(milliseconds: animationMs),
-            curve: Curves.easeOutCubic,
-          )
-          .catchError((_) {}),
-    );
   }
 
   Future<void> _scrollToLatestAndDismissUnreadCapsule() async {
     if (_scrollingToBottomInFlight) {
       return;
     }
+    final model = widget.model;
+    final conversationID = model.conversationID;
+    final conversationGeneration = _conversationWidgetGeneration;
+    final transactionToken = ++_bottomScrollTransactionToken;
+    final scrollController = widget.scrollController;
     _scrollingToBottomInFlight = true;
-    final conversationID = widget.model.conversationID;
     ChatJitterDiag.logInboundFlow(
       action: 'bottom_capsule_tap_begin',
       conv: conversationID,
@@ -199,8 +203,6 @@ class _TIMUIKitHistoryMessageListTongueContainerState
           isClickShowPrevious = false;
         });
       }
-      _kickStartScrollToLatest(conversationID);
-
       // 内存窗口开启时，「回到底部」必须重拉最新一页。
       // 仅 animateTo(minExtent) 只会停在窗口内的假底部。
       if (ChatMessageWindowPolicy.enabled) {
@@ -218,7 +220,9 @@ class _TIMUIKitHistoryMessageListTongueContainerState
           },
         );
         try {
-          await widget.model.reloadNewestMessageWindow();
+          await model.reloadNewestMessageWindow(
+            allowWhileReadingHistory: true,
+          );
         } catch (e) {
           ChatJitterDiag.logInboundFlow(
             action: 'bottom_capsule_reload_newest_error',
@@ -226,7 +230,19 @@ class _TIMUIKitHistoryMessageListTongueContainerState
             extras: <String, Object?>{'error': e.toString()},
           );
         }
+        if (!_isCurrentConversationGeneration(
+          conversationID,
+          conversationGeneration,
+        )) {
+          return;
+        }
         await WidgetsBinding.instance.endOfFrame;
+        if (!_isCurrentConversationGeneration(
+          conversationID,
+          conversationGeneration,
+        )) {
+          return;
+        }
         ChatJitterDiag.logInboundFlow(
           action: 'bottom_capsule_reload_newest_done',
           conv: conversationID,
@@ -242,12 +258,14 @@ class _TIMUIKitHistoryMessageListTongueContainerState
       // this after the scroll uses the old list extent and can leave the newly
       // revealed rows below the viewport. A notification is required because
       // projection-only reveals do not otherwise rebuild the message list.
-      globalModel.flushDeferredIncomingMessages(
-        conversationID,
-        notify: true,
-        userInitiated: true,
-      );
+      globalModel.flushPendingIncomingMessagesForUserBottom(conversationID);
       await WidgetsBinding.instance.endOfFrame;
+      if (!_isCurrentConversationGeneration(
+        conversationID,
+        conversationGeneration,
+      )) {
+        return;
+      }
 
       // Flushing 5 displayed unread rows can expose 20 authoritative rows, and
       // more may arrive while scrolling. Re-resolve the latest edge after each
@@ -255,6 +273,12 @@ class _TIMUIKitHistoryMessageListTongueContainerState
       const maxSettleAttempts = 6;
       for (var attempt = 0; attempt < maxSettleAttempts; attempt++) {
         await WidgetsBinding.instance.endOfFrame;
+        if (!_isCurrentConversationGeneration(
+          conversationID,
+          conversationGeneration,
+        )) {
+          return;
+        }
         final position = _singleScrollPositionOrNull();
         if (position == null ||
             !position.hasPixels ||
@@ -279,6 +303,12 @@ class _TIMUIKitHistoryMessageListTongueContainerState
           // Require another completed frame at the edge. This catches rows
           // whose real height replaces a text/media placeholder one frame late.
           await WidgetsBinding.instance.endOfFrame;
+          if (!_isCurrentConversationGeneration(
+            conversationID,
+            conversationGeneration,
+          )) {
+            return;
+          }
           final verification = _singleScrollPositionOrNull();
           if (verification != null &&
               verification.hasPixels &&
@@ -289,31 +319,71 @@ class _TIMUIKitHistoryMessageListTongueContainerState
           }
           continue;
         }
+        // Avoid restarting a long animation for tiny layout drift. Repeated
+        // animations fighting list relayout are perceived as a shake.
+        if (distance <= 8.0) {
+          continue;
+        }
         final animationMs = (180 + distance * 0.28).clamp(180.0, 420.0).round();
         globalModel.beginUserScrollToBottom(
           conversationID,
           lockMilliseconds: animationMs + 500,
         );
         try {
-          await widget.scrollController.animateTo(
+          await scrollController.animateTo(
             target,
             duration: Duration(milliseconds: animationMs),
             curve: Curves.easeOutCubic,
           );
         } catch (_) {}
+        if (!_isCurrentConversationGeneration(
+          conversationID,
+          conversationGeneration,
+        )) {
+          return;
+        }
       }
 
       // A continuous stream can invalidate every animated attempt. Finish with
-      // one frame-aligned edge correction while the return-to-bottom lock is
-      // still active; subsequent inbound rows then remain pinned naturally.
+      // one short, frame-aligned animation; jumpTo here causes a visible flash
+      // when message heights settle during the return transaction.
       await WidgetsBinding.instance.endOfFrame;
+      if (!_isCurrentConversationGeneration(
+        conversationID,
+        conversationGeneration,
+      )) {
+        return;
+      }
       final finalPosition = _singleScrollPositionOrNull();
       if (finalPosition != null &&
           finalPosition.hasPixels &&
           finalPosition.hasContentDimensions &&
-          (finalPosition.pixels - finalPosition.minScrollExtent).abs() > 1.0) {
-        widget.scrollController.jumpTo(finalPosition.minScrollExtent);
+          (finalPosition.pixels - finalPosition.minScrollExtent).abs() >
+              _bottomEpsilon) {
+        final correctionDistance =
+            (finalPosition.pixels - finalPosition.minScrollExtent).abs();
+        final correctionMs =
+            (100 + correctionDistance * 0.2).clamp(100.0, 220.0).round();
+        try {
+          await scrollController.animateTo(
+            finalPosition.minScrollExtent,
+            duration: Duration(milliseconds: correctionMs),
+            curve: Curves.easeOutCubic,
+          );
+        } catch (_) {}
+        if (!_isCurrentConversationGeneration(
+          conversationID,
+          conversationGeneration,
+        )) {
+          return;
+        }
         await WidgetsBinding.instance.endOfFrame;
+        if (!_isCurrentConversationGeneration(
+          conversationID,
+          conversationGeneration,
+        )) {
+          return;
+        }
       }
 
       final settledPosition = _singleScrollPositionOrNull();
@@ -344,6 +414,50 @@ class _TIMUIKitHistoryMessageListTongueContainerState
         return;
       }
 
+      // A coalescer timer or a late layout callback may have delivered another
+      // batch after the first drain. Drain once more while the transaction gate
+      // is still held, then let the final geometry settle before clearing read
+      // state. This prevents buffered rows from being cleared as "read".
+      final drainedAfterScroll =
+          globalModel.flushPendingIncomingMessagesForUserBottom(conversationID);
+      if (drainedAfterScroll) {
+        await WidgetsBinding.instance.endOfFrame;
+        if (!_isCurrentConversationGeneration(
+          conversationID,
+          conversationGeneration,
+        )) {
+          return;
+        }
+        final postDrainPosition = _singleScrollPositionOrNull();
+        if (postDrainPosition != null &&
+            postDrainPosition.hasPixels &&
+            postDrainPosition.hasContentDimensions &&
+            (postDrainPosition.pixels - postDrainPosition.minScrollExtent)
+                    .abs() >
+                _bottomEpsilon) {
+          try {
+            await scrollController.animateTo(
+              postDrainPosition.minScrollExtent,
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+            );
+          } catch (_) {}
+          if (!_isCurrentConversationGeneration(
+            conversationID,
+            conversationGeneration,
+          )) {
+            return;
+          }
+          await WidgetsBinding.instance.endOfFrame;
+          if (!_isCurrentConversationGeneration(
+            conversationID,
+            conversationGeneration,
+          )) {
+            return;
+          }
+        }
+      }
+
       globalModel.unlockEntryUnreadForTongue(
         conversationID: conversationID,
         notify: false,
@@ -352,7 +466,7 @@ class _TIMUIKitHistoryMessageListTongueContainerState
         conversationID: conversationID,
         notify: false,
       );
-      widget.model.markMessageAsRead(force: true);
+      model.markMessageAsRead(force: true);
 
       var dismissedUnreadCount = _entryUnreadCount;
       if (globalModel.unreadCountForTongue > dismissedUnreadCount) {
@@ -372,7 +486,10 @@ class _TIMUIKitHistoryMessageListTongueContainerState
         conversationID,
         notify: false,
       );
-      changePositionState(HistoryMessagePosition.bottom);
+      changePositionStateForConversation(
+        conversationID,
+        HistoryMessagePosition.bottom,
+      );
       ChatJitterDiag.logInboundFlow(
         action: 'bottom_capsule_tap_complete',
         conv: conversationID,
@@ -390,7 +507,9 @@ class _TIMUIKitHistoryMessageListTongueContainerState
       }
     } finally {
       globalModel.endUserScrollToBottom(conversationID);
-      _scrollingToBottomInFlight = false;
+      if (transactionToken == _bottomScrollTransactionToken) {
+        _scrollingToBottomInFlight = false;
+      }
     }
   }
 
@@ -398,15 +517,23 @@ class _TIMUIKitHistoryMessageListTongueContainerState
     if (_jumpingToFirstUnread) {
       return;
     }
+    final conversationID = widget.model.conversationID;
+    final conversationGeneration = _conversationWidgetGeneration;
+    final transactionToken = ++_unreadJumpTransactionToken;
     _jumpingToFirstUnread = true;
     try {
       final didScroll = await widget.scrollToFirstUnread(unreadCount);
+      if (!_isCurrentConversationGeneration(
+        conversationID,
+        conversationGeneration,
+      )) {
+        return;
+      }
       if (!didScroll) {
         return;
       }
       // 点过入口「xxx条未读」后：提示立刻消失；离底时底部只保留「回到底部」，
       // 不再把同一批入口未读改成右下角「xxx条新消息」。
-      final conversationID = widget.model.conversationID;
       var dismissedUnreadCount = unreadCount;
       if (_entryUnreadCount > dismissedUnreadCount) {
         dismissedUnreadCount = _entryUnreadCount;
@@ -435,7 +562,10 @@ class _TIMUIKitHistoryMessageListTongueContainerState
         conversationID,
         notify: false,
       );
-      changePositionState(HistoryMessagePosition.awayTwoScreen);
+      changePositionStateForConversation(
+        conversationID,
+        HistoryMessagePosition.awayTwoScreen,
+      );
       if (mounted) {
         setState(() {
           isClickShowPrevious = true;
@@ -448,7 +578,9 @@ class _TIMUIKitHistoryMessageListTongueContainerState
         _entryUnreadCount = 0;
       }
     } finally {
-      _jumpingToFirstUnread = false;
+      if (transactionToken == _unreadJumpTransactionToken) {
+        _jumpingToFirstUnread = false;
+      }
     }
   }
 
@@ -464,7 +596,23 @@ class _TIMUIKitHistoryMessageListTongueContainerState
   void didUpdateWidget(
       covariant TIMUIKitHistoryMessageListTongueContainer oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.model.conversationID != widget.model.conversationID) {
+    final conversationChanged =
+        !TUIChatGlobalModel.isSameConversationIdForHistory(
+          oldWidget.model.conversationID,
+          widget.model.conversationID,
+        ) ||
+            oldWidget.conversation.conversationID !=
+                widget.conversation.conversationID ||
+            !identical(oldWidget.model, widget.model);
+    if (conversationChanged) {
+      final oldConversationID = oldWidget.model.conversationID;
+      if (_scrollingToBottomInFlight) {
+        _cancelScrollActivity(oldWidget.scrollController);
+      }
+      _conversationWidgetGeneration++;
+      _bottomScrollTransactionToken++;
+      _unreadJumpTransactionToken++;
+      globalModel.endUserScrollToBottom(oldConversationID);
       _detachScrollEndListener();
       isClickShowPrevious = false;
       _jumpingToFirstUnread = false;
@@ -485,14 +633,26 @@ class _TIMUIKitHistoryMessageListTongueContainerState
   }
 
   void changePositionState(HistoryMessagePosition newPosition) {
+    changePositionStateForConversation(widget.model.conversationID, newPosition);
+  }
+
+  void changePositionStateForConversation(
+    String conversationID,
+    HistoryMessagePosition newPosition,
+  ) {
     if (_lastReportedPosition == newPosition) {
       return;
     }
-    if (globalModel.getMessageListPosition(widget.model.conversationID) !=
-        newPosition) {
-      globalModel.setMessageListPosition(
-          widget.model.conversationID, newPosition);
-      _lastReportedPosition = newPosition;
+    final before = globalModel.getMessageListPosition(conversationID);
+    if (before != newPosition) {
+      globalModel.setMessageListPosition(conversationID, newPosition);
+      final after = globalModel.getMessageListPosition(conversationID);
+      // The global model may reject a transient bottom observation while a
+      // pagination prepend is restoring its anchor. Do not cache the rejected
+      // value locally or the tongue would suppress the next real update.
+      if (after == newPosition) {
+        _lastReportedPosition = newPosition;
+      }
     }
   }
 
@@ -561,11 +721,18 @@ class _TIMUIKitHistoryMessageListTongueContainerState
   }
 
   HistoryMessagePosition _resolveScrollPositionSettled(double offset) {
+    final position = _singleScrollPositionOrNull();
+    if (position != null &&
+        globalModel.isPaginationRestoreTransientNearBottom(
+          widget.model.conversationID,
+          position,
+        )) {
+      return globalModel.getMessageListPosition(widget.model.conversationID);
+    }
     if (globalModel
         .isInboundPresentationBottomLocked(widget.model.conversationID)) {
       return HistoryMessagePosition.bottom;
     }
-    final position = _singleScrollPositionOrNull();
     if (position == null) {
       return globalModel.getMessageListPosition(widget.model.conversationID);
     }
@@ -621,10 +788,8 @@ class _TIMUIKitHistoryMessageListTongueContainerState
             offset <= position.minScrollExtent + _bottomEpsilon;
     _userDraggedSinceLastSettle = false;
     if (reachedBottomByUser) {
-      globalModel.flushDeferredIncomingMessages(
+      globalModel.flushPendingIncomingMessagesForUserBottom(
         widget.model.conversationID,
-        notify: true,
-        userInitiated: true,
       );
       globalModel.unlockEntryUnreadForTongue(
         conversationID: widget.model.conversationID,
@@ -679,6 +844,24 @@ class _TIMUIKitHistoryMessageListTongueContainerState
       return;
     }
     final offset = position.pixels;
+    if (globalModel.isPaginationRestoreTransientNearBottom(
+      widget.model.conversationID,
+      position,
+    )) {
+      // isScrollingNotifier can settle during the temporary zero-pixels
+      // layout gap. Avoid marking unread as read or changing the logical
+      // position until the pagination transaction has a real viewport.
+      ChatHistoryTrace.log(
+        'tongue_settle_ignored_pagination_restore',
+        conversationID: widget.model.conversationID,
+        extras: <String, Object?>{
+          'pixels': offset.toStringAsFixed(1),
+          'minExtent': position.minScrollExtent.toStringAsFixed(1),
+          'maxExtent': position.maxScrollExtent.toStringAsFixed(1),
+        },
+      );
+      return;
+    }
     _maybeMarkLatestUnreadOnSettle(offset);
     changePositionState(_resolveScrollPositionSettled(offset));
     _setScrollToBottomCapsuleVisible(
@@ -889,6 +1072,13 @@ class _TIMUIKitHistoryMessageListTongueContainerState
 
   @override
   void dispose() {
+    _conversationWidgetGeneration++;
+    _bottomScrollTransactionToken++;
+    _unreadJumpTransactionToken++;
+    if (_scrollingToBottomInFlight) {
+      _cancelScrollActivity(widget.scrollController);
+    }
+    globalModel.endUserScrollToBottom(widget.model.conversationID);
     _detachScrollListeners();
     super.dispose();
   }
@@ -911,7 +1101,8 @@ class _TIMUIKitHistoryMessageListTongueContainerState
         final displayUnreadCount = _resolveDisplayUnreadCount(unreadRemaining);
         final isAtTongue = valueType == MessageListTongueType.atMe ||
             valueType == MessageListTongueType.atAll;
-        final isEntryUnreadTip = valueType == MessageListTongueType.showPrevious;
+        final isEntryUnreadTip =
+            valueType == MessageListTongueType.showPrevious;
         // 入口未读：右上角保持「xxx条未读」，上滑也不改成「新消息」。
         // 贴底或轻离底都可点；真正离开底部时右下角另给「回到底部」。
         final showEntryUnreadAtTop = isEntryUnreadTip && !isAtTongue;
@@ -928,16 +1119,18 @@ class _TIMUIKitHistoryMessageListTongueContainerState
         final showScrolledUpBottomCapsule = !isAtTongue &&
             BackToBottomCapsulePolicy.shouldShow(
               physicallyAtBottom: physicallyAtBottom,
-              leftBottomByOneScreen: _showScrollToBottomCapsule,
+              leftBottomByOneScreen: _userLeftBottomIntentionally,
               missingNewerThanViewport: selectorData.haveMoreLatestData,
               presentationBottomLocked: presentationBottomLocked,
-              programmaticScrollToBottom:
-                  _isProgrammaticScrollToBottomActive(),
+              programmaticScrollToBottom: _isProgrammaticScrollToBottomActive(),
             );
         final diagnosticState = '${valueType.name}|'
             '${selectorData.messageListPosition.name}|'
             '$displayUnreadCount|$showEntryUnreadAtTop|'
-            '$showScrolledUpBottomCapsule';
+            '$showScrolledUpBottomCapsule|${selectorData.haveMoreLatestData}|'
+            '${selectorData.memoryWindowMissingNewer}|$physicallyAtBottom|'
+            '$_userLeftBottomIntentionally|'
+            '${livePosition?.hasContentDimensions == true ? livePosition!.viewportDimension.toStringAsFixed(1) : 'n/a'}';
         if (_lastTongueDiagnosticState != diagnosticState) {
           _lastTongueDiagnosticState = diagnosticState;
           final position = _singleScrollPositionOrNull();
@@ -953,6 +1146,13 @@ class _TIMUIKitHistoryMessageListTongueContainerState
               'remaining': unreadRemaining,
               'entryTopVisible': showEntryUnreadAtTop,
               'bottomVisible': showScrolledUpBottomCapsule,
+              'haveMoreLatestData': selectorData.haveMoreLatestData,
+              'memoryWindowMissingNewer': selectorData.memoryWindowMissingNewer,
+              'physicallyAtBottom': physicallyAtBottom,
+              'leftBottomByOneScreen': _userLeftBottomIntentionally,
+              'viewportDimension': livePosition?.hasContentDimensions == true
+                  ? livePosition!.viewportDimension.toStringAsFixed(1)
+                  : 'n/a',
               'presentationLocked':
                   globalModel.isInboundPresentationBottomLocked(
                       widget.model.conversationID),
@@ -978,8 +1178,7 @@ class _TIMUIKitHistoryMessageListTongueContainerState
                     previousCount: displayUnreadCount,
                     unreadCount: displayUnreadCount,
                     onClick: () async {
-                      if (groupAtInfoList == null ||
-                          groupAtInfoList!.isEmpty) {
+                      if (groupAtInfoList == null || groupAtInfoList!.isEmpty) {
                         return;
                       }
                       final atInfo = groupAtInfoList![0];
@@ -1023,10 +1222,10 @@ class _TIMUIKitHistoryMessageListTongueContainerState
                 bottom: 16,
                 child: _buildBottomCapsule(
                   visible: showScrolledUpBottomCapsule,
-                  valueType: scrolledUpBottomType ==
-                          MessageListTongueType.showPrevious
-                      ? MessageListTongueType.toLatest
-                      : scrolledUpBottomType,
+                  valueType:
+                      scrolledUpBottomType == MessageListTongueType.showPrevious
+                          ? MessageListTongueType.toLatest
+                          : scrolledUpBottomType,
                   displayUnreadCount: displayUnreadCount,
                   onTap: () => _onBottomCapsuleTap(
                     scrolledUpBottomType == MessageListTongueType.showPrevious
@@ -1052,6 +1251,8 @@ class _TIMUIKitHistoryMessageListTongueContainerState
               ? model.lockedEntryUnreadCount
               : 0,
           haveMoreLatestData: widget.model.haveMoreLatestData,
+          memoryWindowMissingNewer:
+              globalModel.memoryWindowMissingNewer(conversationID),
         );
       },
       shouldRebuild: (previous, next) =>
@@ -1059,7 +1260,8 @@ class _TIMUIKitHistoryMessageListTongueContainerState
           previous.unreadRemaining != next.unreadRemaining ||
           previous.unreadBelow != next.unreadBelow ||
           previous.lockedUnreadCount != next.lockedUnreadCount ||
-          previous.haveMoreLatestData != next.haveMoreLatestData,
+          previous.haveMoreLatestData != next.haveMoreLatestData ||
+          previous.memoryWindowMissingNewer != next.memoryWindowMissingNewer,
     );
   }
 

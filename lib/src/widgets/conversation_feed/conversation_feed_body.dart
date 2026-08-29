@@ -6,10 +6,12 @@ import 'package:tencent_cloud_chat_demo/src/i18n/app_i18n.dart';
 import 'package:tencent_cloud_chat_demo/src/services/archived_conversation_entry_visibility.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_folder_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_tab_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_sync_notifier.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_flags.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_virtual_hydrate_policy.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_gate_log.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_flicker_log.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_join_application_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_unread_service.dart';
@@ -22,9 +24,11 @@ import 'package:tencent_cloud_chat_demo/src/services/group_notice_feed_log.dart'
 import 'package:tencent_cloud_chat_demo/src/widgets/conversation_feed/conversation_archived_entry_tile.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/conversation_feed/conversation_feed_empty_state.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/conversation_feed/conversation_feed_rows.dart';
+import 'package:tencent_cloud_chat_demo/src/widgets/conversation_feed/conversation_feed_sync_gate.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/conversation_feed/conversation_feed_ui.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/conversation_feed/conversation_group_notice_entry_tile.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/conversation_feed/group_notice_feed_listenable.dart';
+import 'package:tencent_cloud_chat_demo/utils/avatar_image_warm.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_group_application.dart'
@@ -34,6 +38,32 @@ import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_glo
 import 'package:tencent_cloud_chat_uikit/theme/tui_theme.dart';
 import 'package:tencent_cloud_chat_uikit/ui/controller/tim_uikit_conversation_controller.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitConversation/archived_conversation_store.dart';
+
+({int start, int end}) conversationAvatarWarmRange({
+  required double offset,
+  required double viewportDimension,
+  required double rowExtent,
+  required int rowCount,
+  required int direction,
+  required int lookaheadRows,
+}) {
+  if (rowCount <= 0 || rowExtent <= 0 || viewportDimension <= 0) {
+    return (start: 0, end: 0);
+  }
+  final firstVisible = (offset / rowExtent).floor().clamp(0, rowCount - 1);
+  final visibleCount = (viewportDimension / rowExtent).ceil();
+  if (direction >= 0) {
+    final start = (firstVisible + visibleCount).clamp(0, rowCount);
+    return (
+      start: start,
+      end: (start + lookaheadRows).clamp(0, rowCount),
+    );
+  }
+  return (
+    start: (firstVisible - lookaheadRows).clamp(0, rowCount),
+    end: firstVisible.clamp(0, rowCount),
+  );
+}
 
 class ConversationFeedBody extends StatefulWidget {
   const ConversationFeedBody({
@@ -49,6 +79,7 @@ class ConversationFeedBody extends StatefulWidget {
     required this.getArchivedConversations,
     required this.conversationTimestampMs,
     required this.buildConversationRow,
+    required this.resolveConversationAvatarUrl,
     required this.onArchivedTap,
     required this.onGroupNoticeTap,
     required this.onGroupNoticePin,
@@ -77,6 +108,8 @@ class ConversationFeedBody extends StatefulWidget {
   final List<V2TimConversation> Function() getArchivedConversations;
   final int Function(V2TimConversation conversation) conversationTimestampMs;
   final Widget Function(V2TimConversation conversation) buildConversationRow;
+  final AvatarImageWarmSource Function(V2TimConversation conversation)
+      resolveConversationAvatarUrl;
   final VoidCallback onArchivedTap;
   final VoidCallback onGroupNoticeTap;
   final Future<void> Function() onGroupNoticePin;
@@ -102,6 +135,10 @@ class ConversationFeedBody extends StatefulWidget {
 }
 
 class _ConversationFeedBodyState extends State<ConversationFeedBody> {
+  static const int _avatarWarmLookaheadRows = 16;
+  static const Duration _avatarWarmThrottleInterval =
+      Duration(milliseconds: 48);
+
   /// 与会话行视觉高度大致对齐（按设备形态和字体缩放动态计算），用于置顶重排滚动补偿。
   double get _estimatedRowExtent => conversationFeedRowExtent(context);
 
@@ -111,7 +148,11 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
   List<String> _lastVisibleIds = const <String>[];
   int _lastStructureRevision = -1;
   int _cachedGroupNoticeSignature = 0;
+  List<GroupSystemNoticeItem>? _cachedNotices;
+  int _cachedNoticesSignature = 0;
   List<ConversationFeedRow>? _cachedFeedRows;
+  Map<String, int>? _cachedRowIndexMap;
+  int _cachedRowIndexSignature = 0;
   bool _cachedIncludeArchived = false;
   bool _cachedIncludeGroupNotice = false;
   bool _cachedGroupNoticePinned = false;
@@ -127,6 +168,14 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
   int? _pendingVirtualSkeletonType;
   int? _pendingVirtualSkeletonCenter;
   bool _pendingVirtualSkeletonNearEnd = false;
+  int _virtualHydrateGeneration = 0;
+  bool _feedTickerActive = true;
+  Timer? _avatarWarmTimer;
+  double? _lastAvatarWarmOffset;
+  double? _pendingAvatarWarmOffset;
+  double? _pendingAvatarWarmViewport;
+  int _pendingAvatarWarmDirection = 1;
+  bool _hasWarmedInitialAvatarWindow = false;
 
   /// 已处理的 PeerProfile revision，避免同一次 Bus 在 builder 路径重复套用。
   int _lastHandledPeerProfileRevision = -1;
@@ -137,6 +186,11 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
     _groupNoticeFeedListenable = GroupNoticeFeedListenable();
     _structureFeedListenable = _buildStructureFeedListenable();
     PeerProfileRefreshBus.instance.revision.addListener(_onPeerProfileRefresh);
+    widget.feedScrollController.addListener(_onPredictiveAvatarWarm);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _warmInitialAvatarWindow();
+    });
   }
 
   @override
@@ -152,6 +206,24 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
         oldWidget.isGroupTab != widget.isGroupTab) {
       _structureFeedListenable = _buildStructureFeedListenable();
     }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final active = TickerMode.of(context);
+    if (_feedTickerActive && !active) {
+      _clearPendingVirtualHydrate();
+    }
+    _feedTickerActive = active;
+  }
+
+  void _clearPendingVirtualHydrate() {
+    _virtualHydrateGeneration++;
+    _virtualSkeletonHydrateScheduled = false;
+    _pendingVirtualSkeletonType = null;
+    _pendingVirtualSkeletonCenter = null;
+    _pendingVirtualSkeletonNearEnd = false;
   }
 
   /// Archive / folder / group-notice / settings / live — not list content.
@@ -180,6 +252,9 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
 
   @override
   void dispose() {
+    _clearPendingVirtualHydrate();
+    widget.feedScrollController.removeListener(_onPredictiveAvatarWarm);
+    _avatarWarmTimer?.cancel();
     PeerProfileRefreshBus.instance.revision.removeListener(
       _onPeerProfileRefresh,
     );
@@ -187,11 +262,153 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
     super.dispose();
   }
 
+  /// 滚动中按固定节奏预热即将进入视口的 thumb。
+  ///
+  /// 这里必须是 leading-edge throttle，不能做 debounce：滚动通知每帧到达，
+  /// debounce 会一直被取消，最终只在用户停手后才解码，来不及服务首帧。
+  void _onPredictiveAvatarWarm() {
+    if (!mounted ||
+        !_feedTickerActive ||
+        !widget.feedScrollController.hasClients) {
+      return;
+    }
+    final position = widget.feedScrollController.position;
+    if (!position.isScrollingNotifier.value ||
+        position.viewportDimension <= 0) {
+      return;
+    }
+    final offset = position.pixels;
+    final previous = _lastAvatarWarmOffset;
+    _lastAvatarWarmOffset = offset;
+    final direction = previous == null || offset >= previous ? 1 : -1;
+    _pendingAvatarWarmOffset = offset;
+    _pendingAvatarWarmViewport = position.viewportDimension;
+    _pendingAvatarWarmDirection = direction;
+    if (_avatarWarmTimer == null) {
+      _drainPredictiveAvatarWarm();
+    }
+  }
+
+  void _drainPredictiveAvatarWarm() {
+    _avatarWarmTimer?.cancel();
+    _avatarWarmTimer = null;
+    final offset = _pendingAvatarWarmOffset;
+    final viewport = _pendingAvatarWarmViewport;
+    if (!mounted || !_feedTickerActive || offset == null || viewport == null) {
+      _pendingAvatarWarmOffset = null;
+      _pendingAvatarWarmViewport = null;
+      return;
+    }
+    _pendingAvatarWarmOffset = null;
+    _pendingAvatarWarmViewport = null;
+    final rows = widget.getVisibleConversations();
+    final range = conversationAvatarWarmRange(
+      offset: offset,
+      viewportDimension: viewport,
+      rowExtent: _estimatedRowExtent,
+      rowCount: rows.length,
+      direction: _pendingAvatarWarmDirection,
+      lookaheadRows: _avatarWarmLookaheadRows,
+    );
+    _warmAvatarRange(rows, start: range.start, end: range.end);
+    _avatarWarmTimer = Timer(_avatarWarmThrottleInterval, () {
+      _avatarWarmTimer = null;
+      if (_pendingAvatarWarmOffset != null) {
+        _drainPredictiveAvatarWarm();
+      }
+    });
+  }
+
+  void _warmInitialAvatarWindow() {
+    if (_hasWarmedInitialAvatarWindow) return;
+    final rows = widget.getVisibleConversations();
+    if (rows.isEmpty) return;
+    _hasWarmedInitialAvatarWindow = true;
+    final visibleCount = widget.feedScrollController.hasClients
+        ? (widget.feedScrollController.position.viewportDimension /
+                _estimatedRowExtent)
+            .ceil()
+        : 8;
+    _warmAvatarRange(
+      rows,
+      start: 0,
+      end: (visibleCount + _avatarWarmLookaheadRows).clamp(0, rows.length),
+    );
+  }
+
+  void _warmAvatarRange(
+    List<V2TimConversation> rows, {
+    required int start,
+    required int end,
+  }) {
+    if (!mounted || start >= end) return;
+    final sources = rows
+        .sublist(start, end)
+        .map(widget.resolveConversationAvatarUrl)
+        .where((source) => source.url?.trim().isNotEmpty == true)
+        .toList(growable: false);
+    if (sources.isEmpty) return;
+    unawaited(
+      AvatarImageWarm.warmSources(
+        sources,
+        context: context,
+        logicalSize: conversationFeedAvatarSize(context),
+      ),
+    );
+  }
+
   void _scheduleVirtualSkeletonHydrate({
     required int convType,
     required int centerIndex,
     required bool nearEnd,
   }) {
+    ConversationPerfGateLog.log(
+      'conversation_skeleton_request',
+      extras: <String, Object?>{
+        'convType': convType,
+        'centerIndex': centerIndex,
+        'nearEnd': nearEnd,
+        'feedTickerActive': _feedTickerActive,
+        'singlePosition':
+            conversationFeedHasSinglePosition(widget.feedScrollController),
+        'hasClients': widget.feedScrollController.hasClients,
+        'isScrolling': widget.feedScrollController.hasClients &&
+            widget.feedScrollController.position.isScrollingNotifier.value,
+        'pending': _virtualSkeletonHydrateScheduled,
+      },
+    );
+    // A missing row on the initial committed view must actively load. The
+    // scroll-settle gate is only valid for an already-mounted window; using it
+    // for the first skeleton creates a deadlock where no scroll event arrives
+    // to trigger the hydrate.
+    final hasMountedFeed = _feedTickerActive &&
+        conversationFeedHasSinglePosition(widget.feedScrollController);
+    if (!hasMountedFeed) {
+      ConversationPerfGateLog.log(
+        'conversation_skeleton_hydrate_immediate',
+        extras: <String, Object?>{
+          'convType': convType,
+          'centerIndex': centerIndex
+        },
+      );
+      unawaited(
+        ConversationListNotifier.instance.ensureTypeIndexHydrated(
+          convType: convType,
+          centerIndex: centerIndex,
+          allowWindowJump: true,
+          forceNotify: true,
+        ),
+      );
+      return;
+    }
+    if (!_feedTickerActive ||
+        !conversationFeedHasSinglePosition(widget.feedScrollController)) {
+      ConversationPerfGateLog.log(
+        'conversation_skeleton_hydrate_blocked',
+        extras: <String, Object?>{'reason': 'feed_not_ready'},
+      );
+      return;
+    }
     final isScrolling = widget.feedScrollController.hasClients &&
         widget.feedScrollController.position.isScrollingNotifier.value;
     if (!conversationVirtualSkeletonMayRequestHydrate(
@@ -210,9 +427,15 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
       return;
     }
     _virtualSkeletonHydrateScheduled = true;
+    final generation = _virtualHydrateGeneration;
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || generation != _virtualHydrateGeneration) {
+        return;
+      }
       _virtualSkeletonHydrateScheduled = false;
-      if (!mounted) {
+      if (!_feedTickerActive ||
+          !conversationFeedHasSinglePosition(widget.feedScrollController)) {
+        _clearPendingVirtualHydrate();
         return;
       }
       final stillScrolling = widget.feedScrollController.hasClients &&
@@ -222,6 +445,13 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
             ConversationPerfFlags.virtualHydrateOnlyOnScrollSettle,
         isScrolling: stillScrolling,
       )) {
+        ConversationPerfGateLog.log(
+          'conversation_skeleton_hydrate_blocked',
+          extras: <String, Object?>{
+            'reason': 'scroll_gate',
+            'isScrolling': isScrolling
+          },
+        );
         _pendingVirtualSkeletonType = null;
         _pendingVirtualSkeletonCenter = null;
         _pendingVirtualSkeletonNearEnd = false;
@@ -238,6 +468,11 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
           ConversationListNotifier.instance.ensureTypeIndexHydrated(
             convType: type,
             centerIndex: center,
+            // This request came from a mounted skeleton that is already in
+            // the viewport. Let it jump to that target window; otherwise a
+            // fast fling remains skeleton-only until scrolling stops, even
+            // when all target avatars are already decoded.
+            allowWindowJump: true,
           ),
         );
       }
@@ -383,9 +618,22 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
   }
 
   List<GroupSystemNoticeItem> _notices() {
-    return List<GroupSystemNoticeItem>.from(
-      GroupSystemNoticeService.instance.notices,
-    )..sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    // Cache the sorted notices list: only re-copy and re-sort when the
+    // source list's length or content signature changes. This avoids
+    // an O(N log N) copy+sort on every structure rebuild.
+    final source = GroupSystemNoticeService.instance.notices;
+    final sourceLen = source.length;
+    var sig = sourceLen;
+    for (var i = 0; i < sourceLen; i++) {
+      sig = sig * 31 + (source[i].timestamp ?? 0);
+    }
+    if (_cachedNotices != null && sig == _cachedNoticesSignature) {
+      return _cachedNotices!;
+    }
+    _cachedNoticesSignature = sig;
+    _cachedNotices = List<GroupSystemNoticeItem>.from(source)
+      ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    return _cachedNotices!;
   }
 
   @override
@@ -611,19 +859,42 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
     _cachedGroupNoticeSignature = noticeSignature;
     // 虚拟列表通过 typeIndex 定位子项，不需要构建整窗 ID→index map。
     // 该 map 仅供普通 ListView 的 findChildIndexCallback 使用。
-    final rowIndexByConversationId = <String, int>{};
+    // Cache the map: only rebuild when the row list signature changes.
+    Map<String, int> rowIndexByConversationId;
     if (!useVirtual) {
+      var sig = rows.length;
       for (var i = 0; i < rows.length; i++) {
-        final id = rows[i].conversation?.conversationID;
-        if (id != null && id.isNotEmpty) {
-          rowIndexByConversationId[id] = i;
-        }
+        final id = rows[i].conversation?.conversationID ?? '';
+        sig = sig * 31 + id.hashCode;
       }
+      if (_cachedRowIndexMap != null && sig == _cachedRowIndexSignature) {
+        rowIndexByConversationId = _cachedRowIndexMap!;
+      } else {
+        rowIndexByConversationId = <String, int>{};
+        for (var i = 0; i < rows.length; i++) {
+          final id = rows[i].conversation?.conversationID;
+          if (id != null && id.isNotEmpty) {
+            rowIndexByConversationId[id] = i;
+          }
+        }
+        _cachedRowIndexMap = rowIndexByConversationId;
+        _cachedRowIndexSignature = sig;
+      }
+    } else {
+      rowIndexByConversationId = const {};
     }
     final order = ConversationPinFlickerLog.orderSnapshot(
       visibleConversations,
     );
     final prevVisibleIds = _lastVisibleIds;
+    if (tabActive &&
+        prevVisibleIds.isEmpty &&
+        nextVisibleIds.isNotEmpty &&
+        !_hasWarmedInitialAvatarWindow) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _warmInitialAvatarWindow();
+      });
+    }
     // 长列表勿 join 全量 ID 串：用长度+hash 判序变更即可。
     var idsHash = nextVisibleIds.length;
     for (final id in nextVisibleIds) {
@@ -636,9 +907,8 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
     final scrollOffset = widget.feedScrollController.hasClients
         ? widget.feedScrollController.offset
         : -1.0;
-    final firstVisibleEst = scrollOffset < 0
-        ? -1
-        : (scrollOffset / _estimatedRowExtent).floor();
+    final firstVisibleEst =
+        scrollOffset < 0 ? -1 : (scrollOffset / _estimatedRowExtent).floor();
     ConversationPinFlickerLog.log(
       'feed_list_rebuild',
       extras: <String, Object?>{
@@ -748,8 +1018,8 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
         }
         final showFooter = widget.feedBottomExhausted;
         final bodyExtra = showInlineGroupNotice ? 1 : 0;
-        final itemCount =
-            headerCount + total + bodyExtra + (showFooter ? 1 : 0);
+        final contentItemCount = headerCount + total + bodyExtra;
+        final itemCount = contentItemCount + (showFooter ? 1 : 0);
 
         Widget buildNoticeTile() {
           final editing = widget.isEditingGetter?.call() ?? false;
@@ -831,17 +1101,29 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
             );
           },
           itemBuilder: (context, index) {
+            final showDivider = index < contentItemCount - 1;
+            final editing = widget.isEditingGetter?.call() ?? false;
             if (index < headerCount) {
               if (includeArchivedEntry && index == 0) {
-                return ConversationArchivedEntryTile(
-                  key: const ValueKey<String>('feed_archived'),
-                  theme: widget.theme,
-                  archiveScope: widget.archiveScope,
-                  getArchivedConversations: widget.getArchivedConversations,
-                  onTap: widget.onArchivedTap,
+                return _buildFeedRowWithDivider(
+                  context,
+                  ConversationArchivedEntryTile(
+                    key: const ValueKey<String>('feed_archived'),
+                    theme: widget.theme,
+                    archiveScope: widget.archiveScope,
+                    getArchivedConversations: widget.getArchivedConversations,
+                    onTap: widget.onArchivedTap,
+                  ),
+                  showDivider: showDivider,
+                  editing: editing,
                 );
               }
-              return maybeAnimateNotice(buildNoticeTile());
+              return _buildFeedRowWithDivider(
+                context,
+                maybeAnimateNotice(buildNoticeTile()),
+                showDivider: showDivider,
+                editing: editing,
+              );
             }
             final bodyIndex = index - headerCount;
             final bodyLen = total + bodyExtra;
@@ -870,7 +1152,12 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
               bodyIndex: bodyIndex,
               noticeInsertAt: noticeInsertAt,
             )) {
-              return maybeAnimateNotice(buildNoticeTile());
+              return _buildFeedRowWithDivider(
+                context,
+                maybeAnimateNotice(buildNoticeTile()),
+                showDivider: showDivider,
+                editing: editing,
+              );
             }
             final typeIndex = virtualFeedTypeIndexForBodyIndex(
               bodyIndex: bodyIndex,
@@ -878,35 +1165,69 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
               total: total,
             );
             if (typeIndex == null) {
-              return SizedBox(
-                key: ValueKey<String>('vidx_gap:$bodyIndex'),
-                height: _estimatedRowExtent,
+              return _buildFeedRowWithDivider(
+                context,
+                SizedBox(
+                  key: ValueKey<String>('vidx_gap:$bodyIndex'),
+                  height: _estimatedRowExtent,
+                ),
+                showDivider: showDivider,
+                editing: editing,
               );
             }
 
             final conversation =
                 notifier.conversationAtTypeIndex(convType, typeIndex);
             if (conversation == null) {
+              ConversationPerfGateLog.log(
+                'conversation_skeleton_build',
+                extras: <String, Object?>{
+                  'convType': convType,
+                  'bodyIndex': bodyIndex,
+                  'typeIndex': typeIndex,
+                  'total': total,
+                  'tabStoreCount':
+                      ConversationTabStore.instance.countForType(convType),
+                  'notifierTypeCount': ConversationListNotifier.instance
+                      .totalCountForType(convType),
+                  'notifierTargetHit': ConversationListNotifier.instance
+                          .conversationAtTypeIndex(convType, typeIndex) !=
+                      null,
+                  'targetHit': ConversationTabStore.instance
+                          .atTypeIndex(convType, typeIndex) !=
+                      null,
+                },
+              );
               _scheduleVirtualSkeletonHydrate(
                 convType: convType,
                 centerIndex: typeIndex,
                 nearEnd: typeIndex >= total - 8,
               );
-              return KeyedSubtree(
-                key: ValueKey<String>('vidx:$typeIndex'),
-                child: buildConversationFeedRowSkeleton(
-                  context,
-                  widget.theme,
-                  variance: typeIndex,
-                  height: _estimatedRowExtent,
+              return _buildFeedRowWithDivider(
+                context,
+                KeyedSubtree(
+                  key: ValueKey<String>('vidx:$typeIndex'),
+                  child: buildConversationFeedRowSkeleton(
+                    context,
+                    widget.theme,
+                    variance: typeIndex,
+                    height: _estimatedRowExtent,
+                  ),
                 ),
+                showDivider: showDivider,
+                editing: editing,
               );
             }
-            return _ConversationFeedRowSlot(
-              key: ValueKey(conversation.conversationID),
-              conversation: conversation,
-              themeToken: widget.theme,
-              builder: widget.buildConversationRow,
+            return _buildFeedRowWithDivider(
+              context,
+              _ConversationFeedRowSlot(
+                key: ValueKey(conversation.conversationID),
+                conversation: conversation,
+                themeToken: widget.theme,
+                builder: widget.buildConversationRow,
+              ),
+              showDivider: showDivider,
+              editing: editing,
             );
           },
         );
@@ -955,6 +1276,35 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
     return future;
   }
 
+  /// 列表级分割线：会话 item 本身只负责内容，分割线统一由 feed 槽位绘制。
+  Widget _buildFeedRowWithDivider(
+    BuildContext context,
+    Widget child, {
+    required bool showDivider,
+    bool editing = false,
+  }) {
+    if (!showDivider) {
+      return child;
+    }
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        child,
+        Positioned(
+          left: conversationFeedDividerInset(context, editing: editing),
+          right: 0,
+          bottom: 0,
+          child: IgnorePointer(
+            child: ColoredBox(
+              color: widget.theme.weakDividerColor ?? const Color(0xFFE5E6E9),
+              child: const SizedBox(height: 0.6),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildFeedListView({
     required List<ConversationFeedRow> rows,
     required Map<String, int> rowIndexByConversationId,
@@ -971,6 +1321,13 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
       physics: widget.scrollPhysics,
       addAutomaticKeepAlives: false,
       cacheExtent: ConversationPerfFlags.conversationFeedCacheExtent,
+      // Fixed item extent for all conversation rows. The footer is
+      // taller than a row, but ListView.builder with itemExtent
+      // delegates the last item's height to the builder when it
+      // exceeds itemExtent. This eliminates per-frame layout for the
+      // vast majority of rows during scroll — the single biggest
+      // difference from Telegram's scroll smoothness.
+      itemExtent: _estimatedRowExtent,
       itemCount: rows.length + extra,
       findChildIndexCallback: (Key key) {
         if (key is! ValueKey<String>) {
@@ -1000,12 +1357,19 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
           );
         }
         final row = rows[index];
+        final showDivider = index < rows.length - 1;
+        final editing = widget.isEditingGetter?.call() ?? false;
         if (row.kind == ConversationFeedRowKind.archived) {
-          return ConversationArchivedEntryTile(
-            theme: widget.theme,
-            archiveScope: widget.archiveScope,
-            getArchivedConversations: widget.getArchivedConversations,
-            onTap: widget.onArchivedTap,
+          return _buildFeedRowWithDivider(
+            context,
+            ConversationArchivedEntryTile(
+              theme: widget.theme,
+              archiveScope: widget.archiveScope,
+              getArchivedConversations: widget.getArchivedConversations,
+              onTap: widget.onArchivedTap,
+            ),
+            showDivider: showDivider,
+            editing: editing,
           );
         }
         if (row.kind == ConversationFeedRowKind.groupNotice) {
@@ -1031,22 +1395,37 @@ class _ConversationFeedBodyState extends State<ConversationFeedBody> {
           }
 
           if (listenable == null) {
-            return buildNoticeTile();
+            return _buildFeedRowWithDivider(
+              context,
+              buildNoticeTile(),
+              showDivider: showDivider,
+              editing: editing,
+            );
           }
-          return AnimatedBuilder(
-            animation: listenable,
-            builder: (context, _) => buildNoticeTile(),
+          return _buildFeedRowWithDivider(
+            context,
+            AnimatedBuilder(
+              animation: listenable,
+              builder: (context, _) => buildNoticeTile(),
+            ),
+            showDivider: showDivider,
+            editing: editing,
           );
         }
         final conversation = row.conversation;
         if (conversation == null) {
           return const SizedBox.shrink();
         }
-        return _ConversationFeedRowSlot(
-          key: ValueKey(conversation.conversationID),
-          conversation: conversation,
-          themeToken: widget.theme,
-          builder: widget.buildConversationRow,
+        return _buildFeedRowWithDivider(
+          context,
+          _ConversationFeedRowSlot(
+            key: ValueKey(conversation.conversationID),
+            conversation: conversation,
+            themeToken: widget.theme,
+            builder: widget.buildConversationRow,
+          ),
+          showDivider: showDivider,
+          editing: editing,
         );
       },
     );
@@ -1073,7 +1452,7 @@ class _ConversationFeedRowSlot extends StatefulWidget {
 }
 
 class _ConversationFeedRowSlotState extends State<_ConversationFeedRowSlot> {
-  late String _fingerprint;
+  late int _fingerprint;
   late TUITheme _themeToken;
   late Widget Function(V2TimConversation conversation) _builder;
   late Widget _child;
@@ -1081,7 +1460,7 @@ class _ConversationFeedRowSlotState extends State<_ConversationFeedRowSlot> {
   @override
   void initState() {
     super.initState();
-    _fingerprint = ConversationListNotifier.conversationUiFingerprint(
+    _fingerprint = ConversationListNotifier.conversationUiFingerprintHash(
       widget.conversation,
     );
     _themeToken = widget.themeToken;
@@ -1092,7 +1471,8 @@ class _ConversationFeedRowSlotState extends State<_ConversationFeedRowSlot> {
   @override
   void didUpdateWidget(covariant _ConversationFeedRowSlot oldWidget) {
     super.didUpdateWidget(oldWidget);
-    final nextFingerprint = ConversationListNotifier.conversationUiFingerprint(
+    final nextFingerprint =
+        ConversationListNotifier.conversationUiFingerprintHash(
       widget.conversation,
     );
     final builderChanged = !identical(widget.builder, _builder);

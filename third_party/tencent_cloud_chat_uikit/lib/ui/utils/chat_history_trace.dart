@@ -1,15 +1,16 @@
 import 'package:flutter/foundation.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
-import 'package:tencent_cloud_chat_sdk/tencent_im_sdk_plugin.dart';
-import 'package:tencent_cloud_chat_uikit/ui/utils/platform.dart';
 
 /// Chat history pagination / 首屏源追溯。过滤关键字：`[ChatHistory]`。
 class ChatHistoryTrace {
   ChatHistoryTrace._();
 
-  /// 诊断完成后关闭。需要追溯分页/首屏源时再临时改为 true。
-  static const bool enabled = false;
+  /// Debug and profile builds emit the trace by default for reproductions.
+  /// Release builds stay silent; pass `--dart-define=CHAT_HISTORY_TRACE=false`
+  /// to quiet a debug/profile session.
+  static const bool enabled = (kDebugMode || kProfileMode) &&
+      bool.fromEnvironment('CHAT_HISTORY_TRACE', defaultValue: true);
 
   /// SDK uikitTrace 仅 debug，避免 release 滚动开销。
   static const bool sdkTraceEnabled = false;
@@ -31,14 +32,10 @@ class ChatHistoryTrace {
       if (value == null) {
         return;
       }
-      buffer.write(' $key=$value');
+      final safeValue = value.toString().replaceAll(RegExp(r'[\r\n]+'), ' ');
+      buffer.write(' $key=$safeValue');
     });
-    final text = buffer.toString();
-    // ignore: avoid_print
-    print(text);
-    if (sdkTraceEnabled && !PlatformUtils().isWeb) {
-      TencentImSDKPlugin.v2TIMManager.uikitTrace(trace: text);
-    }
+    debugPrint(buffer.toString());
   }
 
   /// 首/尾消息摘要：count / msgId / ts / seq，用于对比 Peek 与聊天页窗口。

@@ -9,6 +9,10 @@ import 'package:tencent_cloud_chat_demo/src/services/livekit_call_navigator.dart
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_ringtone.dart';
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_session.dart';
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_ui_log.dart';
+import 'package:tencent_cloud_chat_demo/src/services/call_result_record.dart';
+import 'package:tencent_cloud_chat_demo/src/services/call_result_repository.dart';
+import 'package:tencent_cloud_chat_demo/src/services/call_result_enrichment_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/call_bubble_insert_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/notification_settings_service.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/call_user_id.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/voip_push_payload.dart';
@@ -16,6 +20,7 @@ import 'package:tencent_cloud_chat_sdk/enum/V2TimAdvancedMsgListener.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 import 'package:tencent_cloud_chat_sdk/tencent_im_sdk_plugin.dart';
+import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 
 /// Whether to push the Flutter fullscreen incoming-call page.
 ///
@@ -132,6 +137,14 @@ class LiveKitCallSignaling {
       'signaling action=$action callId=$callId '
       'caller=$callerId callee=$calleeId',
     );
+    _mergeSignalingState(
+      callId: callId,
+      action: action,
+      callerId: callerId,
+      calleeId: calleeId,
+      mediaType: mediaType,
+      roomName: roomName,
+    );
     if (kDebugMode) {
       debugPrint(
         'LiveKitCallSignaling: action=$action callId=$callId '
@@ -227,6 +240,53 @@ class LiveKitCallSignaling {
           await IosApnsPushService.instance.endVoipCallKit(inviteId: callId);
         } catch (_) {}
         break;
+    }
+  }
+
+  void _mergeSignalingState({
+    required String callId,
+    required String action,
+    required String callerId,
+    required String calleeId,
+    required String mediaType,
+    required String roomName,
+  }) {
+    final wasUnknown = CallResultRepository.instance.get(callId) == null;
+    final self = _safeSelfUserId();
+    final peer = self.isNotEmpty && CallUserId.isSameCallUserId(self, calleeId)
+        ? callerId
+        : (calleeId.isNotEmpty ? calleeId : callerId);
+    final record = CallResultRecord.fromSignaling(
+      callId: callId,
+      action: action,
+      conversationId: peer.isEmpty ? '' : 'c2c_$peer',
+      callerUserId: callerId,
+      calleeUserId: calleeId,
+      peerUserId: peer,
+      roomName: roomName,
+      mediaType: mediaType,
+      isOutgoing:
+          self.isNotEmpty && CallUserId.isSameCallUserId(self, callerId),
+    );
+    CallResultRepository.instance.save(record);
+    CallBubbleInsertService.instance.upsertLifecycleBubble(
+      record,
+      reason: 'signaling_$action',
+    );
+    if (record.effectiveStatus.isTerminal) {
+      unawaited(CallResultEnrichmentService.instance.reconcileStatus(callId));
+    } else if (wasUnknown && action != 'invite') {
+      unawaited(CallResultEnrichmentService.instance.reconcileStatus(callId));
+    }
+  }
+
+  String _safeSelfUserId() {
+    try {
+      return CallUserId.normalizeCallUserId(
+        TIMUIKitCore.getInstance().loginInfo.userID,
+      );
+    } catch (_) {
+      return '';
     }
   }
 }

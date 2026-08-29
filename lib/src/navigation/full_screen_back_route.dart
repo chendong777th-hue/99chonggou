@@ -304,10 +304,12 @@ class _FullScreenBackInteractorState extends State<_FullScreenBackInteractor> {
   @override
   Widget build(BuildContext context) {
     final content = RepaintBoundary(child: widget.child);
-    if (!_gestureAllowed() && _gestureDriver == null) {
-      return content;
-    }
-
+    // Keep this wrapper structurally stable for the whole route lifetime.
+    // When the push transition completes, [_gestureAllowed] changes from false
+    // to true. Returning a bare [content] before that point and a [Stack]
+    // afterwards reparents the entire chat subtree, which deactivates the
+    // history list precisely when its first history request is completing.
+    final gestureEnabled = _gestureAllowed() || _gestureDriver != null;
     return Stack(
       fit: StackFit.expand,
       children: [
@@ -317,16 +319,19 @@ class _FullScreenBackInteractorState extends State<_FullScreenBackInteractor> {
           top: 0,
           bottom: 0,
           width: widget.edgeStartWidthPx,
-          child: RawGestureDetector(
-            behavior: HitTestBehavior.translucent,
-            gestures: {
-              _FullScreenBackRecognizer:
-                  GestureRecognizerFactoryWithHandlers<_FullScreenBackRecognizer>(
-                () => _recognizer,
-                (_) {},
-              ),
-            },
-            child: const SizedBox.expand(),
+          child: IgnorePointer(
+            ignoring: !gestureEnabled,
+            child: RawGestureDetector(
+              behavior: HitTestBehavior.translucent,
+              gestures: {
+                _FullScreenBackRecognizer:
+                    GestureRecognizerFactoryWithHandlers<_FullScreenBackRecognizer>(
+                  () => _recognizer,
+                  (_) {},
+                ),
+              },
+              child: const SizedBox.expand(),
+            ),
           ),
         ),
       ],

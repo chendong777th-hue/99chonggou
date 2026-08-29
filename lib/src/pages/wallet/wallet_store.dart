@@ -127,6 +127,18 @@ class WalletStore {
     ].join('|');
   }
 
+  /// Simplified key for in-flight request dedup: only type + orderId.
+  /// The full cache key includes status/greeting which can differ across
+  /// calls (null vs empty string vs COMPLETED), causing the same API
+  /// endpoint to be hit 3-4 times per chat open. Using a stable request
+  /// key ensures at most one concurrent fetch per order.
+  String _orderCardRequestKey({
+    required String type,
+    required String orderId,
+  }) {
+    return '${type}_$orderId';
+  }
+
   WalletOrderCardDto? peekOrderCard({
     required String type,
     required String orderId,
@@ -169,10 +181,14 @@ class WalletStore {
 
     final cached = _cards[key];
     if (cached != null) {
-      return _cardFutures[key] ??= Future.value(cached);
+      return Future.value(cached);
     }
 
-    final running = _cardFutures[key];
+    // Request dedup: use a stable key (type + orderId) so that multiple
+    // callers with slightly different status/greeting values (null vs
+    // empty vs COMPLETED) don't each trigger a separate API call.
+    final requestKey = _orderCardRequestKey(type: type, orderId: orderId);
+    final running = _cardFutures[requestKey];
     if (running != null) return running;
 
     final local = buildLocalOrderCard(
@@ -224,12 +240,15 @@ class WalletStore {
       );
     }).then((value) {
       _cards[key] = value;
+      // Also populate requestKey-based lookups for callers that used
+      // different status/greeting values.
+      _cards[requestKey] = value;
       return value;
     }).whenComplete(() {
-      _cardFutures.remove(key);
+      _cardFutures.remove(requestKey);
     });
 
-    _cardFutures[key] = future;
+    _cardFutures[requestKey] = future;
     return future;
   }
 
@@ -262,7 +281,10 @@ class WalletStore {
       greeting: greeting,
     );
     _cards.remove(key);
-    _cardFutures.remove(key);
+    // Also remove any requestKey-based cache entry.
+    final requestKey = _orderCardRequestKey(type: type, orderId: orderId);
+    _cards.remove(requestKey);
+    _cardFutures.remove(requestKey);
   }
 
   void clear() {

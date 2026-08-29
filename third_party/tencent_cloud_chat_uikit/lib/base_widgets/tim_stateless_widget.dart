@@ -10,18 +10,17 @@ abstract class TIMStatelessWidget extends StatelessWidget {
   // override这个函数来承接处理onTIMCallback回调。
   // 目前base层，会自动触发`TIMCallbackType.FLUTTER_ERROR`类型Flutter Framework异常。
   // 其他类型callback请自行处理。
-  void onTIMCallback(TIMCallback callbackValue) {
-  }
+  void onTIMCallback(TIMCallback callbackValue) {}
 
-  bool isAndroidDevice(){
+  bool isAndroidDevice() {
     return !kIsWeb && Platform.isAndroid;
   }
 
-  bool isIosDevice(){
+  bool isIosDevice() {
     return !kIsWeb && Platform.isIOS;
   }
 
-  bool isWebDevice(){
+  bool isWebDevice() {
     return kIsWeb;
   }
 
@@ -41,7 +40,6 @@ abstract class TIMStatelessWidget extends StatelessWidget {
       if (_ignoreWebMouseTrackerError(details)) {
         return;
       }
-      FlutterError.dumpErrorToConsole(details, forceReport: true);
       onTIMCallback(TIMCallback(
           type: TIMCallbackType.FLUTTER_ERROR,
           stackTrace: details.stack,

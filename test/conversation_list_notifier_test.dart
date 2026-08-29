@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_unread_aggregate.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/conversation_feed/conversation_feed_ui.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
@@ -67,7 +68,6 @@ void main() {
       ];
       expect(ConversationListNotifier.listsEqualForUi(left, right), isFalse);
     });
-
   });
 
   group('ConversationListNotifier.zeroUnreadLocally', () {
@@ -75,28 +75,46 @@ void main() {
 
     setUp(() {
       notifier = ConversationListNotifier.instance;
+      ConversationUnreadAggregate.instance.resetForTest();
       notifier.setConversationsForTest([
         _conversation(id: 'group_g1', unread: 4),
       ]);
     });
 
+    tearDown(ConversationUnreadAggregate.instance.resetForTest);
+
     test('notifies when unread drops from positive to zero', () {
       var notifyCount = 0;
-      notifier.addListener(() => notifyCount++);
+      void listener() => notifyCount++;
+      notifier.addListener(listener);
       notifier.zeroUnreadLocally('group_g1');
       expect(notifyCount, 1);
       expect(notifier.conversations.first.unreadCount, 0);
+      notifier.removeListener(listener);
     });
 
     test('does not notify when unread already zero in memory', () {
       final shared = notifier.conversations.first;
       shared.unreadCount = 0;
       var notifyCount = 0;
-      notifier.addListener(() => notifyCount++);
+      void listener() => notifyCount++;
+      notifier.addListener(listener);
       notifier.zeroUnreadLocally('group_g1');
       expect(notifyCount, 0);
       notifier.zeroUnreadLocally('group_g1');
       expect(notifyCount, 0);
+      notifier.removeListener(listener);
+    });
+
+    test('updates aggregate in the same synchronous commit', () {
+      ConversationUnreadAggregate.instance.setSumsForTest(c2c: 0, group: 9);
+
+      notifier.zeroUnreadLocally('group_g1');
+
+      expect(
+        ConversationUnreadAggregate.instance.groupNotifiableUnreadSum,
+        5,
+      );
     });
   });
 
@@ -112,7 +130,8 @@ void main() {
 
     test('updates showName and notifies for fingerprint refresh', () {
       var notifyCount = 0;
-      notifier.addListener(() => notifyCount++);
+      void listener() => notifyCount++;
+      notifier.addListener(listener);
       notifier.applyShowNameLocally(
         conversationID: 'c2c_alice',
         showName: '备注名',
@@ -125,16 +144,19 @@ void main() {
         ),
         contains('备注名'),
       );
+      notifier.removeListener(listener);
     });
 
     test('does not notify when showName unchanged', () {
       var notifyCount = 0;
-      notifier.addListener(() => notifyCount++);
+      void listener() => notifyCount++;
+      notifier.addListener(listener);
       notifier.applyShowNameLocally(
         conversationID: 'c2c_alice',
         showName: 'Alice',
       );
       expect(notifyCount, 0);
+      notifier.removeListener(listener);
     });
   });
 
@@ -156,19 +178,23 @@ void main() {
     test('updates showName from Store and notifies', () {
       DisplayNameStore.instance.setC2C('alice', '新备注', notify: false);
       var notifyCount = 0;
-      notifier.addListener(() => notifyCount++);
+      void listener() => notifyCount++;
+      notifier.addListener(listener);
       notifier.applyPeerDisplayNameFromStore('alice', busRevision: 1);
       expect(notifyCount, 1);
       expect(notifier.conversations.first.showName, '新备注');
+      notifier.removeListener(listener);
     });
 
     test('same busRevision is applied only once', () {
       DisplayNameStore.instance.setC2C('alice', '新备注', notify: false);
       var notifyCount = 0;
-      notifier.addListener(() => notifyCount++);
+      void listener() => notifyCount++;
+      notifier.addListener(listener);
       notifier.applyPeerDisplayNameFromStore('alice', busRevision: 7);
       notifier.applyPeerDisplayNameFromStore('alice', busRevision: 7);
       expect(notifyCount, 1);
+      notifier.removeListener(listener);
     });
 
     test('fingerprint includes DisplayNameStore fragment', () {
@@ -180,8 +206,8 @@ void main() {
       expect(after, contains('Store名'));
       expect(
         conversationFeedRowSlotNeedsRebuild(
-          nextFingerprint: after,
-          currentFingerprint: before,
+          nextFingerprint: after.hashCode,
+          currentFingerprint: before.hashCode,
           nextThemeToken: null,
           currentThemeToken: null,
         ),

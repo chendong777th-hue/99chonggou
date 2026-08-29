@@ -13,6 +13,9 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_history_batch.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_history_coverage.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_reconciliation_coordinator.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/archive_history_provider.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/message_history_peek_loader.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/message_services.dart';
@@ -26,10 +29,78 @@ class ConversationPeekLoadResult {
   const ConversationPeekLoadResult({
     required this.messages,
     required this.hasMoreOlder,
+    required this.isFinished,
+    this.requestedCursor,
+    this.returnedBounds = const MessageHistoryBounds.empty(),
+    this.batchKind = MessageHistoryBatchKind.olderPage,
   });
 
   final List<V2TimMessage> messages;
   final bool hasMoreOlder;
+  final bool isFinished;
+  final MessageHistoryCursor? requestedCursor;
+  final MessageHistoryBounds returnedBounds;
+  final MessageHistoryBatchKind batchKind;
+
+  /// Converts the legacy peek result into the typed history envelope used by
+  /// reconciliation. Generation and clear epoch belong to the caller because
+  /// they are allocated around the actual async request.
+  MessageHistoryBatch<V2TimMessage> toBatch({
+    required String conversationKey,
+    required MessageReconciliationSource requestedSource,
+    required MessageReconciliationSource actualSource,
+    required int requestGeneration,
+    required int clearEpoch,
+    required bool cloudResponseProven,
+    MessageHistoryBatchKind? batchKind,
+    Iterable<V2TimMessage>? messages,
+  }) {
+    final effectiveMessages =
+        messages?.toList(growable: false) ?? this.messages;
+    return MessageHistoryBatch<V2TimMessage>(
+      conversationKey: conversationKey,
+      requestedSource: requestedSource,
+      actualSource: actualSource,
+      batchKind: batchKind ?? this.batchKind,
+      requestGeneration: requestGeneration,
+      clearEpoch: clearEpoch,
+      requestedCursor: requestedCursor,
+      returnedBounds: messages == null && !returnedBounds.isEmpty
+          ? returnedBounds
+          : _boundsForMessages(effectiveMessages),
+      isFinished: isFinished,
+      hasMoreOlder: hasMoreOlder,
+      cloudHasMoreNewer: false,
+      cloudResponseProven: cloudResponseProven,
+      messages: effectiveMessages,
+    );
+  }
+
+  static MessageHistoryBounds _boundsForMessages(
+    Iterable<V2TimMessage> messages,
+  ) {
+    V2TimMessage? oldest;
+    V2TimMessage? newest;
+    for (final message in messages) {
+      if ((message.msgID?.trim() ?? '').isEmpty) continue;
+      if (oldest == null ||
+          TUIChatGlobalModel.compareMessagesChronological(message, oldest) <
+              0) {
+        oldest = message;
+      }
+      if (newest == null ||
+          TUIChatGlobalModel.compareMessagesChronological(message, newest) >
+              0) {
+        newest = message;
+      }
+    }
+    return MessageHistoryBounds(
+      oldestMsgID: oldest?.msgID,
+      newestMsgID: newest?.msgID,
+      oldestSeq: int.tryParse(oldest?.seq?.trim() ?? ''),
+      newestSeq: int.tryParse(newest?.seq?.trim() ?? ''),
+    );
+  }
 }
 
 class ConversationPeekService {
@@ -74,6 +145,7 @@ class ConversationPeekService {
       return const ConversationPeekLoadResult(
         messages: <V2TimMessage>[],
         hasMoreOlder: false,
+        isFinished: true,
       );
     }
     final isGroup = _isGroup(conversation);
@@ -102,6 +174,12 @@ class ConversationPeekService {
       hasMoreOlder:
           messages.length >= HistoryMessageDartConstant.initialOpenFetchCount ||
               !result.isFinished,
+      isFinished: result.isFinished,
+      batchKind: MessageHistoryBatchKind.latestWindow,
+      requestedCursor: const MessageHistoryCursor(
+        direction: MessageHistoryCursorDirection.latest,
+      ),
+      returnedBounds: ConversationPeekLoadResult._boundsForMessages(messages),
     );
   }
 
@@ -114,6 +192,7 @@ class ConversationPeekService {
       return const ConversationPeekLoadResult(
         messages: <V2TimMessage>[],
         hasMoreOlder: false,
+        isFinished: true,
       );
     }
     final isGroup = _isGroup(conversation);
@@ -142,6 +221,12 @@ class ConversationPeekService {
       hasMoreOlder:
           messages.length >= HistoryMessageDartConstant.initialOpenFetchCount ||
               !result.isFinished,
+      isFinished: result.isFinished,
+      batchKind: MessageHistoryBatchKind.localSnapshot,
+      requestedCursor: const MessageHistoryCursor(
+        direction: MessageHistoryCursorDirection.latest,
+      ),
+      returnedBounds: ConversationPeekLoadResult._boundsForMessages(messages),
     );
   }
 
@@ -165,6 +250,7 @@ class ConversationPeekService {
       return const ConversationPeekLoadResult(
         messages: [],
         hasMoreOlder: false,
+        isFinished: true,
       );
     }
 
@@ -361,6 +447,14 @@ class ConversationPeekService {
     return ConversationPeekLoadResult(
       messages: sorted,
       hasMoreOlder: hasMoreOlder,
+      isFinished: !hasMoreOlder,
+      batchKind: MessageHistoryBatchKind.olderPage,
+      requestedCursor: MessageHistoryCursor(
+        direction: MessageHistoryCursorDirection.older,
+        lastMsgID: lastMsgID,
+        lastMsgSeq: lastMsgSeq > 0 ? lastMsgSeq : null,
+      ),
+      returnedBounds: ConversationPeekLoadResult._boundsForMessages(sorted),
     );
   }
 

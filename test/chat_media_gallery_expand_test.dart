@@ -1,11 +1,13 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:tencent_cloud_chat_sdk/enum/history_msg_get_type_enum.dart';
 import 'package:tencent_cloud_chat_sdk/enum/message_elem_type.dart';
+import 'package:tencent_cloud_chat_sdk/enum/message_status.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_image_elem.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_image_elem.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_media_gallery_expand.dart';
+import 'package:tencent_cloud_chat_uikit/ui/utils/chat_media_preview_builder.dart';
 import 'package:tencent_cloud_chat_uikit/ui/widgets/chat_media_preview_item.dart';
 
 V2TimMessage _image({
@@ -181,6 +183,60 @@ void main() {
     );
     expect(resolved, isNotNull);
     expect(resolved!.map((m) => m.msgID), containsAll(['o1', 'tap', 'n1']));
+  });
+
+  test('revoked image is not previewable even with image payload retained', () {
+    final revoked = _image(msgID: 'revoked', timestamp: 200)
+      ..status = MessageStatus.V2TIM_MSG_STATUS_LOCAL_REVOKED;
+
+    expect(
+      isChatMediaPreviewable(
+        revoked,
+        const <ChatMediaPreviewType>{ChatMediaPreviewType.image},
+      ),
+      isFalse,
+    );
+  });
+
+  test('authoritative revoked seed suppresses stale cached image copy', () {
+    final revoked = _image(msgID: 'revoked', timestamp: 200)
+      ..status = MessageStatus.V2TIM_MSG_STATUS_LOCAL_REVOKED;
+    final staleCached = _image(msgID: 'revoked', timestamp: 200);
+    final valid = _image(msgID: 'valid', timestamp: 100);
+    final merged = mergeChatMediaGalleryMessages(
+      seedNewestFirst: <V2TimMessage>[revoked, valid],
+      expanded: <V2TimMessage>[staleCached],
+      tappedMessage: valid,
+      isPreviewable: (message) => isChatMediaPreviewable(
+        message,
+        const <ChatMediaPreviewType>{ChatMediaPreviewType.image},
+      ),
+    );
+
+    expect(merged.map((message) => message.msgID), <String?>['valid']);
+  });
+
+  test('revoke invalidation removes message from matching gallery cache', () {
+    ChatMediaGalleryExpandCache.clear();
+    addTearDown(ChatMediaGalleryExpandCache.clear);
+    final key = ChatMediaGalleryExpandCache.keyFor(
+      conversationID: 'group-room',
+      types: const <ChatMediaPreviewType>{ChatMediaPreviewType.image},
+    );
+    ChatMediaGalleryExpandCache.put(key, <V2TimMessage>[
+      _image(msgID: 'keep', timestamp: 100),
+      _image(msgID: 'revoke', timestamp: 200),
+    ]);
+
+    ChatMediaGalleryExpandCache.removeMessage(
+      'revoke',
+      conversationID: 'group-room',
+    );
+
+    expect(
+      ChatMediaGalleryExpandCache.get(key)?.map((message) => message.msgID),
+      <String?>['keep'],
+    );
   });
 
   test('expand cache evicts oldest entry after max conversations', () {

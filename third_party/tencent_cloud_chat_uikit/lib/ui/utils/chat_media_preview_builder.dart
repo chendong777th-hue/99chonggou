@@ -104,6 +104,9 @@ bool _isPreviewable(
   V2TimMessage message,
   Set<ChatMediaPreviewType> types,
 ) {
+  if (isChatMediaMessageRevoked(message)) {
+    return false;
+  }
   final type = _typeForMessage(message);
   return type != null && types.contains(type);
 }

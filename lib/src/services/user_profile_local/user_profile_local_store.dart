@@ -44,7 +44,7 @@ class UserProfileLocalStore {
     final path = p.join(basePath, _dbName);
     _db = await openDatabase(
       path,
-      version: 1,
+      version: 2,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE $_table (
@@ -52,6 +52,7 @@ class UserProfileLocalStore {
             user_id TEXT NOT NULL,
             nickname TEXT NOT NULL DEFAULT '',
             avatar_url TEXT NOT NULL DEFAULT '',
+            avatar_version INTEGER NOT NULL DEFAULT 0,
             self_signature TEXT NOT NULL DEFAULT '',
             friend_remark TEXT NOT NULL DEFAULT '',
             gender INTEGER,
@@ -63,6 +64,13 @@ class UserProfileLocalStore {
         await db.execute(
           'CREATE INDEX idx_user_profiles_owner ON $_table(owner_user_id)',
         );
+      },
+      onUpgrade: (db, oldVersion, newVersion) async {
+        if (oldVersion < 2) {
+          await db.execute(
+            'ALTER TABLE $_table ADD COLUMN avatar_version INTEGER NOT NULL DEFAULT 0',
+          );
+        }
       },
     );
     return _db!;
@@ -175,6 +183,7 @@ class UserProfileLocalStore {
       'user_id': record.userId,
       'nickname': record.nickname,
       'avatar_url': record.avatarUrl,
+      'avatar_version': record.avatarVersion,
       'self_signature': record.selfSignature,
       'friend_remark': record.friendRemark,
       'gender': record.gender,

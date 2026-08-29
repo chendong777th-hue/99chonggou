@@ -145,6 +145,12 @@ void main() {
             .inMilliseconds,
         800,
       );
+      expect(
+        ConversationUnreadAggregate.instance
+            .debounceForReasonForTest('realtime_commit')
+            .inMilliseconds,
+        16,
+      );
     });
   });
 

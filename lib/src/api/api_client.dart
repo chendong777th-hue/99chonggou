@@ -6,7 +6,7 @@ import 'dart:io' show Platform;
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart'
-    show kIsWeb, kReleaseMode, visibleForTesting;
+    show kDebugMode, kIsWeb, kReleaseMode, visibleForTesting;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -31,6 +31,7 @@ class ApiClient {
 
   static const String _tokenKey = 'auth_token';
   static const String _tokenSecureKey = 'auth_token_secure';
+  static const String _authUserIdSecureKey = 'auth_user_id_secure';
   static const String _deviceIdKey = 'device_id';
 
   /// 节点切换等运行时覆盖；优先于编译期默认值。
@@ -113,9 +114,11 @@ class ApiClient {
   late final Dio dio = _build();
 
   String? _token;
+  String? _authenticatedUserId;
   String? _deviceId;
   String? _clientVersion;
   String? _clientPlatform;
+  Future<void> _tokenMutationTail = Future<void>.value();
 
   final FlutterSecureStorage _secure = const FlutterSecureStorage();
 
@@ -255,15 +258,60 @@ class ApiClient {
   }
 
   bool _isExplicitAuthError(DioError error) {
-    final code = _responseCode(error).toUpperCase();
-    if (code.isEmpty) {
-      // HTTP 403 is often used by wallet/business APIs for pay-pin errors.
-      // Do not treat a bare 403 as account expiry; the caller will show the
-      // business error and keep the user on the current page.
+    return isExplicitSessionExpiryError(error);
+  }
+
+  /// Shared by foreground recovery and the request interceptor.
+  static bool isExplicitSessionExpiryError(DioError error) {
+    final data = error.response?.data;
+    var code = '';
+    if (data is Map) {
+      for (final key in const ['code', 'errorCode', 'errCode']) {
+        final value = data[key];
+        if (value != null && value.toString().trim().isNotEmpty) {
+          code = value.toString().trim();
+          break;
+        }
+      }
+      if (code.isEmpty && data['data'] is Map) {
+        final inner = data['data'] as Map;
+        for (final key in const ['code', 'errorCode', 'errCode']) {
+          final value = inner[key];
+          if (value != null && value.toString().trim().isNotEmpty) {
+            code = value.toString().trim();
+            break;
+          }
+        }
+      }
+    }
+    return isExplicitSessionExpiryResponse(
+      statusCode: error.response?.statusCode,
+      responseCode: code,
+    );
+  }
+
+  /// 只把能够明确证明“当前登录凭证已失效”的响应升级为全局退出。
+  ///
+  /// 后端部分权限接口会用 HTTP 403 + `UNAUTHORIZED` 表示当前用户没有
+  /// 访问某项业务的权限。它不是 token 失效，不能清空整个账号会话。
+  /// 真正的 token/session 失效码仍允许在 401/403 等 4xx 下触发退出。
+  @visibleForTesting
+  static bool isExplicitSessionExpiryResponse({
+    required int? statusCode,
+    required String responseCode,
+  }) {
+    final status = statusCode ?? 0;
+    if (status < 400 || status >= 500) {
       return false;
     }
-    return code == 'UNAUTHORIZED' ||
-        code == 'AUTH_EXPIRED' ||
+    final code = responseCode.trim().toUpperCase();
+    if (code.isEmpty) {
+      return false;
+    }
+    if (code == 'UNAUTHORIZED') {
+      return status == 401;
+    }
+    return code == 'AUTH_EXPIRED' ||
         code == 'TOKEN_EXPIRED' ||
         code == 'TOKEN_INVALID' ||
         code == 'INVALID_TOKEN' ||
@@ -462,15 +510,14 @@ class ApiClient {
   static const bool _verboseLog = false;
 
   void _logAuthExpiredTrigger(DioError error) {
-    if (!_verboseLog) return;
+    // 诊断只在调试构建输出，发布版保持静默；不打印 token、响应正文或用户信息。
+    if (!kDebugMode) return;
     final path = _requestPath(error.requestOptions);
     final status = error.response?.statusCode;
     final code = _responseCode(error);
-    final message = _singleLine(_responseMessage(error));
     print(
       'API_LOG auth-expired trigger: '
       'path=$path status=$status code=${code.isEmpty ? '-' : code} '
-      'message=${message.isEmpty ? '-' : message} '
       'suppressed=$_suppressAuthExpired handling=$_handlingAuthExpired',
     );
   }
@@ -630,38 +677,130 @@ class ApiClient {
     unawaited(ClientDeviceInfo.deviceModel());
   }
 
-  Future<void> loadToken() async {
-    _token = await _secure.read(key: _tokenSecureKey);
-    final prefs = await SharedPreferences.getInstance();
-    final legacyToken = prefs.getString(_tokenKey);
-    if ((_token == null || _token!.isEmpty) &&
-        legacyToken != null &&
-        legacyToken.isNotEmpty) {
-      _token = legacyToken;
-      await _secure.write(key: _tokenSecureKey, value: legacyToken);
+  Future<void> loadToken() => _serializeTokenMutation(() async {
+        _token = await _secure.read(key: _tokenSecureKey);
+        _authenticatedUserId =
+            (await _secure.read(key: _authUserIdSecureKey))?.trim();
+        final prefs = await SharedPreferences.getInstance();
+        final legacyToken = prefs.getString(_tokenKey);
+        if ((_token == null || _token!.isEmpty) &&
+            legacyToken != null &&
+            legacyToken.isNotEmpty) {
+          _token = legacyToken;
+          await _secure.write(key: _tokenSecureKey, value: legacyToken);
+        }
+        if (legacyToken != null) {
+          await prefs.remove(_tokenKey);
+        }
+      });
+
+  Future<void> saveToken(String token, {String? userId}) =>
+      _serializeTokenMutation(() async {
+        final trimmed = token.trim();
+        final previousToken = _token;
+        var owner = userId?.trim() ?? '';
+        if (owner.isEmpty && _sameToken(previousToken, trimmed)) {
+          owner = _authenticatedUserId?.trim() ?? '';
+        }
+        owner = owner.isNotEmpty ? owner : _userIdFromJwt(trimmed);
+        _logoutInProgress = false;
+        _token = trimmed;
+        await _secure.write(key: _tokenSecureKey, value: trimmed);
+        if (owner.isNotEmpty) {
+          _authenticatedUserId = owner;
+          await _secure.write(key: _authUserIdSecureKey, value: owner);
+        } else {
+          // Never leave an old owner next to a newly issued opaque token. A
+          // stale owner would make offline restore load another account's IM
+          // cache and local database projection.
+          _authenticatedUserId = null;
+          await _secure.delete(key: _authUserIdSecureKey);
+        }
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove(_tokenKey);
+      });
+
+  Future<bool> saveAuthenticatedUserIdIfCurrent({
+    required String? expectedToken,
+    required String userId,
+  }) async {
+    final owner = userId.trim();
+    if (owner.isEmpty) {
+      return false;
     }
-    if (legacyToken != null) {
-      await prefs.remove(_tokenKey);
-    }
+    var saved = false;
+    await _serializeTokenMutation(() async {
+      if (!_sameToken(_token, expectedToken)) {
+        return;
+      }
+      _authenticatedUserId = owner;
+      await _secure.write(key: _authUserIdSecureKey, value: owner);
+      saved = true;
+    });
+    return saved;
   }
 
-  Future<void> saveToken(String token) async {
-    final trimmed = token.trim();
-    _logoutInProgress = false;
-    _token = trimmed;
-    await _secure.write(key: _tokenSecureKey, value: trimmed);
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_tokenKey);
+  Future<void> clearToken() => _serializeTokenMutation(_clearTokenUnlocked);
+
+  /// Clears only the credential captured by the logout operation.
+  ///
+  /// A delayed logout from account A must not erase a token already saved for
+  /// account B. Token mutations are serialized so the comparison and delete
+  /// form one process-local transaction.
+  Future<bool> clearTokenIfCurrent(String? expectedToken) async {
+    var cleared = false;
+    await _serializeTokenMutation(() async {
+      if (!_sameToken(_token, expectedToken)) {
+        return;
+      }
+      await _clearTokenUnlocked();
+      cleared = true;
+    });
+    return cleared;
   }
 
-  Future<void> clearToken() async {
+  Future<void> _clearTokenUnlocked() async {
     _token = null;
+    _authenticatedUserId = null;
     await _secure.delete(key: _tokenSecureKey);
+    await _secure.delete(key: _authUserIdSecureKey);
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_tokenKey);
+  }
+
+  Future<void> _serializeTokenMutation(
+    Future<void> Function() mutation,
+  ) {
+    final next = _tokenMutationTail.then<void>(
+      (_) => mutation(),
+      onError: (_) => mutation(),
+    );
+    _tokenMutationTail = next;
+    return next;
+  }
+
+  static bool _sameToken(String? left, String? right) {
+    return (left?.trim() ?? '') == (right?.trim() ?? '');
+  }
+
+  static String _userIdFromJwt(String token) {
+    final parts = token.split('.');
+    if (parts.length != 3) return '';
+    try {
+      final raw = utf8.decode(base64Url.decode(base64Url.normalize(parts[1])));
+      final payload = jsonDecode(raw);
+      if (payload is! Map) return '';
+      for (final key in const ['userId', 'user_id', 'userID', 'uid', 'sub']) {
+        final value = payload[key]?.toString().trim() ?? '';
+        if (value.isNotEmpty) return value;
+      }
+    } catch (_) {}
+    return '';
   }
 
   String? get token => _token;
+
+  String get authenticatedUserId => _authenticatedUserId?.trim() ?? '';
 
   String get deviceId => _deviceId ?? '';
 

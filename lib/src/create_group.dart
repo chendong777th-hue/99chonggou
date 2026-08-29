@@ -44,8 +44,7 @@ import 'package:tencent_cloud_chat_demo/src/services/group_local/group_create_li
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_create_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_membership_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_change_event_sync_service.dart';
-import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
-import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/peer_profile_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/utils/group_create_limit_message.dart';
@@ -606,14 +605,8 @@ class _CreateGroup extends State<CreateGroup> {
     if (orderKey <= 0) {
       conversation.orderkey = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     }
-    final merged = await ConversationLocalStore.instance.upsertBatch(
-      conversations: [conversation],
-    );
-    await ConversationListNotifier.instance.applyConversationsFromStore(
-      upserted: merged,
-      // 新建群不一定满足“已加载窗口内热会话”的准入条件；创建成功后
-      // 必须强制插入群聊列表，否则本地库已有记录但当前 UI 窗口仍看不到。
-      forceAdmitIds: <String>{conversationID},
+    await ConversationSyncService.instance.commitCreatedConversation(
+      conversation,
     );
     ConversationRefreshBus.instance.requestRefresh(
       reason: 'group_created',

@@ -39,6 +39,33 @@ void main() {
     expect(identical(snapshots[0], snapshots[1]), isTrue);
   });
 
+  test('forced refresh is not swallowed by throttled local read', () async {
+    var remoteCalls = 0;
+    var localReads = 0;
+    final localReadGate = Completer<void>();
+    final coordinator = GroupMetadataRefreshCoordinator(
+      readLocal: (_) async {
+        localReads++;
+        if (localReads == 2) {
+          await localReadGate.future;
+        }
+        return _record();
+      },
+      refreshRemote: (_) async {
+        remoteCalls++;
+      },
+      throttle: const Duration(hours: 1),
+    );
+
+    await coordinator.refresh('group-1');
+    final throttledRead = coordinator.refresh('group-1');
+    final forcedRefresh = coordinator.refresh('group-1', force: true);
+    localReadGate.complete();
+
+    await Future.wait([throttledRead, forcedRefresh]);
+    expect(remoteCalls, 2);
+  });
+
   test('invalidated generation rejects stale response', () async {
     final gate = Completer<void>();
     final coordinator = GroupMetadataRefreshCoordinator(
@@ -55,10 +82,12 @@ void main() {
     final coordinator = GroupMetadataRefreshCoordinator(
       readLocal: (_) async => _record(name: 'cached', count: 3),
       refreshRemote: (_) async {},
+      readStoreVersion: () => 42,
     );
     final snapshot = await coordinator.readLocalPlaceholder('group-1');
     expect(snapshot?.source, GroupMetadataSource.localPlaceholder);
     expect(snapshot?.name, 'cached');
     expect(snapshot?.memberCount, 3);
+    expect(snapshot?.generation, 42);
   });
 }

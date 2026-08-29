@@ -136,10 +136,6 @@ PODS:
   - libwebp/sharpyuv (1.6.0)
   - libwebp/webp (1.6.0):
     - libwebp/sharpyuv
-  - live_flutter_plugin (1.0.0):
-    - Flutter
-    - TXCustomBeautyProcesserPlugin
-    - TXLiteAVSDK_Professional (~> 12.6.18894)
   - livekit_client (2.8.1):
     - Flutter
     - flutter_webrtc
@@ -150,6 +146,10 @@ PODS:
   - Mantle (2.2.0):
     - Mantle/extobjc (= 2.2.0)
   - Mantle/extobjc (2.2.0)
+  - media_kit_libs_ios_video (1.0.4):
+    - Flutter
+  - media_kit_video (0.0.1):
+    - Flutter
   - MLImage (1.0.0-beta5)
   - MLKitBarcodeScanning (5.0.0):
     - MLKitCommon (~> 11.0)
@@ -198,6 +198,9 @@ PODS:
     - PINOperation (~> 1.2.3)
   - PINOperation (1.2.3)
   - PromisesObjC (2.4.1)
+  - RTCRoomEngine/Professional (4.3.5):
+    - TXIMSDK_Plus_iOS_XCFramework (>= 8.4.6676)
+    - TXLiteAVSDK_Professional (>= 12.8.0.19666)
   - SDWebImage (5.21.7):
     - SDWebImage/Core (= 5.21.7)
   - SDWebImage/Core (5.21.7)
@@ -234,16 +237,16 @@ PODS:
     - SDWebImage
     - TUICore/Base
     - TXIMSDK_Plus_iOS_XCFramework
-  - TUIVoIPExtension/CallKit (3.4.3):
-    - TIMPush (>= 8.6.7021)
+  - TUIVoIPExtension/CallKit (3.6.4):
+    - RTCRoomEngine/Professional (>= 3.6.2)
+    - TIMPush (>= 8.9.7538)
     - TUICore (>= 8.6.7019)
     - TXIMSDK_Plus_iOS_XCFramework
     - TXLiteAVSDK_Professional
-  - TXCustomBeautyProcesserPlugin (1.0.2)
   - TXIMSDK_Plus_iOS_XCFramework (8.9.7545)
-  - TXLiteAVSDK_Professional (12.6.18894):
-    - TXLiteAVSDK_Professional/Professional (= 12.6.18894)
-  - TXLiteAVSDK_Professional/Professional (12.6.18894)
+  - TXLiteAVSDK_Professional (13.4.21067):
+    - TXLiteAVSDK_Professional/Professional (= 13.4.21067)
+  - TXLiteAVSDK_Professional/Professional (13.4.21067)
   - url_launcher_ios (0.0.1):
     - Flutter
   - vibration (3.0.0):
@@ -280,9 +283,10 @@ DEPENDENCIES:
   - image_picker_ios (from `.symlinks/plugins/image_picker_ios/ios`)
   - jpush_flutter (from `.symlinks/plugins/jpush_flutter/ios`)
   - just_audio (from `.symlinks/plugins/just_audio/darwin`)
-  - live_flutter_plugin (from `.symlinks/plugins/live_flutter_plugin/ios`)
   - livekit_client (from `.symlinks/plugins/livekit_client/ios`)
   - local_auth_darwin (from `.symlinks/plugins/local_auth_darwin/darwin`)
+  - media_kit_libs_ios_video (from `.symlinks/plugins/media_kit_libs_ios_video/ios`)
+  - media_kit_video (from `.symlinks/plugins/media_kit_video/ios`)
   - mobile_scanner (from `.symlinks/plugins/mobile_scanner/ios`)
   - open_file_ios (from `.symlinks/plugins/open_file_ios/ios`)
   - package_info_plus (from `.symlinks/plugins/package_info_plus/ios`)
@@ -329,13 +333,13 @@ SPEC REPOS:
     - PINCache
     - PINOperation
     - PromisesObjC
+    - RTCRoomEngine
     - SDWebImage
     - SDWebImageWebPCoder
     - SwiftyGif
     - TIMPush
     - TUICore
     - TUIVoIPExtension
-    - TXCustomBeautyProcesserPlugin
     - TXIMSDK_Plus_iOS_XCFramework
     - TXLiteAVSDK_Professional
     - WebRTC-SDK
@@ -383,12 +387,14 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/jpush_flutter/ios"
   just_audio:
     :path: ".symlinks/plugins/just_audio/darwin"
-  live_flutter_plugin:
-    :path: ".symlinks/plugins/live_flutter_plugin/ios"
   livekit_client:
     :path: ".symlinks/plugins/livekit_client/ios"
   local_auth_darwin:
     :path: ".symlinks/plugins/local_auth_darwin/darwin"
+  media_kit_libs_ios_video:
+    :path: ".symlinks/plugins/media_kit_libs_ios_video/ios"
+  media_kit_video:
+    :path: ".symlinks/plugins/media_kit_video/ios"
   mobile_scanner:
     :path: ".symlinks/plugins/mobile_scanner/ios"
   open_file_ios:
@@ -463,10 +469,11 @@ SPEC CHECKSUMS:
   jpush_flutter: 477929cab3546c78fbca65aabe61ff39eafc0d77
   just_audio: 4e391f57b79cad2b0674030a00453ca5ce817eed
   libwebp: af5937a13536ef73f3784d69cc342b98961acf33
-  live_flutter_plugin: 81d2b80ab047e9e04d482af293a9596e9d994054
   livekit_client: a28e738fa0d6b16d780631bfe7a4ea76a9be382d
   local_auth_darwin: c3ee6cce0a8d56be34c8ccb66ba31f7f180aaebb
   Mantle: c5aa8794a29a022dfbbfc9799af95f477a69b62d
+  media_kit_libs_ios_video: 5a18affdb97d1f5d466dc79988b13eff6c5e2854
+  media_kit_video: 1746e198cb697d1ffb734b1d05ec429d1fcd1474
   MLImage: 1824212150da33ef225fbd3dc49f184cf611046c
   MLKitBarcodeScanning: 10ca0845a6d15f2f6e911f682a1998b68b973e8b
   MLKitCommon: afec63980417d29ffbb4790529a1b0a2291699e1
@@ -482,6 +489,7 @@ SPEC CHECKSUMS:
   PINCache: d9a87a0ff397acffe9e2f0db972ac14680441158
   PINOperation: fb563bcc9c32c26d6c78aaff967d405aa2ee74a7
   PromisesObjC: 752c3227f599e3467650e47ea36f433eeb10c273
+  RTCRoomEngine: a66491444169f35b2d0267bc0b08c07c0bf21a0f
   SDWebImage: e9fc87c1aab89a8ab1bbd74eba378c6f53be8abf
   SDWebImageWebPCoder: 0e06e365080397465cc73a7a9b472d8a3bd0f377
   sensors_plus: b70a93b69dafdabd26ce4ac3f4d0529ab9acc4ca
@@ -493,10 +501,9 @@ SPEC CHECKSUMS:
   tencent_cloud_uikit_core: 137e8ae40882b1929508e688182b2818708cc078
   TIMPush: 96b1344a4f6d4fae75b440a469ac9603552c6f85
   TUICore: f23efd42114613206437cfd1cd6934c30d232d3f
-  TUIVoIPExtension: cc4f8119e400e8937067712fcfe2494614c69a34
-  TXCustomBeautyProcesserPlugin: 099393b941cb40eda12b3a80bf6c0319957b1cfd
+  TUIVoIPExtension: 705e57aeab27984420051dba68f758613c1cdc14
   TXIMSDK_Plus_iOS_XCFramework: 35a3e6b6558ab83a83898e2d1f9ef2f461edef00
-  TXLiteAVSDK_Professional: adf74fce095f059a6c400f4e8d062b47eea92261
+  TXLiteAVSDK_Professional: 73d77e84c5a8b6c73bc06445662e3871f247e7a5
   url_launcher_ios: 7a95fa5b60cc718a708b8f2966718e93db0cef1b
   vibration: ca8104a8875b9c493e15b21b04e456befd0ff6eb
   video_player_avfoundation: 3453f792138786248960ca029747fcd9f318ef52

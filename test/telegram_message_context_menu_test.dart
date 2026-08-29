@@ -99,15 +99,12 @@ void main() {
     expect(safeTopBody.contains('chromeFloor'), isTrue);
   });
 
-  test('extracted bubble row clips so tall content cannot paint into header', () {
+  test('ordinary menu keeps the live message instead of painting a copy', () {
     final source = File(
       'third_party/tencent_cloud_chat_uikit/lib/ui/views/TIMUIKitChat/'
       'TIMUIKItMessageList/tim_uikit_telegram_message_context_controller.dart',
     ).readAsStringSync();
-    final rowAt = source.indexOf('Widget _buildExtractedMessageRow');
-    expect(rowAt, greaterThanOrEqualTo(0));
-    final rowBody = source.substring(rowAt, rowAt + 1200);
-    expect(rowBody.contains('ClipRect'), isTrue);
-    expect(rowBody.contains('clipBehavior: Clip.hardEdge'), isTrue);
+    expect(source, contains('The live selected message remains'));
+    expect(source, isNot(contains('Widget _buildExtractedMessageRow')));
   });
 }

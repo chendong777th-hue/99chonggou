@@ -12,6 +12,7 @@ import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversa
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_flicker_log.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/friend_realtime/friend_realtime_event.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/archived_conversation_ref.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/message_conversation_id.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
@@ -58,10 +59,15 @@ class ConversationPinSyncService {
   int _setUpdatedAtMs = 0;
   int _localWriteAuthorityUntilMs = 0;
   int _localWriteAuthorityMinUpdatedAtMs = 0;
+  bool _isHydrated = false;
 
   DateTime? _lastLoginSyncAt;
+  SessionIdentity? _lastLoginSyncIdentity;
+  SessionIdentity? _loginSyncIdentity;
   Future<void>? _loginSyncInFlight;
+  SessionIdentity? _refreshIdentity;
   Future<void>? _refreshInFlight;
+  SessionIdentity? _tencentReconcileIdentity;
   Future<void>? _tencentReconcileInFlight;
 
   /// 单测注入：返回 `true` 表示腾讯置顶成功。
@@ -92,22 +98,31 @@ class ConversationPinSyncService {
   Set<String> get pinnedConversationIds =>
       Set<String>.unmodifiable(_pinnedConversationIds);
 
+  /// Whether the in-memory pin set has been hydrated from cache/SDK.
+  /// When false, callers should not overwrite `isPinned` on conversation
+  /// objects loaded from SQLite — the DB column is the only authority.
+  bool get isHydrated => _isHydrated;
+
   /// Removes a conversation that no longer exists (for example after leaving
   /// or dissolving a group) from every local pin projection.
   Future<void> removeDeletedConversation(String conversationID) async {
+    final identity = _captureIdentity();
+    if (!_hasAccountScopedIdentity(identity)) return;
     final id = conversationID.trim();
     if (id.isEmpty) return;
     final hadMatch = _pinnedConversationIds.any(
       (pinned) => MessageConversationId.sameConversation(pinned, id),
     );
     if (!hadMatch) return;
+    final previous = Set<String>.from(_pinnedConversationIds);
     _pinnedConversationIds.removeWhere(
       (pinned) => MessageConversationId.sameConversation(pinned, id),
     );
-    await ConversationLocalStore.instance.replaceAllPinnedFlags(
+    await ConversationSyncService.instance.reconcileConversationPinSetLocally(
+      previousPinnedConversationIds: previous,
       pinnedConversationIds: _pinnedConversationIds,
     );
-    await _persistCache();
+    await _persistCache(identity);
   }
 
   int get setUpdatedAtMs => _setUpdatedAtMs;
@@ -131,27 +146,33 @@ class ConversationPinSyncService {
   /// 冷启动 / 登录：只读本地 prefs→内存→SQLite 标志，不上网。
   ///
   /// IM `loginInfo` 未就绪（scope=`_guest`）时 no-op，避免多账号串写。
-  Future<void> hydrateLocalAndApplyUi({bool reloadUi = true}) async {
-    if (!_hasAccountScopedIdentity()) {
+  Future<void> hydrateLocalAndApplyUi({
+    bool reloadUi = true,
+    SessionIdentity? expectedIdentity,
+  }) async {
+    final identity = expectedIdentity ?? _captureIdentity();
+    if (!_hasAccountScopedIdentity(identity)) {
       ConversationPinFlickerLog.log(
         'pin_local_hydrate_skip_guest',
         extras: <String, Object?>{
-          'scope': _prefsScope(),
+          'scope': _prefsScope(identity),
         },
       );
       return;
     }
     try {
-      await _ensureBackendSourceGate();
-      await _hydrateFromCache(reloadUi: reloadUi);
+      await _ensureBackendSourceGate(identity);
+      if (!_isCurrent(identity)) return;
+      await _hydrateFromCache(identity, reloadUi: reloadUi);
+      if (!_isCurrent(identity)) return;
+      _isHydrated = true;
       ConversationPinFlickerLog.log(
         'pin_local_hydrate',
         extras: <String, Object?>{
           'count': _pinnedConversationIds.length,
-          'scope': _prefsScope(),
+          'scope': _prefsScope(identity),
           'updatedAt': _setUpdatedAtMs,
-          'tencentPrimary':
-              ConversationPerfFlags.conversationPinTencentPrimary,
+          'tencentPrimary': ConversationPerfFlags.conversationPinTencentPrimary,
         },
       );
     } catch (e, st) {
@@ -164,25 +185,43 @@ class ConversationPinSyncService {
   }
 
   Future<void> syncOnLogin({bool force = false}) {
+    final identity = _captureIdentity();
+    if (!_hasAccountScopedIdentity(identity)) return Future<void>.value();
     if (!force &&
+        _lastLoginSyncIdentity == identity &&
         _lastLoginSyncAt != null &&
         DateTime.now().difference(_lastLoginSyncAt!) < _loginSyncCooldown) {
       return Future<void>.value();
     }
-    return _loginSyncInFlight ??= _syncOnLogin(force: force).whenComplete(() {
-      _loginSyncInFlight = null;
+    final running = _loginSyncInFlight;
+    if (running != null && _loginSyncIdentity == identity) return running;
+    late final Future<void> task;
+    task = _syncOnLogin(force: force, identity: identity).whenComplete(() {
+      if (identical(_loginSyncInFlight, task)) {
+        _loginSyncInFlight = null;
+        _loginSyncIdentity = null;
+      }
     });
+    _loginSyncIdentity = identity;
+    _loginSyncInFlight = task;
+    return task;
   }
 
-  Future<void> _syncOnLogin({required bool force}) async {
+  Future<void> _syncOnLogin({
+    required bool force,
+    required SessionIdentity identity,
+  }) async {
     try {
-      await hydrateLocalAndApplyUi();
+      await hydrateLocalAndApplyUi(expectedIdentity: identity);
+      if (!_isCurrent(identity)) return;
       if (ConversationPerfFlags.conversationPinTencentPrimary) {
-        await _syncOnLoginTencentPrimary();
+        await _syncOnLoginTencentPrimary(identity);
       } else {
-        await refreshFromServer();
+        await refreshFromServer(expectedIdentity: identity);
       }
+      if (!_isCurrent(identity)) return;
       _lastLoginSyncAt = DateTime.now();
+      _lastLoginSyncIdentity = identity;
     } catch (e, st) {
       // 失败保留本地水合结果，不清空集合。
       debugPrint('ConversationPinSync: login sync failed: $e\n$st');
@@ -192,10 +231,11 @@ class ConversationPinSyncService {
     }
   }
 
-  Future<void> _syncOnLoginTencentPrimary() async {
+  Future<void> _syncOnLoginTencentPrimary(SessionIdentity identity) async {
     List<ConversationPinItem> backendItems = const <ConversationPinItem>[];
     try {
       final page = await ConversationPinApi.instance.fetchAll();
+      if (!_isCurrent(identity)) return;
       backendItems = page.items;
     } catch (e, st) {
       debugPrint(
@@ -207,11 +247,15 @@ class ConversationPinSyncService {
       );
     }
 
-    final tencentIds = await collectTencentPinnedConversationIds();
+    final tencentIds = await collectTencentPinnedConversationIds(
+      expectedIdentity: identity,
+    );
+    if (!_isCurrent(identity)) return;
     final updatedAt = DateTime.now().toUtc().millisecondsSinceEpoch;
     await _applyItems(
       _itemsFromConversationIds(tencentIds),
       updatedAtMs: updatedAt,
+      identity: identity,
     );
     ConversationPinFlickerLog.log(
       'pin_login_tencent_truth',
@@ -227,23 +271,29 @@ class ConversationPinSyncService {
       merged = await _migrateBackendPinsToTencent(
         backendItems: backendItems,
         alreadyPinned: merged,
+        identity: identity,
       );
       if (!_sameIdSet(merged, tencentIds)) {
         await _applyItems(
           _itemsFromConversationIds(merged),
           updatedAtMs: DateTime.now().toUtc().millisecondsSinceEpoch,
+          identity: identity,
         );
       }
     }
 
     if (ConversationPerfFlags.conversationPinFollowWriteBackend) {
-      await _followWriteFullSetToBackend(merged);
+      await _followWriteFullSetToBackend(
+        merged,
+        expectedIdentity: identity,
+      );
     }
   }
 
   Future<Set<String>> _migrateBackendPinsToTencent({
     required List<ConversationPinItem> backendItems,
     required Set<String> alreadyPinned,
+    required SessionIdentity identity,
   }) async {
     final next = Set<String>.from(alreadyPinned);
     var migrated = 0;
@@ -263,6 +313,7 @@ class ConversationPinSyncService {
         continue;
       }
       final ok = await _pinConversationOnTencent(id, true);
+      if (!_isCurrent(identity)) return next;
       if (ok) {
         next.add(id);
         migrated++;
@@ -290,7 +341,11 @@ class ConversationPinSyncService {
   /// `conversation_type:unknown`）。**禁止**在本路径写入
   /// [ConversationLocalStore] sync meta / `setHasSyncedOnce`——会话灌库游标
   /// 只允许 ByFilter typed 路径推进。
-  Future<Set<String>> collectTencentPinnedConversationIds() async {
+  Future<Set<String>> collectTencentPinnedConversationIds({
+    SessionIdentity? expectedIdentity,
+  }) async {
+    final identity = expectedIdentity ?? _captureIdentity();
+    if (!_hasAccountScopedIdentity(identity)) return <String>{};
     final override = debugCollectTencentPinnedIdsOverride;
     if (override != null) {
       return override();
@@ -304,6 +359,7 @@ class ConversationPinSyncService {
             nextSeq: nextSeq,
             count: _tencentPinListPageSize,
           );
+      if (!_isCurrent(identity)) return <String>{};
       if (res.code != 0) {
         ConversationPinFlickerLog.log(
           'pin_tencent_list_fail',
@@ -332,7 +388,11 @@ class ConversationPinSyncService {
       }
       final finished = data?.isFinished == true;
       final seq = data?.nextSeq?.toString() ?? '';
-      if (hitUnpinned || finished || seq.isEmpty || seq == '0' || seq == nextSeq) {
+      if (hitUnpinned ||
+          finished ||
+          seq.isEmpty ||
+          seq == '0' ||
+          seq == nextSeq) {
         break;
       }
       nextSeq = seq;
@@ -347,7 +407,8 @@ class ConversationPinSyncService {
     String source = 'unknown',
     double? listScrollOffset,
   }) async {
-    if (!_hasAccountScopedIdentity()) {
+    final identity = _captureIdentity();
+    if (!_hasAccountScopedIdentity(identity)) {
       return ConversationPinApplyResult(
         applied: false,
         isPinned: conversation.isPinned ?? false,
@@ -379,6 +440,7 @@ class ConversationPinSyncService {
         prevPinned: prevPinned,
         source: source,
         listScrollOffset: listScrollOffset,
+        identity: identity,
       );
     }
     return _setPinnedBackendPrimary(
@@ -388,6 +450,7 @@ class ConversationPinSyncService {
       prevPinned: prevPinned,
       source: source,
       listScrollOffset: listScrollOffset,
+      identity: identity,
     );
   }
 
@@ -397,8 +460,16 @@ class ConversationPinSyncService {
     required bool pinned,
     required bool prevPinned,
     required String source,
+    required SessionIdentity identity,
     double? listScrollOffset,
   }) async {
+    if (!_isCurrent(identity)) {
+      return ConversationPinApplyResult(
+        applied: false,
+        isPinned: prevPinned,
+        sdkOk: false,
+      );
+    }
     final conversationID = conversation.conversationID.trim();
     ConversationPinFlickerLog.log(
       'pin_tencent_start',
@@ -412,10 +483,11 @@ class ConversationPinSyncService {
 
     final previousPinnedIds = Set<String>.from(_pinnedConversationIds);
     final previousUpdatedAt = _setUpdatedAtMs;
-    final optimistic =
-        ConversationPerfFlags.pinOptimisticUiEnabled &&
-            !debugSkipPersistAndUiForTest;
+    final optimistic = ConversationPerfFlags.pinOptimisticUiEnabled &&
+        !debugSkipPersistAndUiForTest;
     if (optimistic) {
+      // 072 phase-6 allowlist: pending-only projection before Tencent ACK;
+      // SDK failure restores the confirmed pin snapshot below.
       final updatedAt = DateTime.now().toUtc().millisecondsSinceEpoch;
       _armLocalWriteAuthority(updatedAt);
       // 先按当前集合算目标 items，再写入内存（勿在已改集合上二次 mutation）。
@@ -454,6 +526,13 @@ class ConversationPinSyncService {
     }
 
     final sdkOk = await _pinConversationOnTencent(conversationID, pinned);
+    if (!_isCurrent(identity)) {
+      return ConversationPinApplyResult(
+        applied: false,
+        isPinned: prevPinned,
+        sdkOk: false,
+      );
+    }
     if (!sdkOk) {
       if (optimistic) {
         _pinnedConversationIds
@@ -494,7 +573,15 @@ class ConversationPinSyncService {
       changedConversationId: conversationID,
       changedPinned: pinned,
       snapshot: conversation,
+      identity: identity,
     );
+    if (!_isCurrent(identity)) {
+      return ConversationPinApplyResult(
+        applied: false,
+        isPinned: prevPinned,
+        sdkOk: false,
+      );
+    }
 
     if (ConversationPerfFlags.conversationPinFollowWriteBackend) {
       // 本地 UI 已更新；跟写失败只记日志，不回滚腾讯/本地。
@@ -503,6 +590,7 @@ class ConversationPinSyncService {
         pinned: pinned,
         source: source,
         conversationID: conversationID,
+        identity: identity,
       );
     }
 
@@ -513,8 +601,7 @@ class ConversationPinSyncService {
         'source': source,
         'pinned': pinned,
         'count': _pinnedConversationIds.length,
-        'followWrite':
-            ConversationPerfFlags.conversationPinFollowWriteBackend,
+        'followWrite': ConversationPerfFlags.conversationPinFollowWriteBackend,
       },
     );
     return ConversationPinApplyResult(
@@ -530,6 +617,7 @@ class ConversationPinSyncService {
     required bool pinned,
     required bool prevPinned,
     required String source,
+    required SessionIdentity identity,
     double? listScrollOffset,
   }) async {
     ConversationPinFlickerLog.log(
@@ -548,6 +636,13 @@ class ConversationPinSyncService {
         peerId: ref.peerId,
         pinned: pinned,
       );
+      if (!_isCurrent(identity)) {
+        return ConversationPinApplyResult(
+          applied: false,
+          isPinned: prevPinned,
+          sdkOk: false,
+        );
+      }
       if (!result.ok && result.items.isEmpty) {
         return ConversationPinApplyResult(
           applied: false,
@@ -556,8 +651,8 @@ class ConversationPinSyncService {
         );
       }
 
-      final updatedAt = result.updatedAt ??
-          DateTime.now().toUtc().millisecondsSinceEpoch;
+      final updatedAt =
+          result.updatedAt ?? DateTime.now().toUtc().millisecondsSinceEpoch;
       _armLocalWriteAuthority(updatedAt);
       if (result.items.isNotEmpty || result.ok) {
         final items = result.items.isNotEmpty
@@ -570,7 +665,15 @@ class ConversationPinSyncService {
           changedConversationId: conversation.conversationID.trim(),
           changedPinned: pinned,
           snapshot: conversation,
+          identity: identity,
         );
+        if (!_isCurrent(identity)) {
+          return ConversationPinApplyResult(
+            applied: false,
+            isPinned: prevPinned,
+            sdkOk: false,
+          );
+        }
       }
 
       ConversationPinFlickerLog.log(
@@ -614,7 +717,9 @@ class ConversationPinSyncService {
     required bool pinned,
     required String source,
     required String conversationID,
+    required SessionIdentity identity,
   }) async {
+    if (!_isCurrent(identity)) return;
     try {
       final override = debugFollowWriteOverride;
       if (override != null) {
@@ -630,6 +735,7 @@ class ConversationPinSyncService {
           pinned: pinned,
         );
       }
+      if (!_isCurrent(identity)) return;
       ConversationPinFlickerLog.log(
         'pin_follow_write_ok',
         conversationID: conversationID,
@@ -654,9 +760,15 @@ class ConversationPinSyncService {
     }
   }
 
-  Future<void> _followWriteFullSetToBackend(Set<String> desiredIds) async {
+  Future<void> _followWriteFullSetToBackend(
+    Set<String> desiredIds, {
+    SessionIdentity? expectedIdentity,
+  }) async {
+    final identity = expectedIdentity ?? _captureIdentity();
+    if (!_hasAccountScopedIdentity(identity)) return;
     try {
       final page = await ConversationPinApi.instance.fetchAll();
+      if (!_isCurrent(identity)) return;
       final backendIds = <String>{};
       for (final item in page.items) {
         final ref = ArchivedConversationRef(
@@ -693,10 +805,12 @@ class ConversationPinSyncService {
 
       if (toAdd.isNotEmpty) {
         await ConversationPinApi.instance.batchSetPinned(toAdd, pinned: true);
+        if (!_isCurrent(identity)) return;
       }
       if (toRemove.isNotEmpty) {
         await ConversationPinApi.instance
             .batchSetPinned(toRemove, pinned: false);
+        if (!_isCurrent(identity)) return;
       }
       ConversationPinFlickerLog.log(
         'pin_follow_write_full_ok',
@@ -751,6 +865,8 @@ class ConversationPinSyncService {
   }
 
   Future<void> handleRealtimeEvent(FriendRealtimeEvent event) async {
+    final identity = _captureIdentity();
+    if (!_hasAccountScopedIdentity(identity)) return;
     if (event.event.trim() != 'conversation_pin_changed') {
       return;
     }
@@ -789,14 +905,17 @@ class ConversationPinSyncService {
         updatedAtMs: remoteUpdatedAt > 0
             ? remoteUpdatedAt
             : DateTime.now().toUtc().millisecondsSinceEpoch,
+        identity: identity,
       );
+      if (!_isCurrent(identity)) return;
       ConversationRefreshBus.instance.requestRefresh(
         reason: 'conversation_pin_remote',
       );
       return;
     }
 
-    await refreshFromServer();
+    await refreshFromServer(expectedIdentity: identity);
+    if (!_isCurrent(identity)) return;
     ConversationRefreshBus.instance.requestRefresh(
       reason: 'conversation_pin_remote_fallback',
     );
@@ -804,21 +923,43 @@ class ConversationPinSyncService {
 
   /// 以腾讯当前 pin 集合覆盖本地（不做自建→腾讯迁移）。
   Future<void> reconcileFromTencent({String reason = 'manual'}) {
-    return _tencentReconcileInFlight ??=
-        _reconcileFromTencentCore(reason: reason).whenComplete(() {
-      _tencentReconcileInFlight = null;
+    final identity = _captureIdentity();
+    if (!_hasAccountScopedIdentity(identity)) return Future<void>.value();
+    final running = _tencentReconcileInFlight;
+    if (running != null && _tencentReconcileIdentity == identity) {
+      return running;
+    }
+    late final Future<void> task;
+    task = _reconcileFromTencentCore(
+      reason: reason,
+      identity: identity,
+    ).whenComplete(() {
+      if (identical(_tencentReconcileInFlight, task)) {
+        _tencentReconcileInFlight = null;
+        _tencentReconcileIdentity = null;
+      }
     });
+    _tencentReconcileIdentity = identity;
+    _tencentReconcileInFlight = task;
+    return task;
   }
 
-  Future<void> _reconcileFromTencentCore({required String reason}) async {
-    if (!_hasAccountScopedIdentity()) {
+  Future<void> _reconcileFromTencentCore({
+    required String reason,
+    required SessionIdentity identity,
+  }) async {
+    if (!_hasAccountScopedIdentity(identity)) {
       return;
     }
     try {
-      final ids = await collectTencentPinnedConversationIds();
+      final ids = await collectTencentPinnedConversationIds(
+        expectedIdentity: identity,
+      );
+      if (!_isCurrent(identity)) return;
       await _applyItems(
         _itemsFromConversationIds(ids),
         updatedAtMs: DateTime.now().toUtc().millisecondsSinceEpoch,
+        identity: identity,
       );
       ConversationRefreshBus.instance.requestRefresh(reason: reason);
       ConversationPinFlickerLog.log(
@@ -837,26 +978,38 @@ class ConversationPinSyncService {
     }
   }
 
-  Future<void> refreshFromServer() async {
+  Future<void> refreshFromServer({SessionIdentity? expectedIdentity}) async {
     if (ConversationPerfFlags.conversationPinTencentPrimary) {
       // 腾讯为主时「服务端刷新」= 腾讯对账；自建仅作跟写目标。
       return reconcileFromTencent(reason: 'refresh_from_server');
     }
-    return _refreshInFlight ??= _refreshFromServerCore().whenComplete(() {
-      _refreshInFlight = null;
+    final identity = expectedIdentity ?? _captureIdentity();
+    if (!_hasAccountScopedIdentity(identity)) return;
+    final running = _refreshInFlight;
+    if (running != null && _refreshIdentity == identity) return running;
+    late final Future<void> task;
+    task = _refreshFromServerCore(identity).whenComplete(() {
+      if (identical(_refreshInFlight, task)) {
+        _refreshInFlight = null;
+        _refreshIdentity = null;
+      }
     });
+    _refreshIdentity = identity;
+    _refreshInFlight = task;
+    return task;
   }
 
-  Future<void> _refreshFromServerCore() async {
-    if (!_hasAccountScopedIdentity()) {
+  Future<void> _refreshFromServerCore(SessionIdentity identity) async {
+    if (!_hasAccountScopedIdentity(identity)) {
       ConversationPinFlickerLog.log(
         'pin_server_refresh_skip_guest',
-        extras: <String, Object?>{'scope': _prefsScope()},
+        extras: <String, Object?>{'scope': _prefsScope(identity)},
       );
       return;
     }
     try {
       final page = await ConversationPinApi.instance.fetchAll();
+      if (!_isCurrent(identity)) return;
       final updatedAt = page.updatedAt ??
           page.serverTime ??
           DateTime.now().toUtc().millisecondsSinceEpoch;
@@ -871,13 +1024,13 @@ class ConversationPinSyncService {
         );
         return;
       }
-      await _applyItems(page.items, updatedAtMs: updatedAt);
+      await _applyItems(page.items, updatedAtMs: updatedAt, identity: identity);
       ConversationPinFlickerLog.log(
         'pin_server_refresh_ok',
         extras: <String, Object?>{
           'count': _pinnedConversationIds.length,
           'updatedAt': updatedAt,
-          'scope': _prefsScope(),
+          'scope': _prefsScope(identity),
         },
       );
     } catch (e, st) {
@@ -901,8 +1054,10 @@ class ConversationPinSyncService {
     String? changedConversationId,
     bool? changedPinned,
     V2TimConversation? snapshot,
+    SessionIdentity? identity,
   }) async {
-    if (!_hasAccountScopedIdentity()) {
+    final capturedIdentity = identity ?? _captureIdentity();
+    if (!_hasAccountScopedIdentity(capturedIdentity)) {
       return;
     }
     final next = <String>{};
@@ -919,6 +1074,7 @@ class ConversationPinSyncService {
       next.add(ref.conversationId);
     }
 
+    final previous = Set<String>.from(_pinnedConversationIds);
     _pinnedConversationIds
       ..clear()
       ..addAll(next);
@@ -926,14 +1082,23 @@ class ConversationPinSyncService {
     if (debugSkipPersistAndUiForTest) {
       return;
     }
-    await _persistCache();
-    await ConversationLocalStore.instance.replaceAllPinnedFlags(
-      pinnedConversationIds: next,
-    );
+    await _persistCache(capturedIdentity);
+    if (!_isCurrent(capturedIdentity)) return;
 
     if (changedConversationId != null &&
         changedConversationId.isNotEmpty &&
         changedPinned != null) {
+      if (_pinSetChangedOutsideTarget(
+        previous: previous,
+        next: next,
+        targetConversationId: changedConversationId,
+      )) {
+        await ConversationSyncService.instance
+            .reconcileConversationPinSetLocally(
+          previousPinnedConversationIds: previous,
+          pinnedConversationIds: next,
+        );
+      }
       await ConversationSyncService.instance.applyConversationPinLocally(
         conversationID: changedConversationId,
         isPinned: changedPinned,
@@ -941,12 +1106,42 @@ class ConversationPinSyncService {
         listScrollOffset: listScrollOffset,
       );
     } else {
-      await ConversationListNotifier.instance.reloadFromLocal();
+      await ConversationSyncService.instance.reconcileConversationPinSetLocally(
+        previousPinnedConversationIds: previous,
+        pinnedConversationIds: next,
+      );
+      await ConversationListNotifier.instance.restoreStoreProjection(
+        reason: ConversationStoreProjectionReason.pinHydration,
+      );
     }
   }
 
-  Future<void> _ensureBackendSourceGate() async {
-    if (!_hasAccountScopedIdentity()) {
+  bool _pinSetChangedOutsideTarget({
+    required Set<String> previous,
+    required Set<String> next,
+    required String targetConversationId,
+  }) {
+    for (final id in previous) {
+      if (MessageConversationId.sameConversation(id, targetConversationId)) {
+        continue;
+      }
+      if (!_setContainsConversation(next, id)) {
+        return true;
+      }
+    }
+    for (final id in next) {
+      if (MessageConversationId.sameConversation(id, targetConversationId)) {
+        continue;
+      }
+      if (!_setContainsConversation(previous, id)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  Future<void> _ensureBackendSourceGate(SessionIdentity identity) async {
+    if (!_hasAccountScopedIdentity(identity)) {
       return;
     }
     // 腾讯为主时不再清掉本地集合（旧 gate 曾为「切自建真相」清空 SDK 残留）。
@@ -954,25 +1149,32 @@ class ConversationPinSyncService {
       return;
     }
     final prefs = await SharedPreferences.getInstance();
-    final key = '$_sourceGatePrefix${_prefsScope()}';
+    if (!_isCurrent(identity)) return;
+    final key = '$_sourceGatePrefix${_prefsScope(identity)}';
     if (prefs.getBool(key) == true) {
       return;
     }
+    final previous = Set<String>.from(_pinnedConversationIds);
     _pinnedConversationIds.clear();
     _setUpdatedAtMs = 0;
-    await ConversationLocalStore.instance.replaceAllPinnedFlags(
+    await ConversationSyncService.instance.reconcileConversationPinSetLocally(
+      previousPinnedConversationIds: previous,
       pinnedConversationIds: const <String>{},
     );
     await prefs.setBool(key, true);
-    await _persistCache();
+    await _persistCache(identity);
   }
 
-  Future<void> _hydrateFromCache({bool reloadUi = true}) async {
-    if (!_hasAccountScopedIdentity()) {
+  Future<void> _hydrateFromCache(
+    SessionIdentity identity, {
+    bool reloadUi = true,
+  }) async {
+    if (!_hasAccountScopedIdentity(identity)) {
       return;
     }
     final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString('$_cachePrefix${_prefsScope()}');
+    if (!_isCurrent(identity)) return;
+    final raw = prefs.getString('$_cachePrefix${_prefsScope(identity)}');
     if (raw == null || raw.isEmpty) {
       return;
     }
@@ -992,37 +1194,44 @@ class ConversationPinSyncService {
           }
         }
       }
+      final previous = Set<String>.from(_pinnedConversationIds);
+      if (!_isCurrent(identity)) return;
       _pinnedConversationIds
         ..clear()
         ..addAll(ids);
       _setUpdatedAtMs = _asInt(map['updatedAt']) ?? 0;
-      await ConversationLocalStore.instance.replaceAllPinnedFlags(
+      await ConversationSyncService.instance.reconcileConversationPinSetLocally(
+        previousPinnedConversationIds: previous,
         pinnedConversationIds: ids,
       );
       if (reloadUi) {
-        await ConversationListNotifier.instance.reloadFromLocal();
+        if (!_isCurrent(identity)) return;
+        await ConversationListNotifier.instance.restoreStoreProjection(
+          reason: ConversationStoreProjectionReason.pinHydration,
+        );
       }
     } catch (e, st) {
       debugPrint('ConversationPinSync: cache hydrate failed: $e\n$st');
     }
   }
 
-  Future<void> _persistCache() async {
-    if (!_hasAccountScopedIdentity()) {
+  Future<void> _persistCache([SessionIdentity? expectedIdentity]) async {
+    final identity = expectedIdentity ?? _captureIdentity();
+    if (!_hasAccountScopedIdentity(identity)) {
       return;
     }
     final prefs = await SharedPreferences.getInstance();
+    if (!_isCurrent(identity)) return;
     final payload = jsonEncode(<String, dynamic>{
       'updatedAt': _setUpdatedAtMs,
       'ids': _pinnedConversationIds.toList(growable: false),
     });
-    await prefs.setString('$_cachePrefix${_prefsScope()}', payload);
+    await prefs.setString('$_cachePrefix${_prefsScope(identity)}', payload);
   }
 
   void _armLocalWriteAuthority(int updatedAtMs) {
     final now = DateTime.now().millisecondsSinceEpoch;
-    _localWriteAuthorityUntilMs =
-        now + _localWriteAuthorityTtl.inMilliseconds;
+    _localWriteAuthorityUntilMs = now + _localWriteAuthorityTtl.inMilliseconds;
     _localWriteAuthorityMinUpdatedAtMs = updatedAtMs;
   }
 
@@ -1079,10 +1288,15 @@ class ConversationPinSyncService {
 
   Future<void> clearSession() async {
     _lastLoginSyncAt = null;
+    _lastLoginSyncIdentity = null;
+    _loginSyncIdentity = null;
     _loginSyncInFlight = null;
     _refreshInFlight = null;
+    _refreshIdentity = null;
     _tencentReconcileInFlight = null;
+    _tencentReconcileIdentity = null;
     _pinnedConversationIds.clear();
+    _isHydrated = false;
     _setUpdatedAtMs = 0;
     _localWriteAuthorityUntilMs = 0;
     _localWriteAuthorityMinUpdatedAtMs = 0;
@@ -1102,12 +1316,18 @@ class ConversationPinSyncService {
 
   /// 单测注入置顶集合（不写 prefs / 不改 SQLite）。
   @visibleForTesting
-  void debugReplacePinnedIdsForTest(Iterable<String> ids) {
+  void debugReplacePinnedIdsForTest(
+    Iterable<String> ids, {
+    bool markHydrated = false,
+  }) {
     _pinnedConversationIds
       ..clear()
       ..addAll(
         ids.map((e) => e.trim()).where((e) => e.isNotEmpty),
       );
+    if (markHydrated) {
+      _isHydrated = true;
+    }
   }
 
   /// 单测复位所有 debug 注入。
@@ -1121,17 +1341,40 @@ class ConversationPinSyncService {
   }
 
   /// 正式账号 scope：禁止用 `_guest` 读写正式置顶缓存。
-  bool _hasAccountScopedIdentity() {
-    final scope = _prefsScope();
+  SessionIdentity _captureIdentity() {
+    final override = debugAccountScopeOverride?.trim();
+    if (override != null && override.isNotEmpty) {
+      return SessionIdentity(
+        ownerUserId: override,
+        generation: SessionIdentityService.instance.generation,
+      );
+    }
+    return SessionIdentityService.instance.capture();
+  }
+
+  bool _isCurrent(SessionIdentity identity) {
+    final override = debugAccountScopeOverride?.trim();
+    if (override != null && override.isNotEmpty) {
+      return identity.ownerUserId == override &&
+          SessionIdentityService.instance
+              .isGenerationCurrent(identity.generation);
+    }
+    return SessionIdentityService.instance.isCurrent(identity);
+  }
+
+  bool _hasAccountScopedIdentity(SessionIdentity identity) {
+    final scope = _prefsScope(identity);
     return scope.isNotEmpty && scope != _guestScope;
   }
 
-  String _prefsScope() {
+  String _prefsScope([SessionIdentity? identity]) {
     final override = debugAccountScopeOverride?.trim();
     if (override != null && override.isNotEmpty) {
       return override;
     }
-    return ContactSocialCacheStore.accountScope();
+    return ContactSocialCacheStore.accountScopeForUserId(
+      identity?.ownerUserId ?? ContactSocialCacheStore.safeLoginUserId(),
+    );
   }
 
   static bool _setContainsConversation(Set<String> ids, String conversationId) {

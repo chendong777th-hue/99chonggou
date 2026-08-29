@@ -1,12 +1,23 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:tencent_cloud_chat_demo/src/services/active_chat_registry.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_mutation_coordinator.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_mutation_event.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_flags.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_unread_aggregate.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_tab_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_flicker_log.dart';
+import 'package:tencent_cloud_chat_sdk/enum/message_elem_type.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_text_elem.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_text_elem.dart';
 
 V2TimConversation _conversation({
   required String id,
@@ -14,6 +25,7 @@ V2TimConversation _conversation({
   bool pinned = false,
   int orderkey = 0,
   String showName = 'Alice',
+  V2TimMessage? lastMessage,
 }) {
   return V2TimConversation(
     conversationID: id,
@@ -23,11 +35,37 @@ V2TimConversation _conversation({
     isPinned: pinned,
     orderkey: orderkey,
     showName: showName,
+    lastMessage: lastMessage,
   );
+}
+
+V2TimMessage _textMessage({
+  required String id,
+  required String text,
+  required int timestamp,
+}) {
+  final message = V2TimMessage.fromJson(<String, dynamic>{
+    'message_server_time': timestamp,
+    'message_msg_id': id,
+    'message_is_from_self': true,
+    'message_status': 2,
+    'message_custom_str': '',
+    'message_risk_type_identified': 0,
+    'message_sender_group_member_info': <String, dynamic>{},
+    'message_group_at_user_array': <String>[],
+  });
+  message.msgID = id;
+  message.timestamp = timestamp;
+  message.elemType = MessageElemType.V2TIM_ELEM_TYPE_TEXT;
+  message.textElem = V2TimTextElem(text: text);
+  return message;
 }
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  SharedPreferences.setMockInitialValues(<String, Object>{});
+  sqfliteFfiInit();
+  databaseFactory = databaseFactoryFfi;
 
   group('ConversationListNotifier incremental apply', () {
     late ConversationListNotifier notifier;
@@ -35,6 +73,12 @@ void main() {
     late VoidCallback listener;
 
     setUp(() {
+      ConversationPerfFlags.conversationListSdkPrimary = false;
+      ConversationPerfFlags.tabStoreCommittedViewEnabled = false;
+      ConversationTabStore.debugFetchOverride = null;
+      ConversationTabStore.instance.clear();
+      ActiveChatRegistry.instance.reset();
+      ConversationUnreadAggregate.instance.resetForTest();
       ConversationLocalStore.instance.debugOwnerUserId = 'test_user';
       notifier = ConversationListNotifier.instance;
       notifier.setConversationsForTest([
@@ -51,7 +95,13 @@ void main() {
     tearDown(() {
       notifier.removeListener(listener);
       notifier.clearSession();
+      ConversationUnreadAggregate.instance.resetForTest();
       ConversationLocalStore.instance.debugOwnerUserId = null;
+      ConversationTabStore.debugFetchOverride = null;
+      ConversationTabStore.instance.clear();
+      ActiveChatRegistry.instance.reset();
+      ConversationPerfFlags.conversationListSdkPrimary = false;
+      ConversationPerfFlags.tabStoreCommittedViewEnabled = false;
     });
 
     test('applyConversationsFromStore updates unread and notifies', () async {
@@ -66,6 +116,60 @@ void main() {
       expect(notifyCount, 1);
       expect(notifier.structureRevision, structureBefore);
       expect(notifier.contentRevision, contentBefore + 1);
+    });
+
+    test('active chat publishes last-message content without structure notify',
+        () async {
+      notifier.setConversationsForTest([
+        _conversation(
+          id: 'c2c_a',
+          orderkey: 200,
+          lastMessage: _textMessage(
+            id: 'same-message',
+            text: '旧预览',
+            timestamp: 200,
+          ),
+        ),
+        _conversation(id: 'c2c_b', orderkey: 100),
+      ]);
+      notifyCount = 0;
+      final structureBefore = notifier.structureRevision;
+      ActiveChatRegistry.instance.enter('c2c_a');
+
+      await notifier.applyConversationsFromStore(
+        upserted: [
+          _conversation(
+            id: 'c2c_a',
+            orderkey: 200,
+            lastMessage: _textMessage(
+              id: 'same-message',
+              text: '补全后的预览',
+              timestamp: 200,
+            ),
+          ),
+        ],
+      );
+
+      expect(notifyCount, 1);
+      expect(notifier.structureRevision, structureBefore);
+      expect(
+          notifier.conversations.first.lastMessage?.textElem?.text, '补全后的预览');
+    });
+
+    test('active chat defers a newly admitted conversation structure change',
+        () async {
+      ActiveChatRegistry.instance.enter('c2c_a');
+      await notifier.applyConversationsFromStore(
+        upserted: [_conversation(id: 'c2c_new', orderkey: 300)],
+      );
+
+      expect(
+        notifier.conversations
+            .map((conversation) => conversation.conversationID),
+        contains('c2c_new'),
+      );
+      expect(notifyCount, 0);
+      expect(notifier.structureRevision, 1);
     });
 
     test('same fingerprint upsert does not notify', () async {
@@ -106,6 +210,118 @@ void main() {
       );
       expect(notifyCount, 1);
       expect(notifier.structureRevision, structureBefore + 1);
+    });
+
+    test('committed batch applies multiple rows with one notify', () async {
+      await notifier.applyCommittedBatch(
+        ConversationUiSnapshotBatch<V2TimConversation>(
+          upsertedSnapshots: <V2TimConversation>[
+            _conversation(id: 'c2c_a', unread: 2, orderkey: 200),
+            _conversation(id: 'c2c_b', unread: 3, orderkey: 100),
+            _conversation(id: 'c2c_c', unread: 4, orderkey: 300),
+          ],
+          deletedCanonicalIds: const <String>[],
+          structureChanged: true,
+          changedFieldMasks: const <String, Set<ConversationMutationField>>{},
+          commitGeneration: 1,
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+
+      expect(notifyCount, 1);
+      expect(
+        notifier.conversations.map((e) => e.conversationID).toList(),
+        <String>['c2c_c', 'c2c_a', 'c2c_b'],
+      );
+      expect(
+        notifier.conversations.map((e) => e.unreadCount).toList(),
+        <int?>[4, 2, 3],
+      );
+    });
+
+    test('canonical alias batch update avoids full-window fallback', () async {
+      await notifier.applyCommittedBatch(
+        ConversationUiSnapshotBatch<V2TimConversation>(
+          upsertedSnapshots: <V2TimConversation>[
+            _conversation(id: 'a', unread: 5, orderkey: 200),
+          ],
+          deletedCanonicalIds: const <String>[],
+          structureChanged: false,
+          changedFieldMasks: const <String, Set<ConversationMutationField>>{},
+          commitGeneration: 2,
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+
+      expect(notifier.conversations.first.conversationID, 'c2c_a');
+      expect(notifier.conversations.first.unreadCount, 5);
+      expect(notifier.canonicalLookupFallbacksForTest, 0);
+      expect(notifyCount, 1);
+    });
+
+    test('complete committed unread delta does not schedule calibration',
+        () async {
+      await notifier.applyCommittedBatch(
+        ConversationUiSnapshotBatch<V2TimConversation>(
+          upsertedSnapshots: <V2TimConversation>[
+            _conversation(id: 'c2c_a', unread: 2, orderkey: 200),
+          ],
+          deletedCanonicalIds: const <String>[],
+          structureChanged: false,
+          changedFieldMasks: const <String, Set<ConversationMutationField>>{},
+          commitGeneration: 3,
+          unreadDeltas: const <ConversationUiUnreadDelta>[
+            ConversationUiUnreadDelta(
+              isGroup: false,
+              oldNotifiable: 0,
+              newNotifiable: 2,
+            ),
+          ],
+          unreadProjectionComplete: true,
+        ),
+      );
+
+      expect(
+        ConversationUnreadAggregate.instance.c2cNotifiableUnreadSum,
+        2,
+      );
+      expect(
+        ConversationUnreadAggregate.instance.deltaCommitCountForTest,
+        1,
+      );
+      expect(
+        ConversationUnreadAggregate.instance.scheduledRefreshCountForTest,
+        0,
+      );
+      expect(
+        ConversationUnreadAggregate.instance.storeCalibrationCountForTest,
+        0,
+      );
+    });
+
+    test('explicit incomplete committed batch schedules one calibration',
+        () async {
+      await notifier.applyCommittedBatch(
+        ConversationUiSnapshotBatch<V2TimConversation>(
+          upsertedSnapshots: <V2TimConversation>[
+            _conversation(id: 'c2c_a', unread: 1, orderkey: 200),
+          ],
+          deletedCanonicalIds: const <String>[],
+          structureChanged: false,
+          changedFieldMasks: const <String, Set<ConversationMutationField>>{},
+          commitGeneration: 4,
+          unreadProjectionComplete: false,
+        ),
+      );
+
+      expect(
+        ConversationUnreadAggregate.instance.scheduledRefreshCountForTest,
+        1,
+      );
+      expect(
+        ConversationUnreadAggregate.instance.storeCalibrationCountForTest,
+        0,
+      );
     });
 
     test('suppress notify batches until endSuppressNotify', () async {
@@ -450,7 +666,8 @@ void main() {
       );
       expect(notifier.conversations.first.conversationID, 'c2c_old');
       expect(notifier.structureRevision, structureBefore + 1);
-      expect(notifier.conversations.first.lastMessage?.msgID, 'msg_old_now_hot');
+      expect(
+          notifier.conversations.first.lastMessage?.msgID, 'msg_old_now_hot');
     });
 
     test('lastMessage local does not shrink conversation window', () {

@@ -643,6 +643,10 @@ class GroupLocalTipsService {
     switch (record.action) {
       case 'member_added':
         final names = memberList.map(_memberDisplayName).join('、');
+        if (memberList.length == 1 &&
+            memberList.first.userID == opMember.userID) {
+          return '$names加入群聊';
+        }
         return '$opName邀请$names加入群组';
       case 'member_removed':
         final names = memberList.map(_memberDisplayName).join('、');

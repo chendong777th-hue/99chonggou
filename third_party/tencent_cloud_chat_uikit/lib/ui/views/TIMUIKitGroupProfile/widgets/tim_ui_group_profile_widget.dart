@@ -7,6 +7,7 @@ import 'package:tencent_cloud_chat_uikit/ui/utils/screen_utils.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitGroupProfile/widgets/tim_ui_group_search_msg.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitGroupProfile/widgets/tim_uikit_group_add_opt.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitGroupProfile/widgets/tim_uikit_group_detail_card.dart';
+import 'package:tencent_cloud_chat_uikit/ui/widgets/avatar.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitGroupProfile/widgets/tim_uikit_group_manage.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitGroupProfile/widgets/tim_uikit_group_member_title.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitGroupProfile/widgets/tim_uikit_group_message_disturb.dart';
@@ -20,6 +21,10 @@ class TIMUIKitGroupProfileWidget {
   static Widget detailCard(
       {required V2TimGroupInfo groupInfo,
       bool isHavePermission = false,
+      String? previewFaceUrl,
+      AvatarPreviewUrlResolver? previewUrlResolver,
+      String? avatarCacheKey,
+      String? previewCacheKey,
 
       /// You can deal with updating group name manually, or UIKIt do it automatically.
       Function(String updateGroupName)? updateGroupName}) {
@@ -27,6 +32,10 @@ class TIMUIKitGroupProfileWidget {
       groupInfo: groupInfo,
       isHavePermission: isHavePermission,
       updateGroupName: updateGroupName,
+      previewFaceUrl: previewFaceUrl,
+      previewUrlResolver: previewUrlResolver,
+      avatarCacheKey: avatarCacheKey,
+      previewCacheKey: previewCacheKey,
     );
   }
 
@@ -51,7 +60,8 @@ class TIMUIKitGroupProfileWidget {
   }
 
   static Widget operationDivider(TUITheme theme) {
-    final isDesktopScreen = TUIKitScreenUtils.getFormFactor() == DeviceType.Desktop;
+    final isDesktopScreen =
+        TUIKitScreenUtils.getFormFactor() == DeviceType.Desktop;
     return Container(
       color: theme.weakDividerColor,
       height: isDesktopScreen ? 1 : 10,

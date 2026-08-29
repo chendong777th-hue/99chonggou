@@ -36,15 +36,40 @@ void main() {
   test('offline path may enter home even when IM login fails', () {
     expect(
       LoginCoordinator.shouldEnterHomeDespiteImLoginFailure(
-        usedOfflineCachedSig: true,
+        hasValidJwt: true,
         imCode: 6014,
       ),
       isTrue,
     );
     expect(
       LoginCoordinator.shouldEnterHomeDespiteImLoginFailure(
-        usedOfflineCachedSig: false,
+        hasValidJwt: false,
         imCode: 6014,
+      ),
+      isFalse,
+    );
+  });
+
+  test('valid business session stays logged in while UserSig is unavailable',
+      () {
+    expect(
+      LoginCoordinator.shouldEnterDegradedHomeWithoutUserSig(
+        hasValidJwt: true,
+        authenticatedUserId: 'account-b',
+      ),
+      isTrue,
+    );
+    expect(
+      LoginCoordinator.shouldEnterDegradedHomeWithoutUserSig(
+        hasValidJwt: true,
+        authenticatedUserId: '',
+      ),
+      isFalse,
+    );
+    expect(
+      LoginCoordinator.shouldEnterDegradedHomeWithoutUserSig(
+        hasValidJwt: false,
+        authenticatedUserId: 'account-b',
       ),
       isFalse,
     );

@@ -202,7 +202,8 @@ class _SearchState extends State<Search> {
     final i18n = AppI18n.of(context);
     final isConversation = (widget.conversation != null);
     final theme = Provider.of<DefaultThemeData>(context).theme;
-    final isWideScreen = TUIKitScreenUtils.getFormFactor(context) == DeviceType.Desktop;
+    final isWideScreen =
+        TUIKitScreenUtils.getFormFactor(context) == DeviceType.Desktop;
     final appBarBackground = theme.appbarBgColor ??
         theme.chatHeaderBgColor ??
         theme.wideBackgroundColor ??
@@ -214,9 +215,8 @@ class _SearchState extends State<Search> {
     final appBarIconColor = theme.primaryColor ??
         theme.chatHeaderBackTextColor ??
         const Color(0xFF1E90FF);
-    final pageBackground = theme.weakBackgroundColor ??
-        theme.wideBackgroundColor ??
-        Colors.white;
+    final pageBackground =
+        theme.weakBackgroundColor ?? theme.wideBackgroundColor ?? Colors.white;
     final routeVisible = RouteVisibility.isRouteVisible(context);
 
     void openNarrowSearchResult(
@@ -225,12 +225,11 @@ class _SearchState extends State<Search> {
       V2TimMessage? targetMessage,
     ) {
       FocusManager.instance.primaryFocus?.unfocus();
-      Navigator.of(context).push(
-        appChatRoute(
-          targetConversation,
-          initFindingMsg: targetMessage,
-          searchJumpAnchor: anchor,
-        ),
+      openOrReuseAppChat(
+        context,
+        targetConversation,
+        initFindingMsg: targetMessage,
+        searchJumpAnchor: anchor,
       );
     }
 
@@ -265,295 +264,309 @@ class _SearchState extends State<Search> {
     return _SearchPresenceScope(
       coordinator: _presenceCoordinator!,
       child: TencentPage(
-        child: Scaffold(
-          backgroundColor: pageBackground,
-          appBar: isWideScreen
-              ? null
-              : AppBar(
-                  iconTheme: IconThemeData(color: appBarIconColor),
-                  elevation: 0,
-                  scrolledUnderElevation: 0,
-                  surfaceTintColor: Colors.transparent,
-                  backgroundColor: appBarBackground,
-                  foregroundColor: appBarTextColor,
-                  title: Text(
-                    isConversation
-                        ? (widget.conversation?.showName ??
-                            widget.conversation?.conversationID ??
-                            i18n.t(
-                              zhHans: '相关聊天记录',
-                              zhHant: '相關聊天記錄',
-                              en: 'Related Chat History',
-                              ja: '関連チャット履歴',
-                              ko: '관련 채팅 기록',
-                            ))
-                        : i18n.t(
-                            zhHans: '全局搜索',
-                            zhHant: '全域搜尋',
-                            en: 'Global Search',
-                            ja: '全体検索',
-                            ko: '전체 검색',
-                          ),
-                    style: TextStyle(
-                      color: appBarTextColor,
-                      fontSize: 17,
-                      fontWeight: FontWeight.w600,
+          child: Scaffold(
+            backgroundColor: pageBackground,
+            appBar: isWideScreen
+                ? null
+                : AppBar(
+                    iconTheme: IconThemeData(color: appBarIconColor),
+                    elevation: 0,
+                    scrolledUnderElevation: 0,
+                    surfaceTintColor: Colors.transparent,
+                    backgroundColor: appBarBackground,
+                    foregroundColor: appBarTextColor,
+                    title: Text(
+                      isConversation
+                          ? (widget.conversation?.showName ??
+                              widget.conversation?.conversationID ??
+                              i18n.t(
+                                zhHans: '相关聊天记录',
+                                zhHant: '相關聊天記錄',
+                                en: 'Related Chat History',
+                                ja: '関連チャット履歴',
+                                ko: '관련 채팅 기록',
+                              ))
+                          : i18n.t(
+                              zhHans: '全局搜索',
+                              zhHant: '全域搜尋',
+                              en: 'Global Search',
+                              ja: '全体検索',
+                              ko: '전체 검색',
+                            ),
+                      style: TextStyle(
+                        color: appBarTextColor,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ),
-                ),
-          body: isConversation
-              ? TIMUIKitSearchMsgDetail(
-                  isAutoFocus: widget.isAutoFocus,
-                  currentConversation: widget.conversation!,
-                  onTapConversation: handleTapConversation,
-                  keyword: widget.initKeyword ?? "",
-                  searchBarBuilder: _contactStyleSearchBar,
-                  emptyStateBuilder: _buildSearchEmptyState,
-                  pickSearchDate: showChatHistoryDatePicker,
-                  messageAbstractBuilder: buildReplyAbstractMessage,
-                  memberPresenceLabelBuilder: (userId, imOnline) =>
-                      _searchMemberPresenceLabel(context, userId, imOnline),
-                  memberPresenceLoadingChecker: (userId, imOnline) =>
-                      _searchMemberPresenceLoading(context, userId, imOnline),
-                  onMemberListLoaded: (userIds) =>
-                      _onSearchMemberListLoaded(context, userIds),
-                  memberPresenceListenable:
-                      Provider.of<PresenceProvider>(context, listen: false),
-                )
-              : TIMUIKitSearch(
-                  onBack: widget.onBack,
-                  isAutoFocus: widget.isAutoFocus,
-                  searchBarBuilder: _contactStyleSearchBar,
-                  emptyStateBuilder: _buildSearchEmptyState,
-                  pauseFriendPresenceUpdates: !routeVisible,
-                  friendPresenceLabelBuilder: (userId, imOnline) =>
-                      _searchMemberPresenceLabel(context, userId, imOnline),
-                  friendPresenceLoadingChecker: (userId, imOnline) =>
-                      _searchMemberPresenceLoading(context, userId, imOnline),
-                  onFriendListLoaded: (userIds) =>
-                      _onSearchMemberListLoaded(context, userIds),
-                  friendPresenceListenable:
-                      Provider.of<PresenceProvider>(context, listen: false),
-                  onShowAllFriends: (keyword) {
-                    final searchModel = serviceLocator<TUISearchViewModel>();
-                    final friends = List<V2TimFriendInfoResult>.from(
-                      searchModel.friendList ?? const [],
-                    );
-                    final conversations = List<V2TimConversation?>.from(
-                      searchModel.conversationList,
-                    );
-                    final useStore =
-                        SelfHostedFriendshipBridge.localSearchEnabled &&
-                            keyword.trim().isNotEmpty;
-                    Widget page({VoidCallback? closeWidePopup}) {
-                      return TIMUIKitSearchFriendAllPage(
-                        friendResultList: friends,
-                        conversationList: conversations,
-                        keyword: keyword,
-                        loadMoreFromStore: useStore
-                            ? (cursor) async {
-                                final page = await SelfHostedFriendshipBridge
-                                    .searchFriendsLocal(
-                                  keyword: keyword,
-                                  limit: 80,
-                                  cursor: cursor,
-                                );
-                                final hydrated =
-                                    await SelfHostedFriendshipBridge
-                                        .hydrateFriends(page.ids);
-                                final items = hydrated
-                                    .map(
-                                      (friend) => V2TimFriendInfoResult(
-                                        resultCode: 0,
-                                        resultInfo: '',
-                                        relation: 0,
-                                        friendInfo: friend,
-                                      ),
-                                    )
-                                    .toList(growable: false);
-                                return (
-                                  items: items,
-                                  nextCursor: page.nextCursor,
-                                  hasMore: page.hasMore,
-                                );
-                              }
-                            : null,
-                        onTapConversation: (conversation, message) {
-                          handleTapConversation(
-                            conversation,
-                            message,
-                            closeWidePopup: closeWidePopup,
-                          );
-                        },
-                        friendPresenceLabelBuilder: (userId, imOnline) =>
-                            _searchMemberPresenceLabel(
-                                context, userId, imOnline),
-                        friendPresenceLoadingChecker: (userId, imOnline) =>
-                            _searchMemberPresenceLoading(
-                                context, userId, imOnline),
-                        onFriendListLoaded: (userIds) =>
-                            _onSearchMemberListLoaded(context, userIds),
-                        presenceListenable: Provider.of<PresenceProvider>(
-                          context,
-                          listen: false,
-                        ),
+            body: isConversation
+                ? TIMUIKitSearchMsgDetail(
+                    isAutoFocus: widget.isAutoFocus,
+                    currentConversation: widget.conversation!,
+                    onTapConversation: handleTapConversation,
+                    keyword: widget.initKeyword ?? "",
+                    searchBarBuilder: _contactStyleSearchBar,
+                    emptyStateBuilder: _buildSearchEmptyState,
+                    pickSearchDate: showChatHistoryDatePicker,
+                    messageAbstractBuilder: buildReplyAbstractMessage,
+                    memberPresenceLabelBuilder: (userId, imOnline) =>
+                        _searchMemberPresenceLabel(context, userId, imOnline),
+                    memberPresenceLoadingChecker: (userId, imOnline) =>
+                        _searchMemberPresenceLoading(context, userId, imOnline),
+                    onMemberListLoaded: (userIds) =>
+                        _onSearchMemberListLoaded(context, userIds),
+                    memberPresenceListenable:
+                        Provider.of<PresenceProvider>(context, listen: false),
+                  )
+                : TIMUIKitSearch(
+                    onBack: widget.onBack,
+                    isAutoFocus: widget.isAutoFocus,
+                    searchBarBuilder: _contactStyleSearchBar,
+                    emptyStateBuilder: _buildSearchEmptyState,
+                    pauseFriendPresenceUpdates: !routeVisible,
+                    friendPresenceLabelBuilder: (userId, imOnline) =>
+                        _searchMemberPresenceLabel(context, userId, imOnline),
+                    friendPresenceLoadingChecker: (userId, imOnline) =>
+                        _searchMemberPresenceLoading(context, userId, imOnline),
+                    onFriendListLoaded: (userIds) =>
+                        _onSearchMemberListLoaded(context, userIds),
+                    friendPresenceListenable:
+                        Provider.of<PresenceProvider>(context, listen: false),
+                    onShowAllFriends: (keyword) {
+                      final searchModel = serviceLocator<TUISearchViewModel>();
+                      final friends = List<V2TimFriendInfoResult>.from(
+                        searchModel.friendList ?? const [],
                       );
-                    }
-
-                    if (isWideScreen) {
-                      TUIKitWidePopup.showPopupWindow(
-                        operationKey: TUIKitWideModalOperationKey.chatHistory,
-                        context: context,
-                        width: MediaQuery.of(context)
-                            .size
-                            .width
-                            .clamp(520, 720)
-                            .toDouble(),
-                        height: (MediaQuery.of(context).size.height * 0.72)
-                            .clamp(480, 680)
-                            .toDouble(),
-                        child: (onClose) => page(closeWidePopup: onClose),
-                        theme: theme,
+                      final conversations = List<V2TimConversation?>.from(
+                        searchModel.conversationList,
                       );
-                    } else {
-                      Navigator.push(
-                        context,
-                        AppMaterialPageRoute(
-                          builder: (context) => page(),
-                          settings: const RouteSettings(
-                            name: AppRoutes.searchAllFriends,
+                      final useStore =
+                          SelfHostedFriendshipBridge.localSearchEnabled &&
+                              keyword.trim().isNotEmpty;
+                      Widget page({VoidCallback? closeWidePopup}) {
+                        return TIMUIKitSearchFriendAllPage(
+                          friendResultList: friends,
+                          conversationList: conversations,
+                          keyword: keyword,
+                          loadMoreFromStore: useStore
+                              ? (cursor) async {
+                                  final page = await SelfHostedFriendshipBridge
+                                      .searchFriendsLocal(
+                                    keyword: keyword,
+                                    limit: 80,
+                                    cursor: cursor,
+                                  );
+                                  final hydrated =
+                                      await SelfHostedFriendshipBridge
+                                          .hydrateFriends(page.ids);
+                                  final items = hydrated
+                                      .map(
+                                        (friend) => V2TimFriendInfoResult(
+                                          resultCode: 0,
+                                          resultInfo: '',
+                                          relation: 0,
+                                          friendInfo: friend,
+                                        ),
+                                      )
+                                      .toList(growable: false);
+                                  return (
+                                    items: items,
+                                    nextCursor: page.nextCursor,
+                                    hasMore: page.hasMore,
+                                  );
+                                }
+                              : null,
+                          onTapConversation: (conversation, message) {
+                            handleTapConversation(
+                              conversation,
+                              message,
+                              closeWidePopup: closeWidePopup,
+                            );
+                          },
+                          friendPresenceLabelBuilder: (userId, imOnline) =>
+                              _searchMemberPresenceLabel(
+                                  context, userId, imOnline),
+                          friendPresenceLoadingChecker: (userId, imOnline) =>
+                              _searchMemberPresenceLoading(
+                                  context, userId, imOnline),
+                          onFriendListLoaded: (userIds) =>
+                              _onSearchMemberListLoaded(context, userIds),
+                          presenceListenable: Provider.of<PresenceProvider>(
+                            context,
+                            listen: false,
                           ),
-                        ),
-                      );
-                    }
-                  },
-                  onShowAllGroups: (keyword) {
-                    final searchModel = serviceLocator<TUISearchViewModel>();
-                    final groups = List<V2TimGroupInfo>.from(
-                      searchModel.groupList ?? const [],
-                    );
-                    final conversations = List<V2TimConversation?>.from(
-                      searchModel.conversationList,
-                    );
-                    final useStore = SelfHostedGroupBridge.localSearchEnabled &&
-                        keyword.trim().isNotEmpty;
-                    Widget page({VoidCallback? closeWidePopup}) {
-                      return TIMUIKitSearchGroupAllPage(
-                        groupList: groups,
-                        conversationList: conversations,
-                        keyword: keyword,
-                        loadMoreFromStore: useStore
-                            ? (cursor) async {
-                                final page = await SelfHostedGroupBridge
-                                    .searchGroupsLocal(
-                                  keyword: keyword,
-                                  limit: 80,
-                                  cursor: cursor,
-                                );
-                                final items = await SelfHostedGroupBridge
-                                    .hydrateGroups(page.ids);
-                                return (
-                                  items: items,
-                                  nextCursor: page.nextCursor,
-                                  hasMore: page.hasMore,
-                                );
-                              }
-                            : null,
-                        onTapConversation: (conversation, message) {
-                          handleTapConversation(
-                            conversation,
-                            message,
-                            closeWidePopup: closeWidePopup,
-                          );
-                        },
-                      );
-                    }
+                        );
+                      }
 
-                    if (isWideScreen) {
-                      TUIKitWidePopup.showPopupWindow(
-                        operationKey: TUIKitWideModalOperationKey.chatHistory,
-                        context: context,
-                        width: MediaQuery.of(context)
-                            .size
-                            .width
-                            .clamp(520, 720)
-                            .toDouble(),
-                        height: (MediaQuery.of(context).size.height * 0.72)
-                            .clamp(480, 680)
-                            .toDouble(),
-                        child: (onClose) => page(closeWidePopup: onClose),
-                        theme: theme,
-                      );
-                    } else {
-                      Navigator.push(
-                        context,
-                        AppMaterialPageRoute(
-                          builder: (context) => page(),
-                          settings: const RouteSettings(
-                            name: AppRoutes.searchAllGroups,
-                          ),
-                        ),
-                      );
-                    }
-                  },
-                  onEnterSearchInConversation:
-                      (V2TimConversation conversation, String keyword) {
-                    if(isWideScreen){
-                      TUIKitWidePopup.showPopupWindow(
+                      if (isWideScreen) {
+                        TUIKitWidePopup.showPopupWindow(
                           operationKey: TUIKitWideModalOperationKey.chatHistory,
                           context: context,
-                          width: MediaQuery.of(context).size.width.clamp(520, 720).toDouble(),
-                          height: (MediaQuery.of(context).size.height * 0.72).clamp(480, 680).toDouble(),
-                          child: (onClose) => TIMUIKitSearchMsgDetail(
-                            currentConversation: conversation,
-                            keyword: keyword,
-                            searchBarBuilder: _contactStyleSearchBar,
-                            emptyStateBuilder: _buildSearchEmptyState,
-                            pickSearchDate: showChatHistoryDatePicker,
-                            messageAbstractBuilder: buildReplyAbstractMessage,
-                            onTapConversation: (V2TimConversation conversation,
-                                V2TimMessage? message) {
-                              handleTapConversation(
-                                conversation,
-                                message,
-                                closeWidePopup: onClose,
-                              );
-                            },
-                            memberPresenceLabelBuilder: (userId, imOnline) =>
-                                _searchMemberPresenceLabel(
-                                    context, userId, imOnline),
-                            memberPresenceLoadingChecker: (userId, imOnline) =>
-                                _searchMemberPresenceLoading(
-                                    context, userId, imOnline),
-                            onMemberListLoaded: (userIds) =>
-                                _onSearchMemberListLoaded(context, userIds),
-                            memberPresenceListenable:
-                                Provider.of<PresenceProvider>(context,
-                                    listen: false),
-                          ),
-                          theme: theme);
-                    }else{
-                      Navigator.push(
+                          width: MediaQuery.of(context)
+                              .size
+                              .width
+                              .clamp(520, 720)
+                              .toDouble(),
+                          height: (MediaQuery.of(context).size.height * 0.72)
+                              .clamp(480, 680)
+                              .toDouble(),
+                          child: (onClose) => page(closeWidePopup: onClose),
+                          theme: theme,
+                        );
+                      } else {
+                        Navigator.push(
                           context,
                           AppMaterialPageRoute(
-                            builder: (context) => Search(
-                              onTapConversation: widget.onTapConversation,
-                              onTapConversationWithMessage:
-                                  widget.onTapConversationWithMessage,
-                              conversation: conversation,
-                              initKeyword: keyword,
-                              onBack: widget.onBack,
-                            ),
+                            builder: (context) => page(),
                             settings: const RouteSettings(
-                              name: AppRoutes.searchInConversation,
+                              name: AppRoutes.searchAllFriends,
                             ),
-                          ));
-                    }
-                  },
-                  onTapConversation: handleTapConversation,
-                ),
-        ),
-        name: 'search'),
+                          ),
+                        );
+                      }
+                    },
+                    onShowAllGroups: (keyword) {
+                      final searchModel = serviceLocator<TUISearchViewModel>();
+                      final groups = List<V2TimGroupInfo>.from(
+                        searchModel.groupList ?? const [],
+                      );
+                      final conversations = List<V2TimConversation?>.from(
+                        searchModel.conversationList,
+                      );
+                      final useStore =
+                          SelfHostedGroupBridge.localSearchEnabled &&
+                              keyword.trim().isNotEmpty;
+                      Widget page({VoidCallback? closeWidePopup}) {
+                        return TIMUIKitSearchGroupAllPage(
+                          groupList: groups,
+                          conversationList: conversations,
+                          keyword: keyword,
+                          loadMoreFromStore: useStore
+                              ? (cursor) async {
+                                  final page = await SelfHostedGroupBridge
+                                      .searchGroupsLocal(
+                                    keyword: keyword,
+                                    limit: 80,
+                                    cursor: cursor,
+                                  );
+                                  final items =
+                                      await SelfHostedGroupBridge.hydrateGroups(
+                                          page.ids);
+                                  return (
+                                    items: items,
+                                    nextCursor: page.nextCursor,
+                                    hasMore: page.hasMore,
+                                  );
+                                }
+                              : null,
+                          onTapConversation: (conversation, message) {
+                            handleTapConversation(
+                              conversation,
+                              message,
+                              closeWidePopup: closeWidePopup,
+                            );
+                          },
+                        );
+                      }
+
+                      if (isWideScreen) {
+                        TUIKitWidePopup.showPopupWindow(
+                          operationKey: TUIKitWideModalOperationKey.chatHistory,
+                          context: context,
+                          width: MediaQuery.of(context)
+                              .size
+                              .width
+                              .clamp(520, 720)
+                              .toDouble(),
+                          height: (MediaQuery.of(context).size.height * 0.72)
+                              .clamp(480, 680)
+                              .toDouble(),
+                          child: (onClose) => page(closeWidePopup: onClose),
+                          theme: theme,
+                        );
+                      } else {
+                        Navigator.push(
+                          context,
+                          AppMaterialPageRoute(
+                            builder: (context) => page(),
+                            settings: const RouteSettings(
+                              name: AppRoutes.searchAllGroups,
+                            ),
+                          ),
+                        );
+                      }
+                    },
+                    onEnterSearchInConversation:
+                        (V2TimConversation conversation, String keyword) {
+                      if (isWideScreen) {
+                        TUIKitWidePopup.showPopupWindow(
+                            operationKey:
+                                TUIKitWideModalOperationKey.chatHistory,
+                            context: context,
+                            width: MediaQuery.of(context)
+                                .size
+                                .width
+                                .clamp(520, 720)
+                                .toDouble(),
+                            height: (MediaQuery.of(context).size.height * 0.72)
+                                .clamp(480, 680)
+                                .toDouble(),
+                            child: (onClose) => TIMUIKitSearchMsgDetail(
+                                  currentConversation: conversation,
+                                  keyword: keyword,
+                                  searchBarBuilder: _contactStyleSearchBar,
+                                  emptyStateBuilder: _buildSearchEmptyState,
+                                  pickSearchDate: showChatHistoryDatePicker,
+                                  messageAbstractBuilder:
+                                      buildReplyAbstractMessage,
+                                  onTapConversation:
+                                      (V2TimConversation conversation,
+                                          V2TimMessage? message) {
+                                    handleTapConversation(
+                                      conversation,
+                                      message,
+                                      closeWidePopup: onClose,
+                                    );
+                                  },
+                                  memberPresenceLabelBuilder:
+                                      (userId, imOnline) =>
+                                          _searchMemberPresenceLabel(
+                                              context, userId, imOnline),
+                                  memberPresenceLoadingChecker:
+                                      (userId, imOnline) =>
+                                          _searchMemberPresenceLoading(
+                                              context, userId, imOnline),
+                                  onMemberListLoaded: (userIds) =>
+                                      _onSearchMemberListLoaded(
+                                          context, userIds),
+                                  memberPresenceListenable:
+                                      Provider.of<PresenceProvider>(context,
+                                          listen: false),
+                                ),
+                            theme: theme);
+                      } else {
+                        Navigator.push(
+                            context,
+                            AppMaterialPageRoute(
+                              builder: (context) => Search(
+                                onTapConversation: widget.onTapConversation,
+                                onTapConversationWithMessage:
+                                    widget.onTapConversationWithMessage,
+                                conversation: conversation,
+                                initKeyword: keyword,
+                                onBack: widget.onBack,
+                              ),
+                              settings: const RouteSettings(
+                                name: AppRoutes.searchInConversation,
+                              ),
+                            ));
+                      }
+                    },
+                    onTapConversation: handleTapConversation,
+                  ),
+          ),
+          name: 'search'),
     );
   }
 }

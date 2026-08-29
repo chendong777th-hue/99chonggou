@@ -12,6 +12,8 @@ class MeGroupRecord {
     required this.groupName,
     required this.displayAlias,
     required this.avatarUrl,
+    this.avatarPreviewUrl = '',
+    this.avatarVersion = 0,
     required this.notice,
     required this.memberCount,
     required this.myRole,
@@ -30,6 +32,8 @@ class MeGroupRecord {
   final String groupName;
   final String displayAlias;
   final String avatarUrl;
+  final String avatarPreviewUrl;
+  final int avatarVersion;
   final String notice;
   final int memberCount;
   final int myRole;
@@ -52,6 +56,8 @@ class MeGroupRecord {
     String? groupName,
     String? displayAlias,
     String? avatarUrl,
+    String? avatarPreviewUrl,
+    int? avatarVersion,
     String? notice,
     int? memberCount,
     int? myRole,
@@ -70,6 +76,8 @@ class MeGroupRecord {
       groupName: groupName ?? this.groupName,
       displayAlias: displayAlias ?? this.displayAlias,
       avatarUrl: avatarUrl ?? this.avatarUrl,
+      avatarPreviewUrl: avatarPreviewUrl ?? this.avatarPreviewUrl,
+      avatarVersion: avatarVersion ?? this.avatarVersion,
       notice: notice ?? this.notice,
       memberCount: memberCount ?? this.memberCount,
       myRole: myRole ?? this.myRole,
@@ -105,6 +113,10 @@ class MeGroupRecord {
       avatarUrl: normalizeObjectUrl(
         _asString(json['avatarUrl'] ?? json['avatar_url'] ?? json['faceUrl']),
       ),
+      avatarPreviewUrl: normalizeObjectUrl(
+        _asString(json['avatarPreviewUrl'] ?? json['avatar_preview_url']),
+      ),
+      avatarVersion: _asInt(json['avatarVersion'] ?? json['avatar_version']),
       notice: _asString(json['notice'] ?? json['notification']),
       memberCount: _asInt(json['memberCount'] ?? json['member_count']),
       myRole: _asInt(json['myRole'] ?? json['my_role'] ?? json['role']),

@@ -197,6 +197,8 @@ class _PendingGalleryImageSend {
     required this.convType,
     this.imageWidth,
     this.imageHeight,
+    required this.batchId,
+    required this.batchIndex,
   });
 
   final String filePath;
@@ -205,6 +207,8 @@ class _PendingGalleryImageSend {
   final ConvType convType;
   final int? imageWidth;
   final int? imageHeight;
+  final String batchId;
+  final int batchIndex;
 }
 
 class _ResolvedGalleryImage {
@@ -433,20 +437,6 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
     }
   }
 
-  void _dispatchImageSend({
-    required TUIChatSeparateViewModel model,
-    required String convID,
-    required ConvType convType,
-    required String filePath,
-  }) {
-    _dispatchImageSendWithoutAwait(
-      model: model,
-      convID: convID,
-      convType: convType,
-      filePath: filePath,
-    );
-  }
-
   void _dispatchVideoSendWithoutAwait({
     required TUIChatSeparateViewModel model,
     required String convID,
@@ -455,9 +445,17 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
     int? duration,
     String? snapshotPath,
     String? existingOptimisticId,
+    GallerySendPerfTrace? perf,
   }) {
     if (!_hasUsableConversation(convID) ||
         !_isCapturedConversationCurrent(convID, convType)) {
+      final staleId = existingOptimisticId?.trim() ?? '';
+      if (staleId.isNotEmpty) {
+        model.cancelOptimisticMediaPlaceholder(
+          convID: convID,
+          clientId: staleId,
+        );
+      }
       return;
     }
     final optimisticId = existingOptimisticId ??
@@ -467,6 +465,8 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
           duration: duration,
           snapshotPath: snapshotPath,
         );
+    final sendWatch = Stopwatch()..start();
+    perf?.log('video_sdk_send_begin');
     final sendFuture = model.sendVideoMessage(
       videoPath: videoPath,
       duration: duration != null && duration > 0 ? duration : null,
@@ -475,29 +475,21 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
       convType: convType,
       existingOptimisticId: optimisticId,
     );
-    if (mounted) {
-      unawaited(MessageUtils.handleMessageError(sendFuture, context));
+    final handled = mounted
+        ? MessageUtils.handleMessageError(sendFuture, context)
+        : sendFuture;
+    if (perf != null) {
+      perf.retainAsyncOperation();
+      unawaited(handled.whenComplete(() {
+        perf.log(
+          'video_sdk_send_end',
+          detail: 'itemMs=${sendWatch.elapsedMilliseconds}',
+        );
+        perf.releaseAsyncOperation();
+      }));
     } else {
-      unawaited(sendFuture);
+      unawaited(handled);
     }
-  }
-
-  void _dispatchVideoSend({
-    required TUIChatSeparateViewModel model,
-    required String convID,
-    required ConvType convType,
-    required String videoPath,
-    int? duration,
-    String? snapshotPath,
-  }) {
-    _dispatchVideoSendWithoutAwait(
-      model: model,
-      convID: convID,
-      convType: convType,
-      videoPath: videoPath,
-      duration: duration,
-      snapshotPath: snapshotPath,
-    );
   }
 
   Future<_ResolvedGalleryImage?> _resolveGalleryImageAsset(
@@ -506,17 +498,23 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
     int? index,
   }) async {
     try {
-      final originFile = await EditableAssetPicker.resolveFileForChatSend(
+      final resolved = await EditableAssetPicker.resolveFileForChatSendResult(
         asset,
         perf: perf,
         index: index,
       );
+      final originFile = resolved.file;
       final filePath = originFile?.path;
       if (originFile == null || filePath == null || filePath.isEmpty) {
+        perf?.log('resolve_categorized_failure',
+            index: index, detail: 'outcome=${resolved.outcome.name}');
+        _showPanelNotice(TIM_t('图片暂时无法读取，请重试'));
         return null;
       }
       final size = await originFile.length();
       if (size >= MorePanelConfig.IMAGE_MAX_SIZE) {
+        perf?.log('resolve_file_terminal',
+            index: index, detail: 'outcome=oversize bytes=$size');
         onTIMCallback(TIMCallback(
             type: TIMCallbackType.INFO, infoRecommendText: TIM_t("文件大小超出了限制")));
         return null;
@@ -586,12 +584,85 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
       return;
     }
 
-    // 文件导出保持串行，避免 iOS 同时导出多张 HEIC/云端图片挤占退场帧。
-    final resolvedImages = <_ResolvedGalleryImage>[];
+    // 先按选择顺序一次性显示轻量占位。PhotoKit 导出仍保持串行，避免 iOS
+    // 同时导出多张 HEIC/云端图片造成内存尖峰；导出只负责补全同一 stable id。
+    final batchId = 'image_batch_${nextChatMediaUniqueToken()}';
+    // Create video rows before PhotoKit export/thumbnail work. AssetEntity may
+    // point to iCloud, so waiting for originFile here makes the send tap look
+    // blocked even though the actual SDK send can run independently.
+    final videoOptimisticIds = <String>[];
+    for (final asset in videoAssets) {
+      videoOptimisticIds.add(
+        model.beginOptimisticVideoPlaceholder(
+          convID: convID,
+          videoPath: '',
+          duration: asset.videoDuration.inSeconds > 0
+              ? asset.videoDuration.inSeconds
+              : null,
+          requestInitialPin: false,
+        ),
+      );
+    }
+    final optimisticIds = model.beginOptimisticImagePlaceholders(
+      convID: convID,
+      inputs: imageAssets
+          .map(
+            (asset) => OptimisticImagePlaceholderInput(
+              batchId: batchId,
+              batchIndex: imageAssets.indexOf(asset),
+              imageWidth:
+                  asset.orientatedWidth > 0 ? asset.orientatedWidth : null,
+              imageHeight:
+                  asset.orientatedHeight > 0 ? asset.orientatedHeight : null,
+              sourcePending: true,
+            ),
+          )
+          .toList(growable: false),
+      probeSizeSynchronously: false,
+      requestInitialPin: false,
+    );
+    perf.log('placeholder_batch_end', count: optimisticIds.length);
+    if (optimisticIds.length != imageAssets.length) {
+      for (final optimisticId in optimisticIds) {
+        model.cancelOptimisticMediaPlaceholder(
+          convID: convID,
+          clientId: optimisticId,
+        );
+      }
+      for (final optimisticId in videoOptimisticIds) {
+        model.cancelOptimisticMediaPlaceholder(
+          convID: convID,
+          clientId: optimisticId,
+        );
+      }
+      return;
+    }
+    await WidgetsBinding.instance.endOfFrame;
+    serviceLocator<TUIChatGlobalModel>().requestPinToBottom(
+      convID,
+      force: true,
+    );
+    perf.log('placeholder_post_layout_pin_requested');
+
+    final pending = <_PendingGalleryImageSend>[];
     for (var i = 0; i < imageAssets.length; i++) {
       if (!_hasUsableConversation(convID) ||
           !_isCapturedConversationCurrent(convID, convType)) {
         perf.log('resolve_cancelled_conversation_changed', index: i);
+        for (var pendingIndex = i;
+            pendingIndex < optimisticIds.length;
+            pendingIndex++) {
+          model.cancelOptimisticMediaPlaceholder(
+            convID: convID,
+            clientId: optimisticIds[pendingIndex],
+          );
+        }
+        for (final optimisticId in videoOptimisticIds) {
+          model.cancelOptimisticMediaPlaceholder(
+            convID: convID,
+            clientId: optimisticId,
+          );
+        }
         break;
       }
       final asset = imageAssets[i];
@@ -602,9 +673,6 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
         perf: perf,
         index: i,
       );
-      if (resolved != null) {
-        resolvedImages.add(resolved);
-      }
       perf.log(
         resolved == null ? 'resolve_failed' : 'resolve_end',
         index: i,
@@ -612,86 +680,50 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
         bytes: resolved?.fileBytes,
         detail: 'itemMs=${itemWatch.elapsedMilliseconds}',
       );
-      // 给图片解码、路由收尾和聊天列表各留一次绘制机会。
-      await WidgetsBinding.instance.endOfFrame;
-      perf.log('resolve_frame_yield_end', index: i);
-    }
-
-    // 所有占位一次性并入消息列表。旧逻辑逐张插入会反复复制完整列表、
-    // 触发多次贴底与入场动画，多图时会形成明显阶梯式卡顿。
-    final placeholderWatch = Stopwatch()..start();
-    perf.log('placeholder_batch_begin', count: resolvedImages.length);
-    final optimisticIds = model.beginOptimisticImagePlaceholders(
-      convID: convID,
-      inputs: resolvedImages
-          .map(
-            (resolved) => OptimisticImagePlaceholderInput(
-              imagePath: resolved.filePath,
-              imageWidth: resolved.imageWidth,
-              imageHeight: resolved.imageHeight,
-            ),
-          )
-          .toList(growable: false),
-      probeSizeSynchronously: false,
-    );
-    perf.log(
-      'placeholder_batch_end',
-      count: optimisticIds.length,
-      detail: 'syncMs=${placeholderWatch.elapsedMilliseconds}',
-    );
-    await WidgetsBinding.instance.endOfFrame;
-    perf.log('placeholder_first_frame_end');
-    // 首次 requestPinToBottom 与消息列表写入发生在同一帧，picker 退场或
-    // 新图片行尚未完成布局时可能被消费掉。首帧布局后重放一次，确保新气泡
-    // 把旧消息向上顶并立即出现在聊天页。
-    serviceLocator<TUIChatGlobalModel>().requestPinToBottom(
-      convID,
-      force: true,
-    );
-    perf.log('placeholder_post_layout_pin_requested');
-
-    final pending = <_PendingGalleryImageSend>[];
-    for (var i = 0; i < resolvedImages.length; i++) {
-      if (!_hasUsableConversation(convID) ||
-          !_isCapturedConversationCurrent(convID, convType)) {
-        break;
-      }
-      final resolved = resolvedImages[i];
       final optimisticId = optimisticIds[i];
+      if (resolved == null) {
+        model.markOptimisticMediaPlaceholderFailed(
+          convID: convID,
+          clientId: optimisticId,
+        );
+        _showPanelNotice(TIM_t('图片发送失败，请重试'));
+        continue;
+      }
       String? staged;
-      final stageWatch = Stopwatch()..start();
-      perf.log('stage_begin', index: i, bytes: resolved.fileBytes);
       try {
         staged =
             await stageImageForChatSend(resolved.filePath) ?? resolved.filePath;
       } catch (error) {
-        model.cancelOptimisticMediaPlaceholder(
+        model.markOptimisticMediaPlaceholderFailed(
           convID: convID,
           clientId: optimisticId,
         );
         outputLogger.i('stage gallery image failed: $error');
-        perf.log(
-          'stage_failed',
-          index: i,
-          detail: 'type=${error.runtimeType}',
-        );
+        perf.log('stage_failed', index: i, detail: 'type=${error.runtimeType}');
         continue;
       }
       final stagedPath = staged?.trim() ?? '';
-      if (stagedPath.isEmpty) {
-        model.cancelOptimisticMediaPlaceholder(
-          convID: convID,
-          clientId: optimisticId,
-        );
-        continue;
-      }
-      if (!_hasUsableConversation(convID) ||
+      if (stagedPath.isEmpty ||
           !_isCapturedConversationCurrent(convID, convType)) {
         model.cancelOptimisticMediaPlaceholder(
           convID: convID,
           clientId: optimisticId,
         );
-        break;
+        continue;
+      }
+      final hydrated = model.hydrateOptimisticImagePlaceholder(
+        convID: convID,
+        clientId: optimisticId,
+        imagePath: stagedPath,
+        imageWidth: resolved.imageWidth,
+        imageHeight: resolved.imageHeight,
+      );
+      if (!hydrated) {
+        model.cancelOptimisticMediaPlaceholder(
+          convID: convID,
+          clientId: optimisticId,
+        );
+        continue;
       }
       pending.add(_PendingGalleryImageSend(
         filePath: stagedPath,
@@ -700,14 +732,12 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
         convType: convType,
         imageWidth: resolved.imageWidth,
         imageHeight: resolved.imageHeight,
+        batchId: batchId,
+        batchIndex: i,
       ));
-      perf.log(
-        'stage_end',
-        index: i,
-        bytes: resolved.fileBytes,
-        detail: 'itemMs=${stageWatch.elapsedMilliseconds}',
-      );
+      // 给图片解码、路由收尾和聊天列表各留一次绘制机会。
       await WidgetsBinding.instance.endOfFrame;
+      perf.log('resolve_frame_yield_end', index: i);
     }
 
     if (pending.isNotEmpty) {
@@ -722,16 +752,21 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
       );
     }
 
-    for (final asset in videoAssets) {
+    for (var videoIndex = 0; videoIndex < videoAssets.length; videoIndex++) {
       if (!_hasUsableConversation(convID)) {
         return;
       }
-      unawaited(_prepareAndDispatchGalleryVideo(
-        asset: asset,
-        model: model,
-        convID: convID,
-        convType: convType,
-      ));
+      perf.retainAsyncOperation();
+      unawaited(
+        _prepareAndDispatchGalleryVideo(
+          asset: videoAssets[videoIndex],
+          model: model,
+          convID: convID,
+          convType: convType,
+          existingOptimisticId: videoOptimisticIds[videoIndex],
+          perf: perf,
+        ).whenComplete(perf.releaseAsyncOperation),
+      );
     }
     perf.log(
       'custom_dispatch_complete',
@@ -748,24 +783,98 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
     required GallerySendPerfTrace perf,
   }) async {
     perf.log('system_dispatch_begin', count: files.length);
-    final resolvedImages = <_ResolvedGalleryImage>[];
+    final batchId = 'image_batch_${nextChatMediaUniqueToken()}';
+    final imageFiles = <XFile>[];
     final videos = <XFile>[];
-    for (var i = 0; i < files.length; i++) {
-      final picked = files[i];
+    for (final picked in files) {
       if (_isPickedVideo(picked)) {
         videos.add(picked);
-        continue;
+      } else {
+        imageFiles.add(picked);
       }
+    }
+
+    // Insert video rows before copying temporary picker files. The copy and
+    // thumbnail extraction can take hundreds of milliseconds for large clips.
+    final videoOptimisticIds = <String>[];
+    for (final video in videos) {
+      videoOptimisticIds.add(
+        model.beginOptimisticVideoPlaceholder(
+          convID: convID,
+          videoPath: video.path,
+          requestInitialPin: false,
+        ),
+      );
+    }
+
+    // Insert all optimistic placeholders before any file I/O so the user sees
+    // immediate feedback. XFile.path from the system picker is a usable file
+    // path, so the placeholder can start decoding immediately.
+    final placeholderWatch = Stopwatch()..start();
+    perf.log('placeholder_batch_begin', count: imageFiles.length);
+    final optimisticIds = imageFiles.isEmpty
+        ? const <String>[]
+        : model.beginOptimisticImagePlaceholders(
+            convID: convID,
+            inputs: imageFiles
+                .map(
+                  (file) => OptimisticImagePlaceholderInput(
+                    batchId: batchId,
+                    batchIndex: imageFiles.indexOf(file),
+                    imagePath: file.path,
+                  ),
+                )
+                .toList(growable: false),
+            probeSizeSynchronously: true,
+            requestInitialPin: false,
+          );
+    perf.log(
+      'placeholder_batch_end',
+      count: optimisticIds.length,
+      detail: 'syncMs=${placeholderWatch.elapsedMilliseconds}',
+    );
+    if (optimisticIds.isNotEmpty) {
+      await WidgetsBinding.instance.endOfFrame;
+      perf.log('placeholder_first_frame_end');
+      serviceLocator<TUIChatGlobalModel>().requestPinToBottom(
+        convID,
+        force: true,
+      );
+      perf.log('placeholder_post_layout_pin_requested');
+    }
+    if (videoOptimisticIds.isNotEmpty && optimisticIds.isEmpty) {
+      serviceLocator<TUIChatGlobalModel>().requestPinToBottom(
+        convID,
+        force: true,
+      );
+    }
+
+    // Stream: resolve → stage → enqueue send one at a time, so the first
+    // image enters the upload pipeline before the last is resolved.
+    final pendingImages = <_PendingGalleryImageSend>[];
+    for (var i = 0; i < imageFiles.length; i++) {
       if (!_hasUsableConversation(convID) ||
           !_isCapturedConversationCurrent(convID, convType)) {
+        for (var j = i; j < optimisticIds.length; j++) {
+          model.cancelOptimisticMediaPlaceholder(
+            convID: convID,
+            clientId: optimisticIds[j],
+          );
+        }
         break;
       }
+      final optimisticId = optimisticIds[i];
+      final picked = imageFiles[i];
       try {
         final itemWatch = Stopwatch()..start();
-        perf.log('system_resolve_begin', index: i, count: files.length);
+        perf.log('system_resolve_begin', index: i, count: imageFiles.length);
         final source = File(picked.path);
         if (!source.existsSync()) {
           perf.log('system_resolve_missing', index: i);
+          model.markOptimisticMediaPlaceholderFailed(
+            convID: convID,
+            clientId: optimisticId,
+          );
           continue;
         }
         final bytes = await source.length();
@@ -774,84 +883,47 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
             type: TIMCallbackType.INFO,
             infoRecommendText: TIM_t("文件大小超出了限制"),
           ));
+          model.markOptimisticMediaPlaceholderFailed(
+            convID: convID,
+            clientId: optimisticId,
+          );
           continue;
         }
-        resolvedImages.add(
-          _ResolvedGalleryImage(filePath: source.path, fileBytes: bytes),
-        );
         perf.log(
           'system_resolve_end',
           index: i,
           bytes: bytes,
           detail: 'itemMs=${itemWatch.elapsedMilliseconds}',
         );
-      } catch (error) {
-        outputLogger.i('resolve system picked image failed: $error');
-        perf.log(
-          'system_resolve_failed',
-          index: i,
-          detail: 'type=${error.runtimeType}',
-        );
-      }
-    }
 
-    final placeholderWatch = Stopwatch()..start();
-    perf.log('placeholder_batch_begin', count: resolvedImages.length);
-    final optimisticIds = model.beginOptimisticImagePlaceholders(
-      convID: convID,
-      inputs: resolvedImages
-          .map(
-            (resolved) => OptimisticImagePlaceholderInput(
-              imagePath: resolved.filePath,
-            ),
-          )
-          .toList(growable: false),
-      probeSizeSynchronously: false,
-    );
-    perf.log(
-      'placeholder_batch_end',
-      count: optimisticIds.length,
-      detail: 'syncMs=${placeholderWatch.elapsedMilliseconds}',
-    );
-    await WidgetsBinding.instance.endOfFrame;
-    perf.log('placeholder_first_frame_end');
-    serviceLocator<TUIChatGlobalModel>().requestPinToBottom(
-      convID,
-      force: true,
-    );
-    perf.log('placeholder_post_layout_pin_requested');
-
-    final pendingImages = <_PendingGalleryImageSend>[];
-    for (var i = 0; i < resolvedImages.length; i++) {
-      final resolved = resolvedImages[i];
-      final optimisticId = optimisticIds[i];
-      final stageWatch = Stopwatch()..start();
-      perf.log('stage_begin', index: i, bytes: resolved.fileBytes);
-      try {
-        final staged = await stageImageForChatSend(resolved.filePath);
+        final stageWatch = Stopwatch()..start();
+        perf.log('stage_begin', index: i, bytes: bytes);
+        final staged = await stageImageForChatSend(source.path);
         final sendPath = staged?.trim().isNotEmpty == true
             ? staged!.trim()
-            : resolved.filePath;
+            : source.path;
         pendingImages.add(_PendingGalleryImageSend(
           filePath: sendPath,
           optimisticId: optimisticId,
           convID: convID,
           convType: convType,
+          batchId: batchId,
+          batchIndex: i,
         ));
         perf.log(
           'stage_end',
           index: i,
-          bytes: resolved.fileBytes,
+          bytes: bytes,
           detail: 'itemMs=${stageWatch.elapsedMilliseconds}',
         );
       } catch (error) {
-        model.cancelOptimisticMediaPlaceholder(
+        model.markOptimisticMediaPlaceholderFailed(
           convID: convID,
           clientId: optimisticId,
         );
-        outputLogger.i('stage system picked image failed: $error');
+        outputLogger.i('resolve/stage system picked image failed: $error');
         perf.log(
-          'stage_failed',
+          'system_resolve_failed',
           index: i,
           detail: 'type=${error.runtimeType}',
         );
@@ -870,13 +942,18 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
         ).whenComplete(perf.releaseAsyncOperation),
       );
     }
-    for (final video in videos) {
-      unawaited(_prepareAndDispatchSystemGalleryVideo(
-        file: video,
-        model: model,
-        convID: convID,
-        convType: convType,
-      ));
+    for (var videoIndex = 0; videoIndex < videos.length; videoIndex++) {
+      perf.retainAsyncOperation();
+      unawaited(
+        _prepareAndDispatchSystemGalleryVideo(
+          file: videos[videoIndex],
+          model: model,
+          convID: convID,
+          convType: convType,
+          existingOptimisticId: videoOptimisticIds[videoIndex],
+          perf: perf,
+        ).whenComplete(perf.releaseAsyncOperation),
+      );
     }
     perf.log(
       'system_dispatch_complete',
@@ -890,29 +967,47 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
     required TUIChatSeparateViewModel model,
     required String convID,
     required ConvType convType,
+    required String existingOptimisticId,
+    GallerySendPerfTrace? perf,
   }) async {
-    String? optimisticId;
+    String? optimisticId = existingOptimisticId;
     try {
+      final watch = Stopwatch()..start();
+      perf?.log('video_prepare_begin', detail: 'source=system');
       if (!_hasUsableConversation(convID) ||
           !_isCapturedConversationCurrent(convID, convType)) {
+        model.cancelOptimisticMediaPlaceholder(
+          convID: convID,
+          clientId: optimisticId,
+        );
         return;
       }
       final staged = await stageVideoForChatSend(file.path);
+      perf?.log(
+        'video_stage_end',
+        bytes: staged == null ? null : await File(staged).length(),
+        detail: 'itemMs=${watch.elapsedMilliseconds}',
+      );
       if (staged == null || staged.isEmpty) {
+        model.markOptimisticMediaPlaceholderFailed(
+          convID: convID,
+          clientId: optimisticId,
+        );
         _showPanelNotice(TIM_t('视频文件不可用'));
         return;
       }
       if (await File(staged).length() >= MorePanelConfig.VIDEO_MAX_SIZE) {
+        model.markOptimisticMediaPlaceholderFailed(
+          convID: convID,
+          clientId: optimisticId,
+        );
         onTIMCallback(TIMCallback(
           type: TIMCallbackType.INFO,
           infoRecommendText: TIM_t("文件大小超出了限制"),
         ));
         return;
       }
-      optimisticId = model.beginOptimisticVideoPlaceholder(
-        convID: convID,
-        videoPath: staged,
-      );
+      optimisticId = existingOptimisticId;
       final metadata = await Future.wait<Object?>([
         _loadVideoDurationSeconds(staged),
         buildVideoSnapshotForSend(
@@ -921,8 +1016,16 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
               mounted ? MediaQuery.devicePixelRatioOf(context) : null,
         ),
       ]);
+      perf?.log('video_metadata_end', detail: 'itemMs=${watch.elapsedMilliseconds}');
       final duration = metadata[0] as int;
       final snapshotPath = metadata[1] as String?;
+      model.hydrateOptimisticVideoPlaceholder(
+        convID: convID,
+        clientId: optimisticId,
+        videoPath: staged,
+        duration: duration,
+        snapshotPath: snapshotPath,
+      );
       if (!_isCapturedConversationCurrent(convID, convType)) {
         model.cancelOptimisticMediaPlaceholder(
           convID: convID,
@@ -938,7 +1041,9 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
         duration: duration,
         snapshotPath: snapshotPath,
         existingOptimisticId: optimisticId,
+        perf: perf,
       );
+      perf?.log('video_send_queued', detail: 'itemMs=${watch.elapsedMilliseconds}');
     } catch (error) {
       if (optimisticId != null) {
         model.cancelOptimisticMediaPlaceholder(
@@ -947,6 +1052,7 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
         );
       }
       outputLogger.i('prepare system picked video failed: $error');
+      perf?.log('video_prepare_failed', detail: 'type=${error.runtimeType}');
       _showPanelNotice(TIM_t('视频文件异常'));
     }
   }
@@ -985,6 +1091,8 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
           convID: item.convID,
           convType: item.convType,
           existingOptimisticId: item.optimisticId,
+          batchId: item.batchId,
+          batchIndex: item.batchIndex,
         );
         if (mounted) {
           await MessageUtils.handleMessageError(sendFuture, context);
@@ -1466,15 +1574,23 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
     required TUIChatSeparateViewModel model,
     required String convID,
     required ConvType convType,
+    required String existingOptimisticId,
+    GallerySendPerfTrace? perf,
   }) async {
     if (!_hasUsableConversation(convID) ||
         !_isCapturedConversationCurrent(convID, convType)) {
+      model.cancelOptimisticMediaPlaceholder(
+        convID: convID,
+        clientId: existingOptimisticId,
+      );
       return;
     }
     final prepared = await _prepareVideoFromGalleryAsset(
       asset,
       model: model,
       convID: convID,
+      existingOptimisticId: existingOptimisticId,
+      perf: perf,
     );
     if (prepared == null) {
       return;
@@ -1494,6 +1610,7 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
       duration: prepared.duration,
       snapshotPath: prepared.snapshotPath,
       existingOptimisticId: prepared.optimisticId,
+      perf: perf,
     );
   }
 
@@ -1501,16 +1618,28 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
     AssetEntity asset, {
     required TUIChatSeparateViewModel model,
     required String convID,
+    required String existingOptimisticId,
+    GallerySendPerfTrace? perf,
   }) async {
-    String? optimisticId;
+    final watch = Stopwatch()..start();
+    String? optimisticId = existingOptimisticId;
     try {
+      perf?.log('video_prepare_begin', detail: 'source=custom');
       final originFile = await asset.originFile;
       if (originFile == null) {
+        model.markOptimisticMediaPlaceholderFailed(
+          convID: convID,
+          clientId: optimisticId,
+        );
         _showPanelNotice(TIM_t('视频文件不可用'));
         return null;
       }
       final size = await originFile.length();
       if (size >= MorePanelConfig.VIDEO_MAX_SIZE) {
+        model.markOptimisticMediaPlaceholderFailed(
+          convID: convID,
+          clientId: optimisticId,
+        );
         onTIMCallback(TIMCallback(
           type: TIMCallbackType.INFO,
           infoRecommendText: TIM_t("文件大小超出了限制"),
@@ -1520,10 +1649,10 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
 
       final filePath = originFile.path;
       final assetDuration = (asset.videoDuration.inMilliseconds / 1000).ceil();
-      optimisticId = model.beginOptimisticVideoPlaceholder(
-        convID: convID,
-        videoPath: filePath,
-        duration: assetDuration > 0 ? assetDuration : null,
+      perf?.log(
+        'video_source_ready',
+        bytes: size,
+        detail: 'itemMs=${watch.elapsedMilliseconds}',
       );
       final metadata = await Future.wait<Object?>([
         assetDuration > 0
@@ -1535,11 +1664,21 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
               mounted ? MediaQuery.devicePixelRatioOf(context) : null,
         ),
       ]);
+      perf?.log('video_metadata_end', detail: 'itemMs=${watch.elapsedMilliseconds}');
+      final duration = metadata[0] as int;
+      final snapshotPath = metadata[1] as String?;
+      model.hydrateOptimisticVideoPlaceholder(
+        convID: convID,
+        clientId: optimisticId,
+        videoPath: filePath,
+        duration: duration,
+        snapshotPath: snapshotPath,
+      );
 
       return _PreparedVideoSend(
         videoPath: filePath,
-        duration: metadata[0] as int,
-        snapshotPath: metadata[1] as String?,
+        duration: duration,
+        snapshotPath: snapshotPath,
         optimisticId: optimisticId,
       );
     } catch (error) {
@@ -1555,6 +1694,7 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
         infoCode: 6660415,
       ));
       outputLogger.i('send gallery video failed: $error');
+      perf?.log('video_prepare_failed', detail: 'type=${error.runtimeType}');
       return null;
     }
   }
@@ -2365,7 +2505,8 @@ class _MorePanelState extends TIMUIKitState<MorePanel> {
     }
 
     return Container(
-      height: 248,
+      // Keep the media panel at 70% of the former 248px height.
+      height: 174,
       decoration: BoxDecoration(
         color: MorePanelStyles.panelBackground(theme),
         border: Border(

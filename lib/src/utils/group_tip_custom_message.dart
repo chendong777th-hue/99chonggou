@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:tencent_cloud_chat_demo/src/models/group_join_option.dart';
+import 'package:tencent_cloud_chat_demo/utils/custom_message/custom_message_parse_cache.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_sdk/enum/message_elem_type.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_custom_elem.dart'
@@ -110,7 +111,10 @@ List<GroupJoinOptionsTipSpec> groupJoinOptionsTipDiffs(
   return specs;
 }
 
-Map<String, dynamic>? parseGroupTipPayload(V2TimCustomElem? customElem) {
+Map<String, dynamic>? parseGroupTipPayload(
+  V2TimCustomElem? customElem, {
+  V2TimMessage? message,
+}) {
   if (customElem == null) {
     return null;
   }
@@ -119,11 +123,19 @@ Map<String, dynamic>? parseGroupTipPayload(V2TimCustomElem? customElem) {
     return null;
   }
   try {
-    final decoded = jsonDecode(raw);
-    if (decoded is! Map) {
+    final map = message == null
+        ? (() {
+            final decoded = jsonDecode(raw);
+            return decoded is Map ? Map<String, dynamic>.from(decoded) : null;
+          })()
+        : CustomMessageParseCache.instance.decodeMap(
+            message: message,
+            payload: raw,
+            parserVersion: 'group-tip-v1',
+          );
+    if (map == null) {
       return null;
     }
-    final map = Map<String, dynamic>.from(decoded);
     if (map['businessID']?.toString() != kGroupTipBusinessID) {
       return null;
     }
@@ -141,11 +153,11 @@ bool isGroupTipCustomMessage(V2TimMessage message) {
   if (message.elemType != MessageElemType.V2TIM_ELEM_TYPE_CUSTOM) {
     return false;
   }
-  return parseGroupTipPayload(message.customElem) != null;
+  return parseGroupTipPayload(message.customElem, message: message) != null;
 }
 
 String? groupTipActionOf(V2TimMessage message) {
-  final map = parseGroupTipPayload(message.customElem);
+  final map = parseGroupTipPayload(message.customElem, message: message);
   return map?['action']?.toString().trim().toLowerCase();
 }
 
@@ -237,6 +249,11 @@ String groupTipDisplayText(Map<String, dynamic> map) {
       : const <String, dynamic>{};
   switch (action) {
     case 'member_added':
+      // Self-join/legacy records may carry the same operator and member.
+      // Render the actual event instead of saying the user invited themself.
+      if (members.isNotEmpty && names.length == 1 && names.first == opName) {
+        return '$members加入群聊';
+      }
       return '$opName邀请$members加入群组';
     case 'member_removed':
       return '$opName将$members踢出群组';

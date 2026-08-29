@@ -76,6 +76,7 @@ class _LoginBody extends StatefulWidget {
 class _LoginBodyState extends State<_LoginBody> {
   bool _busy = false;
   bool _isSmsMode = false;
+
   /// Web only: mutually exclusive with password/SMS forms.
   bool _isQrMode = false;
   int _activeTab = 0;
@@ -91,9 +92,11 @@ class _LoginBodyState extends State<_LoginBody> {
   Timer? _qrPollTimer;
   String? _qrSessionId;
   String? _qrPayload;
-  String _qrStatus = 'idle'; // idle|loading|pending|scanned|cancelled|expired|error
+  String _qrStatus =
+      'idle'; // idle|loading|pending|scanned|cancelled|expired|error
   String? _qrErrorMessage;
   DateTime? _qrExpiresAt;
+  int _qrRequestGeneration = 0;
 
   final _accountCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
@@ -515,11 +518,13 @@ class _LoginBodyState extends State<_LoginBody> {
         nationalNumber: _phoneCtrl.text.trim(),
       );
 
-  String get _phoneInvalidText => PhoneFormat.nationalNumberError(
+  String get _phoneInvalidText =>
+      PhoneFormat.nationalNumberError(
         countryCode: _countryCode,
         countryIso: _phoneCountryIso,
         nationalNumber: _phoneCtrl.text.trim(),
-      ) ?? '请输入正确的手机号';
+      ) ??
+      '请输入正确的手机号';
 
   Future<void> _sendLoginCode() async {
     final strings = _strings;
@@ -634,7 +639,8 @@ class _LoginBodyState extends State<_LoginBody> {
         ),
       );
       if (ok == true) {
-        await LoginCoordinator.instance.completePasswordLoginAfterDeviceChallenge(
+        await LoginCoordinator.instance
+            .completePasswordLoginAfterDeviceChallenge(
           context: context,
           rawAccount: rawAccount,
           password: _passwordCtrl.text,
@@ -824,9 +830,7 @@ class _LoginBodyState extends State<_LoginBody> {
       ),
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       padding: EdgeInsets.only(
-        bottom: bottomInset > 0
-            ? bottomInset + 120
-            : (kIsWeb ? 56 : 24),
+        bottom: bottomInset > 0 ? bottomInset + 120 : (kIsWeb ? 56 : 24),
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 28),
@@ -899,8 +903,7 @@ class _LoginBodyState extends State<_LoginBody> {
     return _buildHeaderIconButton(
       label: '切换语言',
       onTap: () {
-        final localSetting =
-            Provider.of<LocalSetting>(context, listen: false);
+        final localSetting = Provider.of<LocalSetting>(context, listen: false);
         LanguageSwitchSheet.show(context, localSetting);
       },
       icon: Image.asset(
@@ -918,6 +921,7 @@ class _LoginBodyState extends State<_LoginBody> {
   }
 
   void _stopQrLoginPolling() {
+    _qrRequestGeneration++;
     _qrPollTimer?.cancel();
     _qrPollTimer = null;
   }
@@ -928,6 +932,7 @@ class _LoginBodyState extends State<_LoginBody> {
     }
     final strings = _strings;
     _stopQrLoginPolling();
+    final requestGeneration = _qrRequestGeneration;
     setState(() {
       _qrStatus = 'loading';
       _qrErrorMessage = null;
@@ -937,18 +942,19 @@ class _LoginBodyState extends State<_LoginBody> {
     });
     try {
       final session = await AuthApi.instance.createQrLoginSession();
-      if (!mounted || !_isQrMode) {
+      if (!mounted || !_isQrMode || requestGeneration != _qrRequestGeneration) {
         return;
       }
       setState(() {
         _qrSessionId = session.sessionId;
         _qrPayload = session.qrPayload;
         _qrStatus = 'pending';
-        _qrExpiresAt =
-            DateTime.now().add(Duration(seconds: session.expiresIn));
+        _qrExpiresAt = DateTime.now().add(Duration(seconds: session.expiresIn));
       });
       _qrPollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-        unawaited(_pollQrLoginSession());
+        unawaited(
+          _pollQrLoginSession(requestGeneration: requestGeneration),
+        );
       });
     } on DioError catch (e) {
       if (!mounted) {
@@ -972,9 +978,12 @@ class _LoginBodyState extends State<_LoginBody> {
     }
   }
 
-  Future<void> _pollQrLoginSession() async {
+  Future<void> _pollQrLoginSession({required int requestGeneration}) async {
     final sessionId = _qrSessionId?.trim() ?? '';
-    if (!mounted || !_isQrMode || sessionId.isEmpty) {
+    if (!mounted ||
+        !_isQrMode ||
+        requestGeneration != _qrRequestGeneration ||
+        sessionId.isEmpty) {
       return;
     }
     final expiresAt = _qrExpiresAt;
@@ -985,7 +994,10 @@ class _LoginBodyState extends State<_LoginBody> {
     }
     try {
       final poll = await AuthApi.instance.pollQrLoginSession(sessionId);
-      if (!mounted || !_isQrMode) {
+      if (!mounted ||
+          !_isQrMode ||
+          requestGeneration != _qrRequestGeneration ||
+          sessionId != _qrSessionId?.trim()) {
         return;
       }
       if (poll.isConfirmed) {
@@ -1466,7 +1478,6 @@ class _LoginBodyState extends State<_LoginBody> {
     );
   }
 
-
   Widget _buildRegisterPasswordRules() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1747,13 +1758,13 @@ class _LoginBodyState extends State<_LoginBody> {
                 ),
               );
             },
-          theme: CountryTheme(
-            isShowFlag: false,
-            isShowTitle: false,
-            isShowCode: true,
-            isDownIcon: true,
-            showEnglishName: false,
-          ),
+            theme: CountryTheme(
+              isShowFlag: false,
+              isShowTitle: false,
+              isShowCode: true,
+              isDownIcon: true,
+              showEnglishName: false,
+            ),
             onChanged: (CountryCode? code) {
               if (code?.dialCode != null) {
                 setState(() {

@@ -71,15 +71,15 @@ class _SearchEntryNarrowState extends State<SearchEntryNarrow> {
           child: Container(
             decoration: BoxDecoration(
               color: theme.inputFillColor ?? const Color(0xFFF7F7F8),
-              borderRadius: const BorderRadius.all(Radius.circular(4)),
+              borderRadius: const BorderRadius.all(Radius.circular(10)),
             ),
             height: 40,
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Row(
                 children: [
-                  Icon(Icons.search, color: iconColor, size: 18),
-                  const SizedBox(width: 6),
+                  Icon(Icons.search, color: iconColor, size: 19),
+                  const SizedBox(width: 8),
                   Text(
                     AppI18n.of(context).t(
                       zhHans: '搜索',
@@ -90,7 +90,7 @@ class _SearchEntryNarrowState extends State<SearchEntryNarrow> {
                     ),
                     style: TextStyle(
                       color: iconColor,
-                      fontSize: 14,
+                      fontSize: 15,
                     ),
                   ),
                 ],

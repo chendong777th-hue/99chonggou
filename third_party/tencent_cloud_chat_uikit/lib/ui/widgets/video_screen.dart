@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 
 import 'package:extended_image/extended_image.dart';
 import 'package:flutter/cupertino.dart';
@@ -72,6 +73,8 @@ class _VideoScreenState extends TIMUIKitState<VideoScreen>
   /// 首次进场等开播再掀封面；图集翻页落地为 false。
   bool _holdHeroUntilPlayback = true;
   bool _chromeVisible = true;
+  Timer? _chromeAutoHideTimer;
+  static const Duration _chromeAutoHideDelay = Duration(seconds: 3);
   final ValueNotifier<int> _chromeTick = ValueNotifier<int>(0);
   bool _slidePausedForDrag = false;
   bool _pausedByUser = false;
@@ -127,6 +130,7 @@ class _VideoScreenState extends TIMUIKitState<VideoScreen>
       _isPlaybackActive = true;
       _pausedByUser = false;
     });
+    _startChromeAutoHideTimer();
   }
 
   void _markPlaybackPaused() {
@@ -138,6 +142,7 @@ class _VideoScreenState extends TIMUIKitState<VideoScreen>
       _pausedByUser = true;
       _chromeVisible = true;
     });
+    _cancelChromeAutoHideTimer();
   }
 
   void _showHero(Object tag) {
@@ -349,6 +354,35 @@ class _VideoScreenState extends TIMUIKitState<VideoScreen>
     _chromeTick.value++;
   }
 
+  /// Chrome 自动隐藏：播放中 3 秒无操作自动隐藏 top/bottom bar，
+  /// 点击画面恢复。与 Telegram 行为一致。
+  void _startChromeAutoHideTimer() {
+    _chromeAutoHideTimer?.cancel();
+    if (!_chromeVisible || _closing) {
+      return;
+    }
+    // 暂停时不再自动隐藏——用户需要看到操作栏。
+    if (!_isPlaybackActive && _pausedByUser) {
+      return;
+    }
+    _chromeAutoHideTimer = Timer(_chromeAutoHideDelay, () {
+      if (!mounted || _closing || !_chromeVisible) {
+        return;
+      }
+      // Hero 封面仍在或播放器未就绪时不隐藏。
+      if (!_shouldBuildPlayer || _heroOverlayVisible) {
+        return;
+      }
+      _chromeVisible = false;
+      _notifyChromeChanged();
+    });
+  }
+
+  void _cancelChromeAutoHideTimer() {
+    _chromeAutoHideTimer?.cancel();
+    _chromeAutoHideTimer = null;
+  }
+
   void _onGalleryPageChanged(int index) {
     if (_closing) {
       return;
@@ -361,6 +395,8 @@ class _VideoScreenState extends TIMUIKitState<VideoScreen>
     // 先只更新逻辑页与顶栏，播放器等滚动停稳再切，避免翻页中途重建卡顿。
     _currentIndex = next;
     _chromeVisible = true;
+    _cancelChromeAutoHideTimer();
+    _startChromeAutoHideTimer();
     _notifyChromeChanged();
     final scrolling = _galleryPageController.hasClients &&
         _galleryPageController.position.isScrollingNotifier.value;
@@ -728,6 +764,11 @@ class _VideoScreenState extends TIMUIKitState<VideoScreen>
     }
     _chromeVisible = !_chromeVisible;
     _notifyChromeChanged();
+    if (_chromeVisible) {
+      _startChromeAutoHideTimer();
+    } else {
+      _cancelChromeAutoHideTimer();
+    }
   }
 
   void _handlePreviewTap() {
@@ -781,18 +822,8 @@ class _VideoScreenState extends TIMUIKitState<VideoScreen>
     }
   }
 
-  void _handleOpenMedia() {
-    final openMedia = widget.onOpenMedia;
-    if (openMedia == null || _closing) {
-      return;
-    }
-    _close();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      openMedia();
-    });
-  }
-
   Future<void> _showVideoActionMenu() async {
+    final currentSpeed = _playerKey.currentState?.playbackSpeed ?? 1.0;
     final action = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: const Color(0xFF1C1C1E),
@@ -811,6 +842,41 @@ class _VideoScreenState extends TIMUIKitState<VideoScreen>
                     style: const TextStyle(color: Colors.white)),
                 onTap: () => Navigator.pop(ctx, 'save'),
               ),
+              const Divider(height: 1, color: Colors.white24),
+              // 倍速控制
+              for (final speed in <double>[1.0, 1.5, 2.0])
+                ListTile(
+                  leading: Icon(
+                    speed == 1.0
+                        ? Icons.play_arrow_rounded
+                        : Icons.fast_forward_rounded,
+                    color: currentSpeed == speed
+                        ? const Color(0xFF4FACFE)
+                        : Colors.white70,
+                  ),
+                  title: Text(
+                    speed == 1.0 ? '正常速度' : '${speed}x 倍速',
+                    style: TextStyle(
+                      color: currentSpeed == speed
+                          ? const Color(0xFF4FACFE)
+                          : Colors.white,
+                    ),
+                  ),
+                  trailing: currentSpeed == speed
+                      ? const Icon(Icons.check_rounded,
+                          color: Color(0xFF4FACFE), size: 20)
+                      : null,
+                  onTap: () => Navigator.pop(ctx, 'speed_$speed'),
+                ),
+              // PiP 选项（仅 Android 支持 AVP PiP）
+              if (Platform.isAndroid)
+                ListTile(
+                  leading: const Icon(Icons.picture_in_picture_rounded,
+                      color: Colors.white),
+                  title: const Text('画中画',
+                      style: TextStyle(color: Colors.white)),
+                  onTap: () => Navigator.pop(ctx, 'pip'),
+                ),
               ListTile(
                 leading: const Icon(Icons.close, color: Colors.white70),
                 title: Text(TIM_t('取消'),
@@ -824,6 +890,19 @@ class _VideoScreenState extends TIMUIKitState<VideoScreen>
     );
     if (action == 'save') {
       await _saveVideo();
+    } else if (action == 'pip') {
+      final ok = await _playerKey.currentState?.enablePictureInPicture();
+      if (ok == true && mounted) {
+        // PiP 启动后关闭全屏预览，让视频在小窗继续播放。
+        _close();
+      }
+    } else if (action != null && action.startsWith('speed_')) {
+      final speedStr = action.substring(6);
+      final speed = double.tryParse(speedStr);
+      if (speed != null) {
+        await _playerKey.currentState?.setPlaybackSpeed(speed);
+        _startChromeAutoHideTimer();
+      }
     }
   }
 
@@ -839,6 +918,7 @@ class _VideoScreenState extends TIMUIKitState<VideoScreen>
   @override
   void dispose() {
     _closing = true;
+    _chromeAutoHideTimer?.cancel();
     _playerCommitDebounce?.cancel();
     _slideDismissController.dispose();
     _heroModeEnabled.dispose();
@@ -878,7 +958,8 @@ class _VideoScreenState extends TIMUIKitState<VideoScreen>
               onShare: _currentItem.forwardFn ?? widget.forwardFn,
               onEdit: null,
               onDownload: _saveVideo,
-              onOpenMedia: widget.onOpenMedia == null ? null : _handleOpenMedia,
+              // 视频全屏预览不提供图集入口；图集仍可从图片预览进入。
+              onOpenMedia: null,
               onDelete: (_currentItem.deleteFn ?? widget.deleteFn) == null
                   ? null
                   : _handleDelete,

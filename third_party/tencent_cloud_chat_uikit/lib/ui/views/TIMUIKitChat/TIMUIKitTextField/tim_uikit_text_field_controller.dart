@@ -19,6 +19,7 @@ class TIMUIKitInputTextFieldController extends ChangeNotifier {
   String? atUserName;
   String? atUserID;
   String inputText = "";
+  bool notifyOnSetTextField = true;
   V2TimGroupMemberFullInfo? groupMemberFullInfo;
   TIMUIKitTextFieldLayoutNarrowState? _narrowState;
 
@@ -145,8 +146,9 @@ class TIMUIKitInputTextFieldController extends ChangeNotifier {
     _notifySafely();
   }
 
-  setTextField(String text) {
+  setTextField(String text, {bool notifyChanged = true}) {
     inputText = text;
+    notifyOnSetTextField = notifyChanged;
     actionType = ActionType.setTextField;
     _notifySafely();
   }

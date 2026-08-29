@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 
@@ -49,6 +50,12 @@ class _ChatConversationUiState {
 class ChatUiStateStore extends ChangeNotifier {
   final Map<String, _ChatConversationUiState> _states =
       <String, _ChatConversationUiState>{};
+
+  /// T1: 帧级 coalesce——同一帧内多次 [markMessageChanged] / [markMessageChangedByMessage]
+  /// 合并为一次 [notifyListeners]，避免群消息风暴时每条消息各触发一次 notify。
+  /// 用户交互类操作（多选、别名绑定）仍走立即 notify，保证交互响应。
+  bool _coalesceScheduled = false;
+  bool _coalesceDirty = false;
 
   static String messageKeyOf(V2TimMessage message) {
     final msgID = message.msgID?.trim();
@@ -143,6 +150,7 @@ class ChatUiStateStore extends ChangeNotifier {
       state.rowRevisionByMessageKey[resolvedTarget] =
           sourceRevision > current ? sourceRevision : current;
     }
+    _coalesceDirty = false;
     notifyListeners();
   }
 
@@ -175,6 +183,7 @@ class ChatUiStateStore extends ChangeNotifier {
       changed = true;
     }
     if (changed) {
+      _coalesceDirty = false;
       notifyListeners();
     }
   }
@@ -204,6 +213,7 @@ class ChatUiStateStore extends ChangeNotifier {
     state.selectionRevision++;
     state.rowRevisionByMessageKey[key] =
         (state.rowRevisionByMessageKey[key] ?? 0) + 1;
+    _coalesceDirty = false;
     notifyListeners();
   }
 
@@ -218,6 +228,7 @@ class ChatUiStateStore extends ChangeNotifier {
     }
     state.selectedMessageKeys.clear();
     state.selectionRevision++;
+    _coalesceDirty = false;
     notifyListeners();
   }
 
@@ -238,7 +249,7 @@ class ChatUiStateStore extends ChangeNotifier {
     }
     state.rowRevisionByMessageKey[key] =
         (state.rowRevisionByMessageKey[key] ?? 0) + 1;
-    notifyListeners();
+    _scheduleCoalescedNotify();
   }
 
   void markMessageChangedByMessage(
@@ -261,6 +272,34 @@ class ChatUiStateStore extends ChangeNotifier {
       changed = true;
     }
     if (changed) {
+      _scheduleCoalescedNotify();
+    }
+  }
+
+  /// T1: 把高频消息行变更的 notify 合并到同一帧末尾，减少群消息风暴时的
+  /// notifyListeners 调用次数。行级 [rowRevision] 已同步更新，读取不受影响；
+  /// 只是 notify 的时点推迟到当前帧结束，视觉上无感知。
+  void _scheduleCoalescedNotify() {
+    _coalesceDirty = true;
+    if (_coalesceScheduled) {
+      return;
+    }
+    _coalesceScheduled = true;
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      _coalesceScheduled = false;
+      if (_coalesceDirty) {
+        _coalesceDirty = false;
+        notifyListeners();
+      }
+    });
+  }
+
+  /// 立即 flush 任何待发的 coalesced notify（测试/退出场景用）。
+  @visibleForTesting
+  void flushCoalescedNotify() {
+    _coalesceScheduled = false;
+    if (_coalesceDirty) {
+      _coalesceDirty = false;
       notifyListeners();
     }
   }
@@ -295,6 +334,9 @@ class ChatUiStateStore extends ChangeNotifier {
       removed = _states.remove(raw) != null || removed;
     }
     if (removed && notify) {
+      // T1: 立即 notify 的操作清除 pending coalesce dirty 标志，
+      // 避免后续 flushCoalescedNotify 重复 emit。
+      _coalesceDirty = false;
       notifyListeners();
     }
   }

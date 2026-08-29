@@ -1059,7 +1059,8 @@ void main() {
       );
 
       var batchCount = 0;
-      final all = await ConversationLocalStore.instance.searchConversationsAllPages(
+      final all =
+          await ConversationLocalStore.instance.searchConversationsAllPages(
         keyword: '匹配群友',
         pageSize: 50,
         maxResults: 500,

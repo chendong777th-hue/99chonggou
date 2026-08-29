@@ -50,6 +50,7 @@ class MessageInboundChunkedReveal {
   final MessageInboundChunkRevealCallback onRevealChunk;
   final MessageInboundChunkRevealDrainCallback onDrainRemaining;
   final MessageInboundChunkRevealCallback? onFastForward;
+
   /// Fired when an in-flight reveal is cancelled so only the newest message
   /// keeps its push animation. UI must abort the current slide without
   /// acknowledging the projection transaction — this class owns that ack.
@@ -252,6 +253,40 @@ class MessageInboundChunkedReveal {
     }
   }
 
+  /// Cancels presentation work because an authoritative history replacement
+  /// has already made the complete projection visible.
+  void cancelForAuthoritativeReplace(String conversationID) {
+    final convId = conversationID.trim();
+    if (convId.isEmpty) {
+      return;
+    }
+    final queue = _queues[convId];
+    final hadPresentationState = _activeSessions.contains(convId) ||
+        (queue != null && queue.isNotEmpty) ||
+        _waitingForTransaction.contains(convId) ||
+        _scheduledTicks.contains(convId);
+    if (!hadPresentationState) {
+      return;
+    }
+    ChatJitterDiag.logInboundFlow(
+      action: 'queue_cancel_authoritative_replace',
+      conv: convId,
+      extras: <String, Object?>{
+        'remaining': queue?.length ?? 0,
+        'waiting': _waitingForTransaction.contains(convId),
+      },
+    );
+    onSupersede?.call(convId);
+    _invalidateGeneration(convId);
+    _queues.remove(convId);
+    _waitingForTransaction.remove(convId);
+    _scheduledTicks.remove(convId);
+    _transactionWatchdogs.remove(convId)?.cancel();
+    if (_activeSessions.remove(convId)) {
+      ChatJitterDiag.endInboundSession(convId);
+    }
+  }
+
   void cancelAllSilently() {
     final conversations = <String>{
       ..._queues.keys,
@@ -261,6 +296,20 @@ class MessageInboundChunkedReveal {
     };
     for (final conversationID in conversations) {
       cancelConversationSilently(conversationID);
+    }
+  }
+
+  /// Flushes all buffered messages to the visible list before clearing.
+  /// Unlike [cancelAllSilently], this does not discard pending messages.
+  void flushAll() {
+    final conversations = <String>{
+      ..._queues.keys,
+      ..._activeSessions,
+      ..._waitingForTransaction,
+      ..._scheduledTicks,
+    };
+    for (final conversationID in conversations) {
+      flushConversation(conversationID);
     }
   }
 
@@ -311,9 +360,8 @@ class MessageInboundChunkedReveal {
     // Preserve Duration.zero / 1ms intervals used by flood drains and unit tests.
     final keepTightInterval = _interval.inMilliseconds <= 1;
     configure(
-      interval: keepTightInterval
-          ? _interval
-          : Duration(milliseconds: intervalMs),
+      interval:
+          keepTightInterval ? _interval : Duration(milliseconds: intervalMs),
       maxChunkSize: maxChunk,
       alignToFrame: _alignToFrame,
     );

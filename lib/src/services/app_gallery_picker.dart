@@ -1,19 +1,19 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
-import 'package:tencent_cloud_chat_uikit/ui/utils/image_edit/editable_asset_picker.dart';
-import 'package:wechat_assets_picker/wechat_assets_picker.dart';
+import 'package:tencent_cloud_chat_demo/src/services/system_media_picker.dart';
+import 'package:wechat_assets_picker/wechat_assets_picker.dart'
+    show RequestType;
 
 class AppGalleryMedia {
   const AppGalleryMedia({
-    required this.asset,
-    required this.file,
+    required this.media,
   });
 
-  final AssetEntity asset;
-  final File file;
+  final PickedMedia media;
+  File get file => File(media.path);
 
-  bool get isVideo => asset.type == AssetType.video;
+  bool get isVideo => media.isVideo;
 }
 
 /// 应用内相册统一入口：保留微信选择器交互、最近资源排序和空列表恢复。
@@ -26,26 +26,12 @@ class AppGalleryPicker {
     RequestType requestType = RequestType.image,
     Color? themeColor,
   }) async {
-    final assets = await EditableAssetPicker.pickAssets(
-      context,
-      pickerConfig: AssetPickerConfig(
-        maxAssets: maxAssets,
-        requestType: requestType,
-        themeColor: themeColor ?? Theme.of(context).colorScheme.primary,
-      ),
-    );
-    if (assets == null || assets.isEmpty) {
-      return const <AppGalleryMedia>[];
-    }
-
-    final result = <AppGalleryMedia>[];
-    for (final asset in assets) {
-      final file = await EditableAssetPicker.resolveFile(asset);
-      if (file != null && file.existsSync()) {
-        result.add(AppGalleryMedia(asset: asset, file: file));
-      }
-    }
-    return result;
+    final picked = requestType == RequestType.video
+        ? await SystemMediaPicker.pickVideos(maxAssets: maxAssets)
+        : await SystemMediaPicker.pickImages(maxAssets: maxAssets);
+    return picked
+        .map((media) => AppGalleryMedia(media: media))
+        .toList(growable: false);
   }
 
   static Future<File?> pickSingleImage(

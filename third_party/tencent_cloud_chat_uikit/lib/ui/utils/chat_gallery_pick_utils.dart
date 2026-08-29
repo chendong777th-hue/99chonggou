@@ -31,9 +31,9 @@ class ChatGalleryPickUtils {
     if (kIsWeb) {
       return true;
     }
-    if (Platform.isIOS || Platform.isAndroid) {
-      return true;
-    }
+    // Mobile chat now uses the native image_picker route. Keep the custom
+    // AssetEntity picker available only to legacy/non-native callers.
+    if (Platform.isIOS || Platform.isAndroid) return false;
     return false;
   }
 

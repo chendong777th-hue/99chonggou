@@ -19,6 +19,8 @@ import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 import 'package:tencent_cloud_chat_uikit/base_widgets/tim_ui_kit_base.dart';
 import 'package:tencent_cloud_chat_uikit/theme/tui_theme.dart';
 
+typedef AvatarPreviewUrlResolver = Future<String?> Function();
+
 class Avatar extends TIMUIKitStatelessWidget {
   final String faceUrl;
   final String showName;
@@ -28,6 +30,14 @@ class Avatar extends TIMUIKitStatelessWidget {
   final V2TimUserStatus? onlineStatus;
   final int? type; // 1 c2c 2 group
   final bool isShowBigWhenClick;
+
+  /// 普通展示始终使用 [faceUrl]（thumb）。该 URL 仅在点击后读取。
+  final String? previewFaceUrl;
+
+  /// 点击进入全屏后惰性获取 preview URL；普通页面不会触发。
+  final AvatarPreviewUrlResolver? previewUrlResolver;
+  final String? avatarCacheKey;
+  final String? previewCacheKey;
   final TUISelfInfoViewModel selfInfoViewModel =
       serviceLocator<TUISelfInfoViewModel>();
 
@@ -37,6 +47,10 @@ class Avatar extends TIMUIKitStatelessWidget {
       this.onlineStatus,
       required this.showName,
       this.isShowBigWhenClick = false,
+      this.previewFaceUrl,
+      this.previewUrlResolver,
+      this.avatarCacheKey,
+      this.previewCacheKey,
       this.isFromLocalAsset = false,
       this.borderRadius,
       this.type = 1})
@@ -125,7 +139,7 @@ class Avatar extends TIMUIKitStatelessWidget {
           return RepaintBoundary(
             child: CachedNetworkImage(
               imageUrl: faceUrl,
-              cacheKey: faceUrl,
+              cacheKey: avatarCacheKey ?? faceUrl,
               useOldImageOnUrlChange: true,
               fit: BoxFit.cover,
               width: double.infinity,
@@ -181,7 +195,7 @@ class Avatar extends TIMUIKitStatelessWidget {
     return true;
   }
 
-  ImageProvider getImageProvider() {
+  ImageProvider getImageProvider({String? url, String? cacheKey}) {
     ImageProvider defaultAvatar() {
       if (type == 1) {
         return Image.asset('images/default_c2c_head.png',
@@ -202,21 +216,23 @@ class Avatar extends TIMUIKitStatelessWidget {
       }
     }
 
-    if (faceUrl != "") {
+    final source = (url ?? faceUrl).trim();
+    if (source != "") {
       if (isFromLocalAsset) {
-        return Image.asset(faceUrl).image;
+        return Image.asset(source).image;
       }
-      if (_isDefaultAvatarUrl(faceUrl)) {
+      if (_isDefaultAvatarUrl(source)) {
         return defaultAvatar();
       }
-      if (kIsWeb && _isOssLikeNetworkUrl(faceUrl)) {
+      if (kIsWeb && _isOssLikeNetworkUrl(source)) {
         return NetworkImage(
-          faceUrl,
+          source,
           webHtmlElementStrategy: WebHtmlElementStrategy.prefer,
         );
       }
       return CachedNetworkImageProvider(
-        faceUrl,
+        source,
+        cacheKey: cacheKey ?? (source == faceUrl ? avatarCacheKey : null),
       );
     } else {
       return defaultAvatar();
@@ -243,8 +259,8 @@ class Avatar extends TIMUIKitStatelessWidget {
   }
 
   Future<void> _openBigAvatar(BuildContext context) async {
-    final downloadFn = _buildPreviewDownloadFn(context);
     final trimmed = faceUrl.trim();
+    final assetDownloadFn = _buildPreviewDownloadFn(context, faceUrl: trimmed);
 
     void openAssetPreview() {
       final asset = _resolveDefaultAvatarAsset();
@@ -255,7 +271,7 @@ class Avatar extends TIMUIKitStatelessWidget {
           child: _AvatarAssetPreviewPage(
             assetPath: asset.path,
             package: asset.package,
-            downloadFn: downloadFn,
+            downloadFn: assetDownloadFn,
           ),
         );
         return;
@@ -266,71 +282,117 @@ class Avatar extends TIMUIKitStatelessWidget {
         child: ImageScreen(
           imageProvider: getImageProvider(),
           heroTag: '',
-          downloadFn: downloadFn,
+          downloadFn: assetDownloadFn,
           downloadOnly: true,
           fitTallImagesToScreenWidth: false,
         ),
       );
     }
 
-    // Web：禁止走 ImageScreen（会读像素触发 Same-Origin / CORS 红屏）。
-    if (kIsWeb) {
-      if (trimmed.isEmpty ||
-          isFromLocalAsset ||
-          _isDefaultAvatarUrl(trimmed) ||
-          (!trimmed.startsWith('http://') &&
-              !trimmed.startsWith('https://') &&
-              !trimmed.startsWith('data:'))) {
-        openAssetPreview();
-        return;
-      }
-
-      var previewUrl = trimmed;
-      final preparer =
-          selfInfoViewModel.globalConfig?.prepareWebAvatarPreviewUrl;
-      if (preparer != null) {
-        try {
-          final prepared = await preparer(trimmed);
-          if (prepared != null && prepared.trim().isNotEmpty) {
-            previewUrl = prepared.trim();
-          }
-        } catch (_) {}
-      }
-      if (!context.mounted) {
-        return;
-      }
-
-      await ChatWebImageLightbox.show(
-        context: context,
-        imageUrl: previewUrl,
-        onDownload: downloadFn == null
-            ? null
-            : () {
-                unawaited(downloadFn());
-              },
-      );
+    if (trimmed.isEmpty ||
+        isFromLocalAsset ||
+        _isDefaultAvatarUrl(trimmed) ||
+        (!trimmed.startsWith('http://') &&
+            !trimmed.startsWith('https://') &&
+            !trimmed.startsWith('data:'))) {
+      openAssetPreview();
       return;
     }
 
-    if (trimmed.isEmpty) {
-      openAssetPreview();
+    // A network thumb is not a valid full-screen source.  Callers that want
+    // the preview affordance must provide the explicit preview URL or lazy
+    // resolver; silently opening the thumb here would violate the variant
+    // boundary for legacy call sites.
+    if ((previewFaceUrl?.trim().isEmpty ?? true) &&
+        previewUrlResolver == null) {
+      return;
+    }
+
+    // Web：禁止走 ImageScreen（会读像素触发 Same-Origin / CORS 红屏）。
+    if (kIsWeb) {
+      await ChatWebImageLightbox.show(
+        context: context,
+        imageUrl: trimmed,
+        imageUrlResolver: () async {
+          final resolved = await _resolvePreviewUrl();
+          if (resolved == null) {
+            return null;
+          }
+          final preparer =
+              selfInfoViewModel.globalConfig?.prepareWebAvatarPreviewUrl;
+          if (preparer == null) {
+            return resolved;
+          }
+          try {
+            return (await preparer(resolved))?.trim() ?? resolved;
+          } catch (_) {
+            return resolved;
+          }
+        },
+        onDownloadUrl: _buildPreviewDownloadForUrl(context),
+      );
       return;
     }
 
     pushMediaPreview(
       context: context,
       enableGestureBack: false,
-      child: ImageScreen(
-        imageProvider: getImageProvider(),
-        heroTag: '',
-        downloadFn: downloadFn,
-        downloadOnly: true,
-        fitTallImagesToScreenWidth: false,
+      child: _AvatarNetworkPreviewPage(
+        thumbUrl: trimmed,
+        thumbProvider: getImageProvider(
+          url: trimmed,
+          cacheKey: avatarCacheKey,
+        ),
+        previewUrlResolver: _resolvePreviewUrl,
+        previewProviderBuilder: (url) => getImageProvider(
+          url: url,
+          cacheKey: previewCacheKey,
+        ),
+        savePreviewUrl: _buildPreviewDownloadForUrl(context),
       ),
     );
   }
 
-  Future<void> Function()? _buildPreviewDownloadFn(BuildContext context) {
+  /// Opens the same lazy full-screen preview used by the avatar tap handler.
+  /// The resolver is not evaluated until this method is called.
+  Future<void> openPreview(BuildContext context) => _openBigAvatar(context);
+
+  Future<String?> _resolvePreviewUrl() async {
+    final direct = previewFaceUrl?.trim() ?? '';
+    if (direct.isNotEmpty) {
+      return direct;
+    }
+    final resolver = previewUrlResolver;
+    if (resolver == null) {
+      return null;
+    }
+    try {
+      final resolved = (await resolver())?.trim() ?? '';
+      return resolved.isEmpty ? null : resolved;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> Function(String faceUrl)? _buildPreviewDownloadForUrl(
+    BuildContext context,
+  ) {
+    final saver = selfInfoViewModel.globalConfig?.saveAvatarPreview;
+    if (saver == null) {
+      return null;
+    }
+    return (faceUrl) => saver(
+          context,
+          faceUrl: faceUrl,
+          showName: showName,
+          avatarType: type ?? 1,
+        );
+  }
+
+  Future<void> Function()? _buildPreviewDownloadFn(
+    BuildContext context, {
+    required String faceUrl,
+  }) {
     final saver = selfInfoViewModel.globalConfig?.saveAvatarPreview;
     if (saver == null) {
       return null;
@@ -395,6 +457,74 @@ class Avatar extends TIMUIKitStatelessWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+class _AvatarNetworkPreviewPage extends StatefulWidget {
+  const _AvatarNetworkPreviewPage({
+    required this.thumbUrl,
+    required this.thumbProvider,
+    required this.previewUrlResolver,
+    required this.previewProviderBuilder,
+    this.savePreviewUrl,
+  });
+
+  final String thumbUrl;
+  final ImageProvider thumbProvider;
+  final Future<String?> Function() previewUrlResolver;
+  final ImageProvider Function(String url) previewProviderBuilder;
+  final Future<void> Function(String url)? savePreviewUrl;
+
+  @override
+  State<_AvatarNetworkPreviewPage> createState() =>
+      _AvatarNetworkPreviewPageState();
+}
+
+class _AvatarNetworkPreviewPageState extends State<_AvatarNetworkPreviewPage> {
+  late ImageProvider _imageProvider;
+  String? _previewUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _imageProvider = widget.thumbProvider;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_resolvePreview());
+    });
+  }
+
+  Future<void> _resolvePreview() async {
+    String url;
+    try {
+      url = (await widget.previewUrlResolver())?.trim() ?? '';
+    } catch (_) {
+      // A failed lazy preview request must leave the already visible thumb in
+      // place.  This is deliberately not a fallback to another URL variant.
+      return;
+    }
+    if (!mounted || url.isEmpty) {
+      return;
+    }
+    setState(() {
+      _previewUrl = url;
+      _imageProvider = widget.previewProviderBuilder(url);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final previewUrl = _previewUrl;
+    return ImageScreen(
+      key: ValueKey<String>(previewUrl ?? widget.thumbUrl),
+      imageProvider: _imageProvider,
+      placeholderImageProvider: widget.thumbProvider,
+      heroTag: '',
+      downloadFn: previewUrl == null || widget.savePreviewUrl == null
+          ? null
+          : () => widget.savePreviewUrl!(previewUrl),
+      downloadOnly: true,
+      fitTallImagesToScreenWidth: false,
     );
   }
 }

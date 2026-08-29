@@ -11,12 +11,21 @@ class HeroWidget extends StatefulWidget {
       required this.tag,
       required this.slidePagekey,
       this.slideType = SlideType.onlyImage,
+      this.animateCornerRadius = false,
+      this.cornerRadius = 10,
       Key? key})
       : super(key: key);
   final Widget child;
   final SlideType slideType;
   final Object tag;
   final GlobalKey<ExtendedImageSlidePageState> slidePagekey;
+
+  /// 飞行时圆角是否随进度从 [cornerRadius] 渐变到 0（打开）/ 0 到 [cornerRadius]（关闭）。
+  /// 微信手感：气泡圆角进入全屏时逐渐消失。
+  final bool animateCornerRadius;
+
+  /// 源（气泡）圆角，单位 px。仅 [animateCornerRadius] 为 true 时生效。
+  final double cornerRadius;
   @override
   _HeroWidgetState createState() => _HeroWidgetState();
 }
@@ -42,15 +51,16 @@ class _HeroWidgetState extends TIMUIKitState<HeroWidget> {
           HeroFlightDirection flightDirection,
           BuildContext fromHeroContext,
           BuildContext toHeroContext) {
-        // 气泡 cover 与预览 contain 不是同一棵树。官方默认用 toHero 会把
-        // contain 图塞进气泡框（先缩出黑边再放大）。推入飞气泡画面并 cover
-        // 铺满插值框；返回飞预览页本体（已铺满，不能再套 FittedBox）。
+        // 气泡缩略图（contain）与预览页（contain/fitWidth）的 fit 不同。
+        // 官方默认用 toHero 会把 contain 图塞进气泡框（先缩出黑边再放大）。
+        // push 用 contain 等比铺满插值框：保持缩略图与预览页的内容裁剪
+        // 一致，避免飞行结束瞬间从"cover 裁剪"跳到"contain 完整"产生闪一下。
         final Hero fromHero = fromHeroContext.widget as Hero;
         final Widget body = flightDirection == HeroFlightDirection.push
             ? SizedBox.expand(
                 child: ClipRect(
                   child: FittedBox(
-                    fit: BoxFit.cover,
+                    fit: BoxFit.contain,
                     clipBehavior: Clip.hardEdge,
                     child: fromHero.child,
                   ),
@@ -63,8 +73,34 @@ class _HeroWidgetState extends TIMUIKitState<HeroWidget> {
             widget.slideType == SlideType.onlyImage &&
             slideState != null &&
             (slideState.offset != Offset.zero || slideState.scale != 1.0);
-        if (!fixTransform) {
+
+        // 微信手感：圆角随飞行进度从气泡圆角逐渐消失到 0。
+        // 打开时 10px → 0；关闭时 0 → 10px。用 AnimatedBuilder 驱动，
+        // 前段快后段慢（easeOut），无 bounce/overshoot。
+        final bool needsCornerTween = widget.animateCornerRadius &&
+            (widget.cornerRadius > 0);
+        if (!fixTransform && !needsCornerTween) {
           return body;
+        }
+
+        Widget flight = body;
+        if (needsCornerTween) {
+          flight = AnimatedBuilder(
+            animation: animation,
+            builder: (BuildContext context, Widget? child) {
+              final t = Curves.easeOut.transform(animation.value);
+              final radius = widget.cornerRadius * (1.0 - t);
+              return ClipRRect(
+                borderRadius: BorderRadius.circular(radius),
+                child: child,
+              );
+            },
+            child: body,
+          );
+        }
+
+        if (!fixTransform) {
+          return flight;
         }
 
         return AnimatedBuilder(
@@ -80,10 +116,11 @@ class _HeroWidgetState extends TIMUIKitState<HeroWidget> {
                   begin: 1.0,
                   end: slideState.scale,
                 ).evaluate(animation),
-                child: body,
+                child: child,
               ),
             );
           },
+          child: flight,
         );
       },
       child: widget.child,

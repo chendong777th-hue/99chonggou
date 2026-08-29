@@ -10,6 +10,9 @@ import 'package:tencent_cloud_chat_demo/src/services/desktop_call_float_service.
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_navigator.dart';
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_ringtone.dart';
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_session.dart';
+import 'package:tencent_cloud_chat_demo/src/services/call_result_record.dart';
+import 'package:tencent_cloud_chat_demo/src/services/call_result_repository.dart';
+import 'package:tencent_cloud_chat_demo/src/services/call_bubble_insert_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/livekit_call_types.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/call_user_id.dart';
 import 'package:tencent_cloud_chat_demo/utils/toast.dart';
@@ -162,11 +165,31 @@ class CallLauncher {
         calleeUserId: target,
         video: video,
       );
+      // Create the canonical callId row as soon as the server accepts invite.
+      // The same row is later advanced by IM/TCP/status reconciliation.
+      final ringingRecord = CallResultRecord.fromSignaling(
+        callId: creds.callId,
+        action: 'invite',
+        conversationId: c2cConversationId(target),
+        callerUserId: creds.callerUserId,
+        calleeUserId: creds.calleeUserId,
+        peerUserId: target,
+        roomName: creds.roomName,
+        mediaType: video ? 'video' : 'audio',
+        isOutgoing: true,
+      );
+      CallResultRepository.instance.save(ringingRecord);
+      CallBubbleInsertService.instance.upsertLifecycleBubble(
+        ringingRecord,
+        reason: 'outgoing_invite',
+      );
       final bound = LiveKitCallSession.instance.bindOutgoingCredentials(creds);
       if (!bound) {
         // User canceled while invite was in flight — tear down remote call.
         unawaited(
-          LiveKitCallApi.instance.cancel(callId: creds.callId).catchError((_) {}),
+          LiveKitCallApi.instance
+              .cancel(callId: creds.callId)
+              .catchError((_) {}),
         );
         await pageFuture;
         return false;
