@@ -10,6 +10,8 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_sound_elem.dart'
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_value_callback.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_value_callback.dart';
 import 'package:tencent_cloud_chat_sdk/tencent_im_sdk_plugin.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/contracts/account_scoped_conversation_key.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/outgoing_send_coordinator.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/message_services.dart';
 
@@ -138,19 +140,27 @@ class TencentVoiceToTextService {
 
     final receiver = convType == ConvType.c2c ? targetConvID : '';
     final groupID = convType == ConvType.group ? targetConvID : '';
-    final sendResult = await messageService.sendMessage(
-      id: messageID,
+    final coordinatorConvType = convType == ConvType.c2c
+        ? ImConversationType.c2c
+        : ImConversationType.group;
+    final coordinated = await ImOutgoingSendCoordinator.instance.send(
+      messageService: messageService,
+      sdkLocalId: messageID,
+      conversationId: targetConvID,
+      conversationType: coordinatorConvType,
       receiver: receiver,
       groupID: groupID,
+      fallbackMessage: message,
       isExcludedFromUnreadCount: true,
+      persistOutbox: false,
     );
-    if (sendResult.code != 0) {
-      final desc = sendResult.desc.trim();
+    if (coordinated.sdkResult.code != 0) {
+      final desc = coordinated.sdkResult.desc.trim();
       lastErrorMessage = desc.isNotEmpty ? desc : '语音上传失败';
       return TencentVoiceToTextResult(errorMessage: lastErrorMessage);
     }
 
-    final sentMessage = sendResult.data ?? message;
+    final sentMessage = coordinated.sdkResult.data ?? message;
     final sentMsgID = sentMessage.msgID?.trim();
     if (sentMsgID == null || sentMsgID.isEmpty) {
       lastErrorMessage = '语音上传失败';
