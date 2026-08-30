@@ -192,6 +192,9 @@ class IosApnsPushService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_lastSubmittedKey);
     await prefs.remove(_lastSubmittedAtKey);
+    try {
+      await _channel.invokeMethod<void>('clearHandledMsgKeys');
+    } catch (_) {}
   }
 
   Future<void> cancelNotificationForMsgKey(String? msgKey) async {
@@ -307,7 +310,8 @@ class IosApnsPushService {
       return false;
     }
     try {
-      final v = await _channel.invokeMethod<bool>('isVoipAudioSessionActivated');
+      final v =
+          await _channel.invokeMethod<bool>('isVoipAudioSessionActivated');
       return v == true;
     } catch (_) {
       return false;

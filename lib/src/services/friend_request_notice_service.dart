@@ -601,6 +601,7 @@ class FriendRequestNoticeService {
       requestId: event.requestId,
       userId: userID,
     );
+    await PushMsgKeyDedup.instance.ensureReady();
     if (PushMsgKeyDedup.instance.wasHandled(dedupKey)) {
       return;
     }
@@ -886,6 +887,7 @@ class FriendRequestNoticeService {
     }
 
     final dedupKey = 'friend_outcome:${noticeType}_$peerUserId';
+    await PushMsgKeyDedup.instance.ensureReady();
     if (PushMsgKeyDedup.instance.wasHandled(dedupKey)) {
       return;
     }
@@ -1004,6 +1006,7 @@ class FriendRequestNoticeService {
       return;
     }
     final dedupKey = _friendNoticeKey(requestId: requestId, userId: id);
+    await PushMsgKeyDedup.instance.ensureReady();
     if (PushMsgKeyDedup.instance.wasHandled(dedupKey)) {
       return;
     }

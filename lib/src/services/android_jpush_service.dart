@@ -100,7 +100,8 @@ class AndroidJPushService {
       },
       onReceiveMessage: (event) async {
         if (kDebugMode) {
-          debugPrint('AndroidJPush: receive custom message ${_safeEvent(event)}');
+          debugPrint(
+              'AndroidJPush: receive custom message ${_safeEvent(event)}');
         }
       },
       onConnected: (event) async {
@@ -350,7 +351,8 @@ class AndroidJPushService {
       _jpush.setGeofenceEnable(enable: false);
       _jpush.setSmartPushEnable(enable: false);
       _jpush.setLinkMergeEnable(enable: true);
-      _jpush.enableAutoWakeup(enable: IMDemoConfig.androidJPushAutoWakeupEnabled);
+      _jpush.enableAutoWakeup(
+          enable: IMDemoConfig.androidJPushAutoWakeupEnabled);
       _jpush.setWakeEnable(enable: IMDemoConfig.androidJPushWakeEnabled);
       _jpush.setBackgroundEnable(enable: true);
       _jpush.setUnShowAtTheForeground(unShow: true);
@@ -623,12 +625,14 @@ class AndroidJPushService {
   }
 
   Future<void> _handleIncomingImChatPush(Map<String, dynamic> data) async {
+    await PushMsgKeyDedup.instance.ensureReady();
     final msgKey = PushMsgKeyDedup.instance.normalizeKey(data['msgKey']);
     final threadId = _threadIdFromPushData(data);
 
     // 前台横幅已改走本地系统通知；极光前台清条会把刚弹出的本地横幅掐掉。
     if (_isInForeground) {
-      PushMsgKeyDedup.instance.trace('foreground_skip_clear', msgKey ?? '', 'jpush');
+      PushMsgKeyDedup.instance
+          .trace('foreground_skip_clear', msgKey ?? '', 'jpush');
       return;
     }
 
@@ -642,6 +646,9 @@ class AndroidJPushService {
       PushMsgKeyDedup.instance.trace('claim_failed', msgKey, 'jpush');
       await _clearImChatForMsgKey(msgKey, threadId);
       return;
+    }
+    if (msgKey != null) {
+      await PushMsgKeyDedup.instance.persist();
     }
   }
 
@@ -660,8 +667,7 @@ class AndroidJPushService {
     if (direct.isNotEmpty) {
       return direct;
     }
-    final chatType =
-        data['chatType']?.toString().trim().toLowerCase() ?? '';
+    final chatType = data['chatType']?.toString().trim().toLowerCase() ?? '';
     final groupId = data['groupId']?.toString().trim() ??
         data['groupID']?.toString().trim() ??
         '';

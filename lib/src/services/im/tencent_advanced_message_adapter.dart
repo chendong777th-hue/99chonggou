@@ -136,12 +136,11 @@ class TencentAdvancedMessageAdapter {
         );
       },
       onRecvMessageRevoked: (msgID) {
-        _submitRevoked(msgID, callbackKind: 'plain');
+        _submitRevoked(msgID);
       },
       onRecvMessageRevokedWithInfo: (msgID, operateUser, reason) {
         _submitRevoked(
           msgID,
-          callbackKind: 'with-info',
           isAdmin: _isAdminRevokeReason(reason),
           revoker: operateUser,
         );
@@ -290,14 +289,15 @@ class TencentAdvancedMessageAdapter {
 
   void _submitRevoked(
     String msgID, {
-    required String callbackKind,
     bool isAdmin = false,
     V2TimUserFullInfo? revoker,
   }) {
     final normalized = msgID.trim();
     if (normalized.isEmpty) return;
     _submitAccountEvent(
-      eventId: 'revoked:$normalized:$callbackKind',
+      // The SDK can deliver both revoke callbacks for the same message. The
+      // message identity, not the callback shape, is the Inbox idempotency key.
+      eventId: 'revoked:$normalized',
       kind: ImEventKind.notification,
       payload: ImMessageRevokedEvent(
         msgID: normalized,

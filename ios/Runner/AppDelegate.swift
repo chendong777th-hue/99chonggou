@@ -32,6 +32,7 @@ func print(
     private var voipPresentationGeneration = 0
     private let voipQueue = DispatchQueue(label: "chat99.voip.push")
     private let handledVoipInviteDefaultsKey = "voip_handled_invite_ids"
+    private let handledMsgKeysDefaultsKey = "im_handled_msg_keys"
     private let loginUserIdDefaultsKey = "voip_cached_login_user_id"
     private let callNotificationEnabledDefaultsKey = "voip_call_notification_enabled"
 
@@ -64,6 +65,7 @@ func print(
         // 与自建通道双注册；Extension 只认 TIMPush 载荷，自建 av_call 解析失败后
         // 不报 CallKit，出现「服务端 voip push sent、手机无来电」。
         configureSelfHostedCallKit()
+        loadHandledMsgKeys()
         loadHandledVoipInviteIds()
         installPushKitIfNeeded()
         printVoIPDiagnostics(tag: "didFinishLaunching")
@@ -314,8 +316,11 @@ func print(
                 if let args = call.arguments as? [String: Any],
                    let msgKey = args["msgKey"] as? String,
                    !msgKey.isEmpty {
-                    self.handledMsgKeys.insert(msgKey)
+                    self.markHandledMsgKey(msgKey)
                 }
+                result(nil)
+            case "clearHandledMsgKeys":
+                self.clearHandledMsgKeys()
                 result(nil)
             case "clearAllImChatNotifications":
                 self.clearAllImChatNotifications { count in
@@ -607,13 +612,16 @@ func print(
     }
 
     private func cancelDeliveredNotifications(matchingMsgKey msgKey: String) {
-        UNUserNotificationCenter.current().removeDeliveredNotifications(
-            withIdentifiers: [msgKey]
-        )
         UNUserNotificationCenter.current().getDeliveredNotifications { notifications in
             var toRemove: [String] = []
             for notification in notifications {
                 let userInfo = self.normalizeUserInfo(notification.request.content.userInfo)
+                // A local fallback uses the same stable msgKey identifier.
+                // Suppressing a late remote Push must not remove that local
+                // alert from the notification center.
+                if self.isAppLocalNotification(notification, userInfo: userInfo) {
+                    continue
+                }
                 let key = (userInfo["msgKey"] as? String)?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 if key == msgKey {
@@ -630,6 +638,30 @@ func print(
     private func msgKeyFromUserInfo(_ userInfo: [String: Any]) -> String {
         return (userInfo["msgKey"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    private func loadHandledMsgKeys() {
+        handledMsgKeys = Set(
+            UserDefaults.standard.stringArray(forKey: handledMsgKeysDefaultsKey) ?? []
+        )
+    }
+
+    private func markHandledMsgKey(_ msgKey: String) {
+        let key = msgKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return }
+        handledMsgKeys.insert(key)
+        if handledMsgKeys.count > 320 {
+            handledMsgKeys = Set(Array(handledMsgKeys).sorted().suffix(256))
+        }
+        UserDefaults.standard.set(
+            Array(handledMsgKeys).sorted(),
+            forKey: handledMsgKeysDefaultsKey
+        )
+    }
+
+    private func clearHandledMsgKeys() {
+        handledMsgKeys.removeAll()
+        UserDefaults.standard.removeObject(forKey: handledMsgKeysDefaultsKey)
     }
 
     private func isImChatUserInfo(_ userInfo: [String: Any]) -> Bool {

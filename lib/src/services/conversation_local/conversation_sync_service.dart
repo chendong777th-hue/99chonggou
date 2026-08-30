@@ -130,6 +130,8 @@ class ConversationSyncService {
   TencentAdvancedMessageAdapter? _messageAdapter;
   bool _messageListenerAttached = false;
   Future<void>? _messageListenerAttachInFlight;
+  Future<void> _realtimeLifecycleTail = Future<void>.value();
+  Timer? _messageListenerRetryTimer;
   Future<void>? _conversationListenerAttachInFlight;
   SessionIdentity? _realtimeIdentity;
   ImRecoveryWorker? _messageRecoveryWorker;
@@ -1013,8 +1015,12 @@ class ConversationSyncService {
   }
 
   /// Binds realtime callbacks to the account that has just completed IM login.
-  Future<void> activateRealtimeSession() async {
-    await detachRealtimeListeners();
+  Future<void> activateRealtimeSession() {
+    return _enqueueRealtimeLifecycle(_activateRealtimeSession);
+  }
+
+  Future<void> _activateRealtimeSession() async {
+    await _detachRealtimeListeners();
     final identity = SessionIdentityService.instance.capture();
     if (identity.ownerUserId.isEmpty) {
       return;
@@ -1052,11 +1058,11 @@ class ConversationSyncService {
         }
       }
       if (!_isCurrentRealtimeIdentity(identity)) {
-        await detachRealtimeListeners();
+        await _detachRealtimeListeners();
         return;
       }
     } catch (_) {}
-    await ensureRealtimeMessageListenerAttached();
+    await _ensureRealtimeMessageListenerAttached();
   }
 
   bool _isCurrentRealtimeIdentity(SessionIdentity? identity) {
@@ -1101,7 +1107,11 @@ class ConversationSyncService {
         _isCurrentRealtimeIdentity(identity);
   }
 
-  Future<ImMessageCoreLeaseContext?> messageCoreLeaseForOutgoingSend() async {
+  Future<ImMessageCoreLeaseContext?> messageCoreLeaseForOutgoingSend() {
+    return _enqueueRealtimeLifecycle(_messageCoreLeaseForOutgoingSend);
+  }
+
+  Future<ImMessageCoreLeaseContext?> _messageCoreLeaseForOutgoingSend() async {
     final existing = _realtimeIdentity;
     final identity = existing != null && _isCurrentSessionIdentity(existing)
         ? existing
@@ -1153,7 +1163,10 @@ class ConversationSyncService {
         return;
       }
       if (renewed == null) {
-        await _onMessageCoreLeaseLost(identity, lease);
+        // Queue the teardown, but let the heartbeat finish first. The
+        // lifecycle queue may itself be waiting for this in-flight heartbeat
+        // during logout or account switching.
+        unawaited(_onMessageCoreLeaseLost(identity, lease));
         return;
       }
       _messageCoreLease = renewed;
@@ -1169,6 +1182,15 @@ class ConversationSyncService {
   }
 
   Future<void> _onMessageCoreLeaseLost(
+    SessionIdentity identity,
+    ImWriterLease lease,
+  ) {
+    return _enqueueRealtimeLifecycle(
+      () => _handleMessageCoreLeaseLost(identity, lease),
+    );
+  }
+
+  Future<void> _handleMessageCoreLeaseLost(
     SessionIdentity identity,
     ImWriterLease lease,
   ) async {
@@ -1199,7 +1221,15 @@ class ConversationSyncService {
     );
   }
 
-  Future<void> _retryMessageCoreAcquire(SessionIdentity identity) async {
+  Future<void> _retryMessageCoreAcquire(SessionIdentity identity) {
+    return _enqueueRealtimeLifecycle(
+      () => _handleMessageCoreAcquireRetry(identity),
+    );
+  }
+
+  Future<void> _handleMessageCoreAcquireRetry(
+    SessionIdentity identity,
+  ) async {
     if (!_isCurrentSessionIdentity(identity) || _messageCoreLease != null) {
       return;
     }
@@ -1210,7 +1240,31 @@ class ConversationSyncService {
     await _attachRealtimeSdkListeners(identity);
   }
 
-  Future<void> detachRealtimeListeners() async {
+  Future<void> detachRealtimeListeners() {
+    return _enqueueRealtimeLifecycle(_detachRealtimeListeners);
+  }
+
+  Future<T> _enqueueRealtimeLifecycle<T>(
+    Future<T> Function() action,
+  ) {
+    final previous = _realtimeLifecycleTail;
+    late final Future<T> task;
+    task = () async {
+      try {
+        await previous;
+      } catch (_) {
+        // A failed teardown must not prevent the next login from retrying.
+      }
+      return action();
+    }();
+    _realtimeLifecycleTail = task.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    return task;
+  }
+
+  Future<void> _detachRealtimeListeners() async {
     _realtimeIdentity = null;
     _messageCoreAcquireRetryTimer?.cancel();
     _messageCoreAcquireRetryTimer = null;
@@ -1235,6 +1289,8 @@ class ConversationSyncService {
   }
 
   Future<void> _detachRealtimeSdkListeners() async {
+    _messageListenerRetryTimer?.cancel();
+    _messageListenerRetryTimer = null;
     _messageRecoveryTimer?.cancel();
     _messageRecoveryTimer = null;
     final recovery = _messageRecoveryInFlight;
@@ -1279,8 +1335,15 @@ class ConversationSyncService {
   /// initializing. Recheck the advanced listener after login/reconnect so the
   /// inbound preview fallback is not lost because its first registration was
   /// attempted too early.
-  Future<void> ensureRealtimeMessageListenerAttached(
-      {bool force = false}) async {
+  Future<void> ensureRealtimeMessageListenerAttached({bool force = false}) {
+    return _enqueueRealtimeLifecycle(
+      () => _ensureRealtimeMessageListenerAttached(force: force),
+    );
+  }
+
+  Future<void> _ensureRealtimeMessageListenerAttached({
+    bool force = false,
+  }) async {
     final adapter = _messageAdapter;
     final identity = _realtimeIdentity;
     if (adapter == null ||
@@ -1317,6 +1380,7 @@ class ConversationSyncService {
             _isCurrentRealtimeIdentity(identity);
       } catch (e) {
         _log('message listener attach failed: $e');
+        _scheduleMessageListenerRetry(identity);
       }
     }();
     _messageListenerAttachInFlight = task;
@@ -1328,8 +1392,24 @@ class ConversationSyncService {
       }
     }
     if (_messageListenerAttached) {
+      _messageListenerRetryTimer?.cancel();
+      _messageListenerRetryTimer = null;
       _startMessageRecovery(identity);
     }
+  }
+
+  void _scheduleMessageListenerRetry(SessionIdentity identity) {
+    if (!_isCurrentRealtimeIdentity(identity) ||
+        _messageListenerRetryTimer?.isActive == true) {
+      return;
+    }
+    _messageListenerRetryTimer = Timer(
+      _messageCoreAcquireRetryDelay,
+      () {
+        _messageListenerRetryTimer = null;
+        unawaited(ensureRealtimeMessageListenerAttached());
+      },
+    );
   }
 
   /// 将本地会话预览中的最后一条消息标记为已撤回。

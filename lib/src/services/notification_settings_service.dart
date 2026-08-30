@@ -455,6 +455,7 @@ class NotificationSettingsService {
     if (msgKey == null) {
       return;
     }
+    await PushMsgKeyDedup.instance.ensureReady();
 
     if (_isInForeground()) {
       // 前台横幅已改为本地系统通知；勿清掉同 msgKey 的本地条。
@@ -685,6 +686,7 @@ class NotificationSettingsService {
   }
 
   Future<void> _onRecvNewMessage(V2TimMessage message) async {
+    await PushMsgKeyDedup.instance.ensureReady();
     if (TypingStatusMessage.isTypingStatus(message)) {
       _traceMsgBanner('skip reason=typing_status');
       return;
@@ -975,6 +977,7 @@ class NotificationSettingsService {
     required String? conversationId,
     required NotificationDisplayMode displayMode,
   }) async {
+    await PushMsgKeyDedup.instance.ensureReady();
     if (_isSilentGroupTipMessage(message)) {
       return false;
     }
@@ -1116,7 +1119,8 @@ class NotificationSettingsService {
     );
     if (shown) {
       if (msgKey != null) {
-        unawaited(IosApnsPushService.instance.syncHandledMsgKey(msgKey));
+        await PushMsgKeyDedup.instance.persist();
+        await IosApnsPushService.instance.syncHandledMsgKey(msgKey);
         ImChatNotificationRegistry.instance.register(
           threadId: threadId,
           notificationId: ImChatNotificationRegistry.notificationIdFor(msgKey),

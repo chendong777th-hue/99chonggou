@@ -20,6 +20,7 @@ import 'package:tencent_cloud_chat_sdk/enum/offlinePushInfo.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_list_result.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_value_callback.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_user_full_info.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/message_services.dart';
 
 class _FakeMessagePort implements ImTencentMessagePort {
@@ -82,12 +83,17 @@ class _FakeAdvancedMessageService implements MessageService {
   V2TimAdvancedMsgListener? listener;
   int addCalls = 0;
   int removeCalls = 0;
+  int addFailuresRemaining = 0;
 
   @override
   Future<void> addAdvancedMsgListener({
     required V2TimAdvancedMsgListener listener,
   }) async {
     addCalls++;
+    if (addFailuresRemaining > 0) {
+      addFailuresRemaining--;
+      throw StateError('listener registration failed');
+    }
     this.listener = listener;
   }
 
@@ -1107,6 +1113,62 @@ void main() {
       expect(service.removeCalls, 1);
       expect(service.listener, isNull);
       expect(adapter.isRegistered, isFalse);
+    });
+
+    test('can retry registration after the SDK rejects the first listener',
+        () async {
+      final service = _FakeAdvancedMessageService()..addFailuresRemaining = 1;
+      final adapter = TencentAdvancedMessageAdapter(
+        messageService: service,
+        ingress: DurableIngressGateway(store: InMemoryImIngressStore()),
+        ownerUserId: 'alice',
+        accountGeneration: 1,
+        domainGeneration: 1,
+        onEvent: (_) {},
+      );
+
+      await expectLater(adapter.register(), throwsStateError);
+      expect(adapter.isRegistered, isFalse);
+      expect(service.listener, isNull);
+
+      await adapter.register();
+      expect(adapter.isRegistered, isTrue);
+      expect(service.addCalls, 2);
+      expect(service.listener, isNotNull);
+    });
+
+    test('coalesces plain and detailed revoke callbacks by message identity',
+        () async {
+      final service = _FakeAdvancedMessageService();
+      final store = InMemoryImIngressStore();
+      final delivered = <EventEnvelope<dynamic>>[];
+      final deliveredTwice = Completer<void>();
+      final adapter = TencentAdvancedMessageAdapter(
+        messageService: service,
+        ingress: DurableIngressGateway(store: store),
+        ownerUserId: 'alice',
+        accountGeneration: 2,
+        domainGeneration: 3,
+        onEvent: (event) {
+          delivered.add(event);
+          if (delivered.length == 2 && !deliveredTwice.isCompleted) {
+            deliveredTwice.complete();
+          }
+        },
+      );
+
+      await adapter.register();
+      service.listener!.onRecvMessageRevoked('revoke-1');
+      service.listener!.onRecvMessageRevokedWithInfo(
+        'revoke-1',
+        V2TimUserFullInfo(userID: 'admin'),
+        'admin revoke',
+      );
+      await deliveredTwice.future.timeout(const Duration(seconds: 2));
+
+      expect(delivered.map((event) => event.eventId).toSet(),
+          <String>{'revoked:revoke-1'});
+      expect(store.inbox, hasLength(1));
     });
   });
 

@@ -412,8 +412,15 @@ class MessageServiceImpl extends MessageService {
   Future<void> addAdvancedMsgListener({
     required V2TimAdvancedMsgListener listener,
   }) async {
-    _advancedListeners.add(listener);
-    await _ensureSdkAdvancedListenerAttached();
+    final added = _advancedListeners.add(listener);
+    try {
+      await _ensureSdkAdvancedListenerAttached();
+    } catch (_) {
+      if (added) {
+        _advancedListeners.remove(listener);
+      }
+      rethrow;
+    }
   }
 
   @override

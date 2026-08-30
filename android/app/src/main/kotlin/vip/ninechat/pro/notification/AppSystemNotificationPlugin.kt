@@ -116,21 +116,34 @@ class AppSystemNotificationPlugin : FlutterPlugin, MethodChannel.MethodCallHandl
         }
         val compat = NotificationManagerCompat.from(appContext)
         var cleared = 0
-        val hashId = msgKey.hashCode() and 0x7fffffff
-        compat.cancel(hashId)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val manager = appContext.getSystemService(NotificationManager::class.java)
             for (status in manager.activeNotifications) {
                 val notification = status.notification ?: continue
                 val extras = notification.extras ?: continue
+                // The local fallback has the same stable id as the remote
+                // msgKey. Never cancel it while suppressing a late remote
+                // duplicate.
+                if (isAppLocalNotification(extras)) {
+                    continue
+                }
                 if (!matchesMsgKey(extras, msgKey)) {
                     continue
                 }
                 compat.cancel(status.id)
                 cleared += 1
             }
+        } else {
+            // Notification extras are not inspectable on pre-M. The stable id
+            // is the only provider-supported fallback on those devices.
+            compat.cancel(msgKey.hashCode() and 0x7fffffff)
         }
         return cleared
+    }
+
+    private fun isAppLocalNotification(extras: Bundle): Boolean {
+        return extras.getString("local")?.trim() == "1" ||
+            extras.getBoolean("local", false)
     }
 
     private fun matchesMsgKey(extras: Bundle, msgKey: String): Boolean {
@@ -293,6 +306,16 @@ class AppSystemNotificationPlugin : FlutterPlugin, MethodChannel.MethodCallHandl
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .addExtras(Bundle().apply {
+                putString("type", "im_chat")
+                putString("local", "1")
+                if (!msgKey.isNullOrBlank()) {
+                    putString("msgKey", msgKey.trim())
+                }
+                if (!threadId.isNullOrBlank()) {
+                    putString("threadId", threadId.trim())
+                }
+            })
             .apply {
                 if (!threadId.isNullOrBlank()) {
                     setGroup(threadId)
