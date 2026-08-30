@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tencent_cloud_chat_demo/config.dart';
+import 'package:tencent_cloud_chat_demo/src/services/c2c_receive_opt_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
@@ -639,12 +640,12 @@ class PlatformOfficialAccountService {
     if (userIds.isEmpty || !_isCurrent(identity)) {
       return;
     }
-    final res = await TencentImSDKPlugin.v2TIMManager
-        .getMessageManager()
-        .setC2CReceiveMessageOpt(
-          userIDList: userIds,
-          opt: ReceiveMsgOptEnum.V2TIM_RECEIVE_MESSAGE,
-        );
+    final res = await C2cReceiveOptService.setOptForBatchViaSdk(
+      ownerUserId: identity.ownerUserId,
+      peerUserIds: userIds,
+      opt: ReceiveMsgOptEnum.V2TIM_RECEIVE_MESSAGE,
+      capturedIdentity: identity,
+    );
     if (res.code != 0) {
       return;
     }

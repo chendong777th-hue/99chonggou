@@ -8,6 +8,9 @@ import 'package:tencent_cloud_chat_demo/src/i18n/app_i18n.dart';
 import 'package:tencent_cloud_chat_demo/src/pages/cross_platform/wide_screen/desktop_create_group_host.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/c2c_receive_opt_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/contracts/account_scoped_conversation_key.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/api/conversation_pin_api.dart';
 import 'package:tencent_cloud_chat_demo/src/models/user_profile_record.dart';
@@ -337,11 +340,37 @@ class _C2cChatSettingsPageState extends State<C2cChatSettingsPage> {
       _busy = true;
       _conversation.recvOpt = value ? 2 : 0;
     });
-    final res = await _messageService.setC2CReceiveMessageOpt(
-      userIDList: [peer],
+    // IM-09 ADR §10.1: c2c 免打扰收敛到 C2cReceiveOptService,
+    // 在异步链入口处 capture() 拿到 SessionIdentity,跨账号 fence 生效.
+    final captured = SessionIdentityService.instance.capture();
+    final key = AccountScopedConversationKey.tryParse(
+      ownerUserId: captured.ownerUserId,
+      conversationType: ImConversationType.c2c,
+      conversationId: peer,
+    );
+    if (key == null) {
+      if (mounted) {
+        setState(() {
+          _conversation.recvOpt = value ? 0 : 2;
+          _busy = false;
+        });
+        ToastUtils.toast(AppI18n.of(context).t(
+          zhHans: '设置失败',
+          zhHant: '設置失敗',
+          en: 'Failed to update',
+          ja: '設定に失敗しました',
+          ko: '설정에 실패했습니다',
+        ));
+      }
+      return;
+    }
+    final res = await C2cReceiveOptService.setOpt(
+      messageService: _messageService,
+      key: key,
       opt: value
           ? ReceiveMsgOptEnum.V2TIM_RECEIVE_NOT_NOTIFY_MESSAGE
           : ReceiveMsgOptEnum.V2TIM_RECEIVE_MESSAGE,
+      capturedIdentity: captured,
     );
     if (!mounted) {
       return;

@@ -27,6 +27,8 @@ import 'package:tencent_cloud_chat_demo/src/services/archived_conversation_sync_
 import 'package:tencent_cloud_chat_demo/src/services/archived_conversation_entry_visibility.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_folder_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_folder_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/c2c_receive_opt_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/contracts/account_scoped_conversation_key.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im_group_receive_opt.dart';
 import 'package:tencent_cloud_chat_demo/utils/toast.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_image_message_prefetch.dart';
@@ -34,6 +36,7 @@ import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_flicker_lo
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_service.dart';
 import 'package:tencent_cloud_chat_demo/src/api/conversation_pin_api.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_sync_service.dart';
+import 'package:tencent_cloud_chat_uikit/data_services/message/message_services.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/peer_profile_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_preview_cache.dart';
@@ -106,6 +109,8 @@ import 'package:tencent_cloud_chat_sdk/enum/message_elem_type.dart';
 import 'package:tencent_cloud_chat_sdk/enum/receive_message_opt_enum.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_callback.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_callback.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_user_status.dart'
@@ -118,7 +123,6 @@ import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_glo
     show TUIChatGlobalModel;
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_friendship_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_conversation_view_model.dart';
-import 'package:tencent_cloud_chat_uikit/data_services/message/message_services.dart';
 import 'package:tencent_cloud_chat_uikit/theme/color.dart';
 import 'package:tencent_cloud_chat_uikit/theme/tui_theme.dart';
 import 'package:tencent_cloud_chat_uikit/ui/controller/tim_uikit_conversation_controller.dart';
@@ -3368,8 +3372,9 @@ class _ConversationState extends State<Conversation> {
           )
         : userID.isEmpty
             ? null
-            : await _messageService.setC2CReceiveMessageOpt(
-                userIDList: [userID],
+            : await _c2cDisturbViaService(
+                messageService: _messageService,
+                userID: userID,
                 opt: targetOpt,
               );
 
@@ -3407,7 +3412,33 @@ class _ConversationState extends State<Conversation> {
       }
     }
   }
-
+  /// IM-09 ADR §10.1: c2c 免打扰收敛到 C2cReceiveOptService,
+  /// 在异步链入口处 capture() 拿到 SessionIdentity,跨账号 fence 生效.
+  /// 任何 [MessageService.setC2CReceiveMessageOpt] 直调都必须收敛到本方法.
+  Future<dynamic> _c2cDisturbViaService({
+    required MessageService messageService,
+    required String userID,
+    required ReceiveMsgOptEnum opt,
+  }) async {
+    final captured = SessionIdentityService.instance.capture();
+    final key = AccountScopedConversationKey.tryParse(
+      ownerUserId: captured.ownerUserId,
+      conversationType: ImConversationType.c2c,
+      conversationId: userID,
+    );
+    if (key == null) {
+      debugPrint(
+        '_c2cDisturbViaService: invalid c2c key userID=$userID',
+      );
+      return V2TimCallback(code: -1, desc: 'invalid_c2c_key');
+    }
+    return await C2cReceiveOptService.setOpt(
+      messageService: messageService,
+      key: key,
+      opt: opt,
+      capturedIdentity: captured,
+    );
+  }
   void _syncEditingStateNotifiers() {
     _stripGroupNoticeSelectionIfHidden();
     conversationEditingNotifier.value = _isEditing;
@@ -5939,8 +5970,9 @@ class _ArchivedConversationPageState extends State<ArchivedConversationPage> {
           )
         : userID.isEmpty
             ? null
-            : await messageService.setC2CReceiveMessageOpt(
-                userIDList: [userID],
+            : await _c2cDisturbViaService(
+                messageService: messageService,
+                userID: userID,
                 opt: targetOpt,
               );
 
@@ -5967,6 +5999,33 @@ class _ArchivedConversationPageState extends State<ArchivedConversationPage> {
     } else if (optimistic) {
       applyLocal(prevOpt);
     }
+  }
+  /// IM-09 ADR §10.1: c2c 免打扰收敛到 C2cReceiveOptService,
+  /// 在异步链入口处 capture() 拿到 SessionIdentity,跨账号 fence 生效.
+  /// 任何 [MessageService.setC2CReceiveMessageOpt] 直调都必须收敛到本方法.
+  Future<dynamic> _c2cDisturbViaService({
+    required MessageService messageService,
+    required String userID,
+    required ReceiveMsgOptEnum opt,
+  }) async {
+    final captured = SessionIdentityService.instance.capture();
+    final key = AccountScopedConversationKey.tryParse(
+      ownerUserId: captured.ownerUserId,
+      conversationType: ImConversationType.c2c,
+      conversationId: userID,
+    );
+    if (key == null) {
+      debugPrint(
+        '_c2cDisturbViaService: invalid c2c key userID=$userID',
+      );
+      return V2TimCallback(code: -1, desc: 'invalid_c2c_key');
+    }
+    return await C2cReceiveOptService.setOpt(
+      messageService: messageService,
+      key: key,
+      opt: opt,
+      capturedIdentity: captured,
+    );
   }
 
   void _showConversationPeek(V2TimConversation conversation) {
