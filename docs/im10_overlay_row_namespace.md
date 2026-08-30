@@ -82,7 +82,41 @@
 | IM-10 phase D | `archive_im_local_persist_service` 归档写改为 `commitMessageDelta`（_stripMemoryIds/_rewriteMemoryIdentity 走 delete/edit + replace） | 生产代码 done | `im10: archive write -> writer` |
 | IM-10 phase E | `group_tips_operator_patch_service` 群提示补丁改为 `commitMessageDelta`（_patchVisibleMessages/_decorateVisibleMessageList 走 localMetadata + replace） | 生产代码 done | `im10: group tips patch -> writer` |
 | IM-10 phase F | `call_bubble_dedupe` 通话气泡去重视图合并改为 `commitMessageDelta`（apply() 走 localMetadata/delete 双模式） | 生产代码 done | `im10: call bubble dedupe -> writer` |
-| IM-10 phase G | `silent_archive_service` 静默归档改为 `commitMessageDelta`（_runInitialSupplement 走 optimisticAdoption + historyEnvelope） | 生产代码 done | `im10: silent archive -> writer` |
+| IM-10 phase G | `silent_archive_service`
+
+### 2.5 third_party UIKit setMessageList 残留（2026-08-30 阶段 0 报告）
+
+`rg 'setMessageList\s*\(' third_party/tencent_cloud_chat_uikit` 命中 **18 处**。
+
+| 文件 | 行号 | 调用 | 状态 |
+| --- | --- | --- | --- |
+| tui_chat_global_model.dart | 521 | `return setMessageList(` | vendor legacy,待升级 |
+| tui_chat_global_model.dart | 645 | `final result = setMessageList(` | vendor legacy,待升级 |
+| tui_chat_global_model.dart | 1294 | `return setMessageList(` | vendor legacy,待升级 |
+| tui_chat_global_model.dart | 5047 | `setMessageList(` | vendor legacy,待升级 |
+| tui_chat_global_model.dart | 5154 | `setMessageList(` | vendor legacy,待升级 |
+| tui_chat_global_model.dart | 5402 | `final commit = setMessageList(` | vendor legacy,待升级 |
+| tui_chat_global_model.dart | 9200 | `MessageCommitResult setMessageList(` | 函数定义本身 |
+| tui_chat_separate_view_model.dart | 743 | `final commit = globalModel.setMessageList(` | vendor legacy,待升级 |
+| tui_chat_separate_view_model.dart | 1332 | `globalModel.setMessageList(` | vendor legacy,待升级 |
+| tui_chat_separate_view_model.dart | 1566 | `globalModel.setMessageList(` | vendor legacy,待升级 |
+| tui_chat_separate_view_model.dart | 3496 | `globalModel.setMessageList(` | vendor legacy,待升级 |
+| tui_chat_separate_view_model.dart | 3671 | `globalModel.setMessageList(` | vendor legacy,待升级 |
+| tui_chat_separate_view_model.dart | 3992 | `globalModel.setMessageList(conversationID, messageList);` | vendor legacy,待升级 |
+| tui_chat_separate_view_model.dart | 7311 | `globalModel.setMessageList(conversationID, currentHistoryMsgList);` | vendor legacy,待升级 |
+| tui_chat_separate_view_model.dart | 8348 | `final commit = globalModel.setMessageList(convID, next, replace: true);` | vendor legacy,待升级 |
+| tui_chat_separate_view_model.dart | 8373 | `globalModel.setMessageList(convID, list, replace: true);` | vendor legacy,待升级 |
+| tui_chat_history_pagination_load.dart | 1251 | `model.globalModel.setMessageList(` | vendor legacy,待升级 |
+| tim_uikit_chat.dart | 2065 | `globalModel.setMessageList(` | vendor legacy,待升级 |
+
+**约束**：
+
+- UIKit 的 `MessageReconciliationWriterCommit` 接口已存在（tui_chat_global_model.dart:9220 接受 `writerCommit` 参数），但 17 个调用方均未传，**默认走 legacy 回退路径**。
+- vendor 不在 `lib/` 不可改，**本阶段不强制收敛**。
+- 升级 UIKit 时,**所有 setMessageList 调用必须传入 writerCommit**,逐步把命中数降到 0。
+- 静态门禁脚本 `tool/im10_migration_scan.ps1` 已升级,会列出上述残留,**但不影响退出码**(informational)。
+
+ 静默归档改为 `commitMessageDelta`（_runInitialSupplement 走 optimisticAdoption + historyEnvelope） | 生产代码 done | `im10: silent archive -> writer` |
 | IM-10 phase H | Row namespace（时间线 / 未读线 / 加载行） | 新组件 | `im10: row namespace design` |
 | IM-10 phase I | 发送中 Overlay | 新组件 | `im10: pending overlay` |
 | IM-10 phase J | IM-11 静态门禁收口（allowList 清零,lib/src setMessageList=0,79/79 回归通过） | 自动化 done | `im11: gate` |

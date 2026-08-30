@@ -79,14 +79,29 @@ foreach ($line in $writeLines) {
 }
 
 # 3. third_party UIKit 例外 (UIKit 受控代码,本阶段不修)
+# 仅报告,不强制收敛;vendor 包必须保留 resolvedStableIdentity (tui_chat_global_model.dart:2427)。
 $uikitLines = rg -n --glob '*.dart' 'setMessageList\s*\(' third_party/tencent_cloud_chat_uikit 2>$null
-$uikitSetHitCount = $uikitLines.Count
+$uikitSetHitCount = 0
+$uikitReport = @()
+foreach ($line in $uikitLines) {
+  $parts = $line -split ':', 3
+  if ($parts.Count -lt 3) { continue }
+  $uikitSetHitCount++
+  $file = ($parts[0] -replace '\\', '/').Trim()
+  $lineNo = $parts[1].Trim()
+  $uikitReport += "  [tp setMessageList] ${file}:${lineNo} :: $($parts[2].Trim())"
+}
 
 # 输出
 Write-Host '=== IM-10 / IM-11 Static Gate Scan ==='
 Write-Host ('[lib/src] setMessageList hits : {0}' -f $setHitCount)
 Write-Host ('[lib/src] messageListMap writes : {0}' -f $writeHitCount)
 Write-Host ('[third_party UIKit] setMessageList hits : {0}' -f $uikitSetHitCount)
+if ($uikitSetHitCount -gt 0) {
+  Write-Host ''
+  Write-Host '[third_party setMessageList residues (informational, vendor not enforced)]' -ForegroundColor Magenta
+  $uikitReport | ForEach-Object { Write-Host $_ -ForegroundColor Magenta }
+}
 Write-Host ('[allowList] {0} entries (ADR §3.1)' -f $allowList.Count)
 
 if ($violations.Count -gt 0) {
