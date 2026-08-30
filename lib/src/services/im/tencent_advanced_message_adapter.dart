@@ -5,6 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/contracts/contracts.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/durable_ingress_gateway.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/im_ingress_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/message_withdraw_ledger.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/message_conversation_id.dart';
 import 'package:tencent_cloud_chat_sdk/enum/V2TimAdvancedMsgListener.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
@@ -308,6 +309,9 @@ class TencentAdvancedMessageAdapter {
       recoveryMode: ImRecoveryMode.commandArguments,
       recoveryRef: 'revoke:$normalized',
     );
+    // IM-08 P0-High B2: 每条撤回事件持久化到本地账本,
+    // 防止 SDK listener 回调丢失导致冷启动 UI 残留原消息。
+    unawaited(MessageWithdrawLedger.instance.recordRevoked(normalized));
   }
 
   void _submitAccountEvent({
