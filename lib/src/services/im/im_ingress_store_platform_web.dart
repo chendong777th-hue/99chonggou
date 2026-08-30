@@ -475,6 +475,33 @@ class _WebImIngressTransaction implements ImIngressTransaction {
   }
 
   @override
+  Future<List<ImOutboxRecord>> listOutboxesForRecovery({
+    required String ownerUserId,
+    required List<ImOutboxState> states,
+    required int limit,
+  }) async {
+    if (states.isEmpty || limit <= 0) return const <ImOutboxRecord>[];
+    final raw = await _request(_store.getAll(null, 1000));
+    if (raw == null || raw.isUndefinedOrNull) {
+      return const <ImOutboxRecord>[];
+    }
+    final allowed = states.toSet();
+    final records = <ImOutboxRecord>[];
+    for (final value in (raw as JSArray<JSAny?>).toDart) {
+      final stringValue = value as JSString?;
+      if (stringValue == null) continue;
+      final map = _decodeMap(stringValue.toDart);
+      if (map == null || !map.containsKey('operation_id')) continue;
+      final record = imOutboxFromStorageMap(map);
+      if (record.ownerUserId == ownerUserId && allowed.contains(record.state)) {
+        records.add(record);
+      }
+    }
+    records.sort((a, b) => a.updatedAtMs.compareTo(b.updatedAtMs));
+    return records.take(limit).toList(growable: false);
+  }
+
+  @override
   Future<bool> insertOutboxIfAbsent(ImOutboxRecord record) async {
     final key = _outboxKey(record.ownerUserId, record.operationId);
     if (await _get(key) != null) return false;

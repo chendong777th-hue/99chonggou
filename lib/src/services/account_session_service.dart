@@ -25,6 +25,7 @@ import 'package:tencent_cloud_chat_demo/src/services/group_notice_incremental_sy
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_bootstrap.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_unread_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_system_notice_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_conversation_unread_helper.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_unread_clear_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_preview_text_cache.dart';
@@ -35,6 +36,8 @@ import 'package:tencent_cloud_chat_demo/src/services/conversation_pin_sync_servi
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/desktop_login_session_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im_session_cache.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/read_outbox_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/read_receipt_outbox_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/moments/moments_settings_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/local_account_data_purge.dart';
 import 'package:tencent_cloud_chat_demo/src/services/local_message_overlay_store.dart';
@@ -44,6 +47,7 @@ import 'package:tencent_cloud_chat_demo/src/services/push_registration_service.d
 import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/services/session_diagnostics.dart';
 import 'package:tencent_cloud_chat_demo/src/services/native_post_home_bootstrap_queue.dart';
+import 'package:tencent_cloud_chat_uikit/data_services/message/outgoing_message_send_queue.dart';
 import 'package:tencent_cloud_chat_demo/src/provider/login_user_Info.dart';
 import 'package:tencent_cloud_chat_demo/src/services/biometric_pay_service.dart';
 import 'package:tencent_cloud_chat_demo/utils/constant.dart';
@@ -142,6 +146,8 @@ class AccountSessionService {
     final clearGeneration =
         SessionIdentityService.instance.invalidate(reason: reason);
     ConversationUnreadClearService.clearSession();
+    GroupConversationUnreadHelper.clearSession();
+    OutgoingMessageSendQueue.instance.clearSession();
     LocalMessageOverlayStore.instance.invalidateScope();
     bool isCurrentClear() =>
         SessionIdentityService.instance.isGenerationCurrent(clearGeneration);
@@ -158,6 +164,14 @@ class AccountSessionService {
       return;
     }
     final ownerForPurge = purgeOwnerDisk ? logoutOwner : '';
+    if (purgeOwnerDisk && logoutOwner.isNotEmpty) {
+      await _safe(
+        () => ConversationReadOutboxStore.instance.clearOwner(logoutOwner),
+      );
+      await _safe(
+        () => ReadReceiptOutboxStore.instance.clearOwner(logoutOwner),
+      );
+    }
     PushRegistrationService.instance.rememberLogoutOwner(logoutOwner);
     _sessionLog(
       'SESSION_LOG clear begin '

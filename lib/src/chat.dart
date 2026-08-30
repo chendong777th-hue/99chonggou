@@ -2137,6 +2137,13 @@ class _ChatState extends State<Chat> with WidgetsBindingObserver {
             ),
           );
         }
+      } else if (outcome.outcomeUnknown) {
+        // Keep the durable wallet row pending. A timeout or lost callback may
+        // still have reached Tencent, so automatic resend could duplicate a
+        // financial card. Realtime/history adoption settles the operation.
+        debugPrint(
+          'wallet-card outcome unknown; keep pending clientOrderId=$clientOrderId',
+        );
       } else if (outcome.reject == WalletCardImReject.invalid) {
         sentMarks.add(mark);
         WalletCardDispatchService.instance.removeMatching(data);
@@ -2228,13 +2235,17 @@ class _ChatState extends State<Chat> with WidgetsBindingObserver {
         );
       }
 
-      final ok = await ChatExternalMessageSender.sendCreatedMessage(
+      final sendResult =
+          await ChatExternalMessageSender.sendCreatedMessageDetailed(
         messageInfo: msg,
         receiverUserId: target.receiverUserId,
         groupId: target.groupId,
         reason: 'wallet_message_sent',
       );
-      if (!ok) {
+      if (sendResult.state == ExternalMessageSendState.outcomeUnknown) {
+        return const WalletCardImSendOutcome.unknown();
+      }
+      if (!sendResult.succeeded) {
         debugPrint(
           'send wallet custom message failed: peer=${target.receiverUserId} '
           'group=${target.groupId}',

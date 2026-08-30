@@ -368,6 +368,12 @@ abstract interface class Im05Transaction {
     required String operationId,
   });
 
+  Future<List<ImOutboxRecord>> listOutboxesForRecovery({
+    required String ownerUserId,
+    required List<ImOutboxState> states,
+    required int limit,
+  });
+
   Future<bool> insertOutboxIfAbsent(ImOutboxRecord record);
 
   Future<bool> updateOutboxIfCurrent({

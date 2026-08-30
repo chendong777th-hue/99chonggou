@@ -68,6 +68,16 @@ void main() {
     expect(order, <int>[1, 2]);
   });
 
+  test('completed conversation tails are evicted', () async {
+    final queue = OutgoingMessageSendQueue.instance;
+    const key = 'c2c:evicted';
+
+    await queue.runSerial(key, () async => 1);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(queue.hasPending(key), isFalse);
+  });
+
   test('conversationKey prefers group id', () {
     expect(
       OutgoingMessageSendQueue.conversationKey(

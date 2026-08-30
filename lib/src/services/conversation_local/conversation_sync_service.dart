@@ -72,6 +72,7 @@ import 'package:tencent_cloud_chat_demo/src/services/im/durable_ingress_gateway.
 import 'package:tencent_cloud_chat_demo/src/services/im/contracts/contracts.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/im_ingress_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/im_ingress_store_platform.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/im05_persistence.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/im_mailbox.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/im_recovery_worker.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/tencent_advanced_message_adapter.dart';
@@ -132,7 +133,9 @@ class ConversationSyncService {
   Future<void>? _messageListenerAttachInFlight;
   Future<void> _realtimeLifecycleTail = Future<void>.value();
   Timer? _messageListenerRetryTimer;
+  Timer? _conversationListenerRetryTimer;
   Future<void>? _conversationListenerAttachInFlight;
+  bool _conversationListenerAttached = false;
   SessionIdentity? _realtimeIdentity;
   ImRecoveryWorker? _messageRecoveryWorker;
   Timer? _messageRecoveryTimer;
@@ -702,6 +705,30 @@ class ConversationSyncService {
         event,
         lane: _laneForMessageEvent(event),
       ),
+      onIngestFailure: (
+        draft,
+        error,
+        stackTrace, {
+        required int attempt,
+        required bool dropped,
+      }) {
+        if (!_isCurrentRealtimeIdentity(identity)) return;
+        _log(
+          'message ingress failure kind=${draft.kind.name} '
+          'attempt=$attempt dropped=$dropped '
+          'errorType=${error.runtimeType}',
+        );
+        if (attempt != 1 && !dropped) return;
+        final conversationId = draft.scope?.canonicalConversationId ?? '';
+        if (conversationId.isNotEmpty) {
+          ChatHistoryRefreshBus.instance.requestRefresh(
+            conversationId: conversationId,
+            reason: 'message_ingress_failure',
+            delay: Duration.zero,
+          );
+        }
+        unawaited(_runMessageRecovery(identity));
+      },
     );
     _messageAdapter = adapter;
     return adapter;
@@ -832,6 +859,7 @@ class ConversationSyncService {
       return;
     }
     try {
+      var providerOutgoingAdopted = false;
       if (claimed.status == ImInboxStatus.processing) {
         await _applyMessageIngressMetadata(event, identity: identity);
         await _flushPersistEventQueue(reason: 'im_ingress');
@@ -846,6 +874,11 @@ class ConversationSyncService {
       }
       if (claimed.status == ImInboxStatus.processing ||
           claimed.status == ImInboxStatus.metadataCommitted) {
+        providerOutgoingAdopted = await _adoptProviderOutgoingMessage(
+          event,
+          identity: identity,
+          lease: lease,
+        );
         await _publishMessageIngressProjection(
           event,
           identity: identity,
@@ -859,16 +892,93 @@ class ConversationSyncService {
           return;
         }
       }
+      if (claimed.status == ImInboxStatus.projectionPublished) {
+        providerOutgoingAdopted = await _adoptProviderOutgoingMessage(
+          event,
+          identity: identity,
+          lease: lease,
+        );
+      }
+      if (providerOutgoingAdopted) {
+        final outgoing = _providerOutgoingIdentity(
+          event,
+          identity: identity,
+        );
+        if (outgoing != null) {
+          final completed = await Im05Persistence(store: _messageIngressStore)
+              .completeOutboxProjection(
+            ownerUserId: identity.ownerUserId,
+            operationId: outgoing.operationId,
+            leaseOwnerId: lease.leaseOwnerId,
+            fencingToken: lease.fencingToken,
+            nowMs: DateTime.now().millisecondsSinceEpoch,
+          );
+          if (!completed) {
+            throw StateError(
+              'provider Outbox projection completion was rejected',
+            );
+          }
+        }
+      }
       await _advanceMessageInboxStatus(
         event: event,
         identity: identity,
         expectedStatus: ImInboxStatus.projectionPublished,
         nextStatus: ImInboxStatus.completed,
       );
-    } catch (_) {
+    } catch (error) {
       // Leave PROCESSING durable. Recovery must replay the event rather than
       // treating a failed compatibility projection as completed.
+      debugPrint(
+        'CHAT_INGRESS_HANDLER_FAILURE kind=${event.kind.name} '
+        'errorType=${error.runtimeType}',
+      );
     }
+  }
+
+  OutgoingIdentityContract? _providerOutgoingIdentity(
+    EventEnvelope<dynamic> event, {
+    required SessionIdentity identity,
+  }) {
+    if (event.kind != ImEventKind.realtimeMessage &&
+        event.kind != ImEventKind.messageMutation) {
+      return null;
+    }
+    final payload = event.payload;
+    final scope = event.scope;
+    if (payload is! V2TimMessage ||
+        payload.isSelf != true ||
+        scope == null ||
+        scope.ownerUserId != identity.ownerUserId) {
+      return null;
+    }
+    return OutgoingIdentityContract.fromCloudCustomData(
+      payload.cloudCustomData,
+      scope: scope,
+    );
+  }
+
+  Future<bool> _adoptProviderOutgoingMessage(
+    EventEnvelope<dynamic> event, {
+    required SessionIdentity identity,
+    required ImWriterLease lease,
+  }) async {
+    final outgoing = _providerOutgoingIdentity(event, identity: identity);
+    if (outgoing == null) return false;
+    final payload = event.payload as V2TimMessage;
+    return Im05Persistence(store: _messageIngressStore)
+        .adoptOutboxProviderSucceeded(
+      ownerUserId: identity.ownerUserId,
+      operationId: outgoing.operationId,
+      clientCorrelationId: outgoing.clientCorrelationId,
+      conversationId: outgoing.scope.storageKey,
+      payloadHash: outgoing.payloadFingerprint,
+      leaseOwnerId: lease.leaseOwnerId,
+      fencingToken: lease.fencingToken,
+      nowMs: DateTime.now().millisecondsSinceEpoch,
+      sdkLocalId: payload.id,
+      serverMsgId: payload.msgID,
+    );
   }
 
   Future<void> _applyMessageIngressMetadata(
@@ -1038,11 +1148,27 @@ class ConversationSyncService {
       _scheduleMessageCoreAcquireRetry(identity);
       return;
     }
-    final conversationListener = _createConversationListener(identity);
     _createMessageAdapter(identity);
+    await _ensureConversationListenerAttached(identity);
+    await _ensureRealtimeMessageListenerAttached();
+  }
+
+  Future<void> _ensureConversationListenerAttached(
+    SessionIdentity identity,
+  ) async {
+    if (_conversationListenerAttached ||
+        !(await _hasCurrentMessageCoreLease(identity))) {
+      return;
+    }
+    final pending = _conversationListenerAttachInFlight;
+    if (pending != null) {
+      await pending;
+      return;
+    }
+    final conversationListener = _createConversationListener(identity);
     try {
       if (!await _hasCurrentMessageCoreLease(identity)) {
-        await _detachRealtimeSdkListeners();
+        if (identical(_listener, conversationListener)) _listener = null;
         _scheduleMessageCoreAcquireRetry(identity);
         return;
       }
@@ -1061,8 +1187,36 @@ class ConversationSyncService {
         await _detachRealtimeListeners();
         return;
       }
-    } catch (_) {}
-    await _ensureRealtimeMessageListenerAttached();
+      _conversationListenerAttached = true;
+      _conversationListenerRetryTimer?.cancel();
+      _conversationListenerRetryTimer = null;
+    } catch (error) {
+      if (identical(_listener, conversationListener)) _listener = null;
+      _conversationListenerAttached = false;
+      _log(
+        'conversation listener attach failed '
+        'errorType=${error.runtimeType}',
+      );
+      _scheduleConversationListenerRetry(identity);
+    }
+  }
+
+  void _scheduleConversationListenerRetry(SessionIdentity identity) {
+    if (!_isCurrentRealtimeIdentity(identity) ||
+        _conversationListenerRetryTimer?.isActive == true) {
+      return;
+    }
+    _conversationListenerRetryTimer = Timer(
+      _messageCoreAcquireRetryDelay,
+      () {
+        _conversationListenerRetryTimer = null;
+        unawaited(
+          _enqueueRealtimeLifecycle(
+            () => _ensureConversationListenerAttached(identity),
+          ),
+        );
+      },
+    );
   }
 
   bool _isCurrentRealtimeIdentity(SessionIdentity? identity) {
@@ -1291,6 +1445,8 @@ class ConversationSyncService {
   Future<void> _detachRealtimeSdkListeners() async {
     _messageListenerRetryTimer?.cancel();
     _messageListenerRetryTimer = null;
+    _conversationListenerRetryTimer?.cancel();
+    _conversationListenerRetryTimer = null;
     _messageRecoveryTimer?.cancel();
     _messageRecoveryTimer = null;
     final recovery = _messageRecoveryInFlight;
@@ -1302,6 +1458,7 @@ class ConversationSyncService {
     _messageRecoveryWorker = null;
     final conversationListener = _listener;
     _listener = null;
+    _conversationListenerAttached = false;
     final conversationAttach = _conversationListenerAttachInFlight;
     if (conversationAttach != null) {
       try {

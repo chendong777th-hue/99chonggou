@@ -28,14 +28,26 @@ class OutgoingMessageSendQueue {
     final previous =
         _tailByConversation[conversationKey] ?? Future<void>.value();
     final queued = previous.catchError((_) {}).then((_) => action());
-    _tailByConversation[conversationKey] =
-        queued.then((_) {}, onError: (_) {});
+    late final Future<void> tail;
+    tail = queued.then<void>((_) {}, onError: (_) {});
+    _tailByConversation[conversationKey] = tail;
+    unawaited(tail.whenComplete(() {
+      if (identical(_tailByConversation[conversationKey], tail)) {
+        _tailByConversation.remove(conversationKey);
+      }
+    }));
     return queued;
+  }
+
+  /// Releases completed tails at an account boundary. In-flight SDK calls
+  /// cannot be cancelled here; their caller must also enforce session identity.
+  void clearSession() {
+    _tailByConversation.clear();
   }
 
   @visibleForTesting
   void resetForTesting() {
-    _tailByConversation.clear();
+    clearSession();
   }
 
   @visibleForTesting

@@ -11,7 +11,10 @@ import 'package:tencent_cloud_chat_demo/src/services/group_local/group_entity_in
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_member_incremental_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_membership_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_incremental_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/group_conversation_unread_helper.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im_session_cache.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/read_outbox_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/read_receipt_outbox_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/local_account_data_purge.dart';
 import 'package:tencent_cloud_chat_demo/src/services/local_message_overlay_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/native_post_home_bootstrap_queue.dart';
@@ -23,6 +26,7 @@ import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_conversa
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_friendship_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_search_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
+import 'package:tencent_cloud_chat_uikit/data_services/message/outgoing_message_send_queue.dart';
 
 /// 登录态写入与登录流程保护（verify / 直接 OK 共用）。
 class AuthSessionService {
@@ -66,6 +70,8 @@ class AuthSessionService {
         SessionIdentityService.instance.resolveCurrentOwnerUserId();
     SessionIdentityService.instance.invalidate(reason: 'begin_login');
     ConversationUnreadClearService.clearSession();
+    GroupConversationUnreadHelper.clearSession();
+    OutgoingMessageSendQueue.instance.clearSession();
     LocalMessageOverlayStore.instance.invalidateScope();
     final previousOwner = await previousOwnerFuture;
     NativePostHomeBootstrapQueue.instance.reset(reason: 'begin_login');
@@ -86,6 +92,8 @@ class AuthSessionService {
     await GroupNoticeIncrementalSyncService.instance.clearSession();
     await GroupMemberIncrementalSyncService.instance.clearSession();
     if (previousOwner.isNotEmpty) {
+      await ConversationReadOutboxStore.instance.clearOwner(previousOwner);
+      await ReadReceiptOutboxStore.instance.clearOwner(previousOwner);
       await LocalAccountDataPurge.instance.purgeOwnerDisk(previousOwner);
     }
     await ApiClient.instance.clearToken();

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
@@ -21,6 +22,30 @@ import 'package:tencent_cloud_chat_uikit/data_services/message/message_services.
 typedef ImAdvancedEventSink = FutureOr<void> Function(
   EventEnvelope<dynamic> event,
 );
+
+typedef ImAdvancedIngestFailureSink = void Function(
+  ImIngressDraft<dynamic> draft,
+  Object error,
+  StackTrace stackTrace, {
+  required int attempt,
+  required bool dropped,
+});
+
+class _FailedIngressDraft {
+  const _FailedIngressDraft({
+    required this.draft,
+    required this.error,
+    required this.stackTrace,
+    required this.attempt,
+    required this.nextAttemptAtMs,
+  });
+
+  final ImIngressDraft<dynamic> draft;
+  final Object error;
+  final StackTrace stackTrace;
+  final int attempt;
+  final int nextAttemptAtMs;
+}
 
 class ImMessageRevokedEvent {
   const ImMessageRevokedEvent({
@@ -57,6 +82,7 @@ class TencentAdvancedMessageAdapter {
     required this.accountGeneration,
     required this.domainGeneration,
     required this.onEvent,
+    this.onIngestFailure,
   });
 
   final MessageService messageService;
@@ -65,12 +91,28 @@ class TencentAdvancedMessageAdapter {
   final int accountGeneration;
   final int domainGeneration;
   final ImAdvancedEventSink onEvent;
+  final ImAdvancedIngestFailureSink? onIngestFailure;
 
   V2TimAdvancedMsgListener? _listener;
   Future<void>? _registerInFlight;
   bool _registered = false;
+  static const int _failedIngressCap = 512;
+  static const int _failedIngressBatchSize = 32;
+  static const int _failedIngressAttemptLimit = 10;
+  final LinkedHashMap<String, _FailedIngressDraft> _failedIngress =
+      LinkedHashMap<String, _FailedIngressDraft>();
+  Timer? _failedIngressRetryTimer;
+  bool _failedIngressDrainActive = false;
+  int _ingestFailureCount = 0;
+  int _ingestDroppedCount = 0;
 
   bool get isRegistered => _registered;
+
+  int get ingestFailureCount => _ingestFailureCount;
+
+  int get ingestDroppedCount => _ingestDroppedCount;
+
+  int get pendingFailedIngressCount => _failedIngress.length;
 
   Future<void> register() async {
     final pending = _registerInFlight;
@@ -108,6 +150,9 @@ class TencentAdvancedMessageAdapter {
     final listener = _listener;
     _listener = null;
     _registered = false;
+    _failedIngressRetryTimer?.cancel();
+    _failedIngressRetryTimer = null;
+    _failedIngress.clear();
     if (listener == null) return;
     await messageService.removeAdvancedMsgListener(listener: listener);
   }
@@ -352,15 +397,164 @@ class TencentAdvancedMessageAdapter {
   }
 
   void _submit<T>(ImIngressDraft<T> draft) {
-    unawaited(() async {
-      try {
-        final result = await ingress.append(draft);
-        await onEvent(result.event);
-      } catch (_) {
-        // Listener callbacks cannot report a Future. The next SDK/history
-        // boundary replay remains the recovery path for a failed append.
+    unawaited(_attemptSubmit(draft, attempt: 0));
+  }
+
+  Future<void> _attemptSubmit<T>(
+    ImIngressDraft<T> draft, {
+    required int attempt,
+  }) async {
+    try {
+      final result = await ingress.append(draft);
+      await onEvent(result.event);
+      _failedIngress.remove(_failedIngressKey(draft));
+    } catch (error, stackTrace) {
+      _retainFailedIngress(
+        draft,
+        error: error,
+        stackTrace: stackTrace,
+        attempt: attempt + 1,
+      );
+    }
+  }
+
+  void _retainFailedIngress(
+    ImIngressDraft<dynamic> draft, {
+    required Object error,
+    required StackTrace stackTrace,
+    required int attempt,
+  }) {
+    _ingestFailureCount++;
+    final terminal = attempt >= _failedIngressAttemptLimit;
+    _reportIngestFailure(
+      draft,
+      error,
+      stackTrace,
+      attempt: attempt,
+      dropped: terminal,
+    );
+    if (terminal || _listener == null) {
+      if (terminal) _ingestDroppedCount++;
+      return;
+    }
+
+    final key = _failedIngressKey(draft);
+    _failedIngress.remove(key);
+    if (_failedIngress.length >= _failedIngressCap) {
+      final evictedKey = _evictionCandidateKey();
+      final evicted = _failedIngress.remove(evictedKey);
+      if (evicted != null) {
+        _ingestDroppedCount++;
+        _reportIngestFailure(
+          evicted.draft,
+          evicted.error,
+          evicted.stackTrace,
+          attempt: evicted.attempt,
+          dropped: true,
+        );
       }
-    }());
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _failedIngress[key] = _FailedIngressDraft(
+      draft: draft,
+      error: error,
+      stackTrace: stackTrace,
+      attempt: attempt,
+      nextAttemptAtMs: now + _retryBackoffMs(attempt),
+    );
+    _scheduleFailedIngressDrain();
+  }
+
+  String _evictionCandidateKey() {
+    for (final entry in _failedIngress.entries) {
+      if (entry.value.draft.recoveryMode != ImRecoveryMode.commandArguments) {
+        return entry.key;
+      }
+    }
+    return _failedIngress.keys.first;
+  }
+
+  void _scheduleFailedIngressDrain() {
+    if (_listener == null ||
+        _failedIngress.isEmpty ||
+        _failedIngressDrainActive) {
+      return;
+    }
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var earliest = _failedIngress.values.first.nextAttemptAtMs;
+    for (final pending in _failedIngress.values.skip(1)) {
+      if (pending.nextAttemptAtMs < earliest) {
+        earliest = pending.nextAttemptAtMs;
+      }
+    }
+    final waitMs = earliest > now ? earliest - now : 0;
+    _failedIngressRetryTimer?.cancel();
+    _failedIngressRetryTimer = Timer(
+      Duration(milliseconds: waitMs),
+      () => unawaited(_drainFailedIngress()),
+    );
+  }
+
+  Future<void> _drainFailedIngress() async {
+    if (_listener == null || _failedIngressDrainActive) return;
+    _failedIngressDrainActive = true;
+    _failedIngressRetryTimer = null;
+    try {
+      final now = DateTime.now().millisecondsSinceEpoch;
+      final due = _failedIngress.entries
+          .where((entry) => entry.value.nextAttemptAtMs <= now)
+          .take(_failedIngressBatchSize)
+          .toList(growable: false);
+      for (final entry in due) {
+        if (_listener == null) return;
+        final current = _failedIngress[entry.key];
+        if (!identical(current, entry.value)) continue;
+        _failedIngress.remove(entry.key);
+        await _attemptSubmit(
+          entry.value.draft,
+          attempt: entry.value.attempt,
+        );
+      }
+    } finally {
+      _failedIngressDrainActive = false;
+      _scheduleFailedIngressDrain();
+    }
+  }
+
+  void _reportIngestFailure(
+    ImIngressDraft<dynamic> draft,
+    Object error,
+    StackTrace stackTrace, {
+    required int attempt,
+    required bool dropped,
+  }) {
+    debugPrint(
+      'CHAT_INGRESS_FAILURE kind=${draft.kind.name} '
+      'event=${_shortHash(draft.eventId)} attempt=$attempt dropped=$dropped '
+      'errorType=${error.runtimeType}',
+    );
+    try {
+      onIngestFailure?.call(
+        draft,
+        error,
+        stackTrace,
+        attempt: attempt,
+        dropped: dropped,
+      );
+    } catch (callbackError) {
+      debugPrint(
+        'CHAT_INGRESS_FAILURE '
+        'callbackErrorType=${callbackError.runtimeType}',
+      );
+    }
+  }
+
+  String _failedIngressKey(ImIngressDraft<dynamic> draft) =>
+      '${draft.ownerUserId}|${draft.eventNamespace}|${draft.eventId}';
+
+  int _retryBackoffMs(int attempt) {
+    final exponent = attempt > 6 ? 6 : attempt;
+    return (1 << exponent) * 250;
   }
 
   AccountScopedConversationKey? _scopeForMessage(V2TimMessage message) {
@@ -439,3 +633,6 @@ bool _isAdminRevokeReason(String reason) {
   if (normalized.isEmpty) return false;
   return normalized.contains('admin') || normalized.contains('groupowner');
 }
+
+String _shortHash(String value) =>
+    sha256.convert(utf8.encode(value)).toString().substring(0, 12);

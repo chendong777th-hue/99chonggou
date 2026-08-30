@@ -83,13 +83,20 @@ class RedPacketClaimNoticeSender {
           }
           continue;
         }
-        sentOk = await ChatExternalMessageSender.sendCreatedMessage(
+        final sendResult =
+            await ChatExternalMessageSender.sendCreatedMessageDetailed(
           messageInfo: created.data!.messageInfo,
           receiverUserId: group.isEmpty ? peer : '',
           groupId: group,
           reason: 'red_packet_claim_notice',
           isExcludedFromUnreadCount: true,
         );
+        sentOk = sendResult.mayHaveBeenSent;
+        if (sendResult.state == ExternalMessageSendState.outcomeUnknown) {
+          debugPrint(
+            'RedPacketClaimNoticeSender outcome unknown; wait for adoption',
+          );
+        }
         if (!sentOk && attempt == 0) {
           await Future<void>.delayed(const Duration(milliseconds: 350));
         }

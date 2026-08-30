@@ -102,6 +102,69 @@ void main() {
       );
     });
 
+    test('lists only owner-scoped recoverable Outboxes in stable order',
+        () async {
+      final store = InMemoryImIngressStore();
+      final persistence = Im05Persistence(store: store);
+      const rows = <ImOutboxRecord>[
+        ImOutboxRecord(
+          operationId: 'prepared-newer',
+          ownerUserId: 'alice',
+          conversationId: 'c2c_bob',
+          clientCorrelationId: 'corr-1',
+          messageType: 1,
+          payloadReference: '{}',
+          payloadHash: 'hash-1',
+          state: ImOutboxState.prepared,
+          createdAtMs: 10,
+          updatedAtMs: 30,
+        ),
+        ImOutboxRecord(
+          operationId: 'intent-older',
+          ownerUserId: 'alice',
+          conversationId: 'c2c_bob',
+          clientCorrelationId: 'corr-2',
+          messageType: 1,
+          payloadReference: '{}',
+          payloadHash: 'hash-2',
+          state: ImOutboxState.dispatchIntent,
+          createdAtMs: 10,
+          updatedAtMs: 20,
+        ),
+        ImOutboxRecord(
+          operationId: 'other-owner',
+          ownerUserId: 'mallory',
+          conversationId: 'c2c_bob',
+          clientCorrelationId: 'corr-3',
+          messageType: 1,
+          payloadReference: '{}',
+          payloadHash: 'hash-3',
+          state: ImOutboxState.prepared,
+          createdAtMs: 10,
+          updatedAtMs: 10,
+        ),
+      ];
+      await store.transaction<void>((transaction) async {
+        for (final row in rows) {
+          await transaction.insertOutboxIfAbsent(row);
+        }
+      });
+
+      final recovered = await persistence.listOutboxesForRecovery(
+        ownerUserId: 'alice',
+        states: const <ImOutboxState>[
+          ImOutboxState.prepared,
+          ImOutboxState.dispatchIntent,
+        ],
+        limit: 2,
+      );
+
+      expect(
+        recovered.map((row) => row.operationId),
+        <String>['intent-older', 'prepared-newer'],
+      );
+    });
+
     test('replays each commit stage idempotently', () async {
       final store = InMemoryImIngressStore();
       final lease = await _acquire(store, nowMs: 10);
@@ -375,6 +438,122 @@ void main() {
       );
       expect(stillUnknown.decision, ImOutboxDispatchDecision.outcomeUnknown);
       expect(stillUnknown.canDispatch, isFalse);
+    });
+
+    test('provider evidence resolves OutcomeUnknown and completes projection',
+        () async {
+      final store = InMemoryImIngressStore();
+      final lease = await _acquire(store, nowMs: 10);
+      final persistence = Im05Persistence(store: store);
+      await persistence.prepareOutbox(
+        main: _mainOutbox(),
+        recoveryCopy: _recoveryCopy(),
+        leaseOwnerId: lease.leaseOwnerId,
+        fencingToken: lease.fencingToken,
+        nowMs: 11,
+      );
+      await persistence.recordDispatchIntent(
+        ownerUserId: 'alice',
+        operationId: 'operation-1',
+        dispatchAttemptId: 'attempt-1',
+        leaseOwnerId: lease.leaseOwnerId,
+        fencingToken: lease.fencingToken,
+        nowMs: 12,
+      );
+      expect(
+        await persistence.recordOutcomeUnknown(
+          ownerUserId: 'alice',
+          operationId: 'operation-1',
+          leaseOwnerId: lease.leaseOwnerId,
+          fencingToken: lease.fencingToken,
+          nowMs: 13,
+        ),
+        isTrue,
+      );
+
+      expect(
+        await persistence.adoptOutboxProviderSucceeded(
+          ownerUserId: 'alice',
+          operationId: 'operation-1',
+          clientCorrelationId: 'corr-1',
+          conversationId: 'c2c_bob',
+          payloadHash: 'payload-hash',
+          leaseOwnerId: lease.leaseOwnerId,
+          fencingToken: lease.fencingToken,
+          nowMs: 14,
+          sdkLocalId: 'local-1',
+          serverMsgId: 'server-1',
+        ),
+        isTrue,
+      );
+      expect(
+        await persistence.completeOutboxProjection(
+          ownerUserId: 'alice',
+          operationId: 'operation-1',
+          leaseOwnerId: lease.leaseOwnerId,
+          fencingToken: lease.fencingToken,
+          nowMs: 15,
+        ),
+        isTrue,
+      );
+      final completed = await persistence.recoverOutbox(
+        ownerUserId: 'alice',
+        operationId: 'operation-1',
+      );
+      expect(completed.main?.state, ImOutboxState.completed);
+      expect(
+        completed.recoveryCopy?.state,
+        ImOutboxCopyState.reconciled,
+      );
+      expect(completed.main?.serverMsgId, 'server-1');
+    });
+
+    test('provider evidence rejects a correlation or payload mismatch',
+        () async {
+      final store = InMemoryImIngressStore();
+      final lease = await _acquire(store, nowMs: 10);
+      final persistence = Im05Persistence(store: store);
+      await persistence.prepareOutbox(
+        main: _mainOutbox(),
+        recoveryCopy: _recoveryCopy(),
+        leaseOwnerId: lease.leaseOwnerId,
+        fencingToken: lease.fencingToken,
+        nowMs: 11,
+      );
+      final dispatch = await persistence.recordDispatchIntent(
+        ownerUserId: 'alice',
+        operationId: 'operation-1',
+        dispatchAttemptId: 'attempt-1',
+        leaseOwnerId: lease.leaseOwnerId,
+        fencingToken: lease.fencingToken,
+        nowMs: 12,
+      );
+      await persistence.transitionOutbox(
+        next: dispatch.main!.copyWith(state: ImOutboxState.sending),
+        expectedState: ImOutboxState.dispatchIntent,
+        leaseOwnerId: lease.leaseOwnerId,
+        fencingToken: lease.fencingToken,
+        nowMs: 13,
+      );
+
+      expect(
+        await persistence.adoptOutboxProviderSucceeded(
+          ownerUserId: 'alice',
+          operationId: 'operation-1',
+          clientCorrelationId: 'wrong-correlation',
+          conversationId: 'c2c_bob',
+          payloadHash: 'payload-hash',
+          leaseOwnerId: lease.leaseOwnerId,
+          fencingToken: lease.fencingToken,
+          nowMs: 14,
+        ),
+        isFalse,
+      );
+      final unchanged = await persistence.recoverOutbox(
+        ownerUserId: 'alice',
+        operationId: 'operation-1',
+      );
+      expect(unchanged.main?.state, ImOutboxState.sending);
     });
 
     test('effect ledger claims and finishes idempotently', () async {

@@ -507,5 +507,21 @@ void main() {
       await ConversationLocalStore.instance.clearForOwner(owner);
       ConversationLocalStore.instance.debugOwnerUserId = null;
     });
+
+    test('batch queue does not truncate conversations after 500', () async {
+      final sdkCalls = <String>[];
+      ConversationUnreadClearService.queuedSdkCleanInterval = Duration.zero;
+      ConversationUnreadClearService.sdkCleanOverride = (id) async {
+        sdkCalls.add(id);
+        return V2TimCallback(code: 0, desc: '');
+      };
+      final ids = List<String>.generate(501, (index) => 'c2c_user_$index');
+
+      await ConversationUnreadClearService.enqueueSdkUnreadCleanBatch(ids);
+
+      expect(sdkCalls, hasLength(501));
+      expect(sdkCalls.first, 'c2c_user_0');
+      expect(sdkCalls.last, 'c2c_user_500');
+    });
   });
 }

@@ -763,7 +763,10 @@ class NotificationSettingsService {
         final tipConvId = _conversationIdFromMessage(message);
         if (tipConvId != null && tipConvId.isNotEmpty) {
           unawaited(
-            GroupConversationUnreadHelper.absorbOneUnreadBump(tipConvId),
+            GroupConversationUnreadHelper.absorbOneUnreadBump(
+              tipConvId,
+              effectId: msgKey,
+            ),
           );
         }
       }
@@ -779,7 +782,10 @@ class NotificationSettingsService {
       final tipConvId = _conversationIdFromMessage(message);
       if (tipConvId != null && tipConvId.isNotEmpty) {
         unawaited(
-          GroupConversationUnreadHelper.absorbOneUnreadBump(tipConvId),
+          GroupConversationUnreadHelper.absorbOneUnreadBump(
+            tipConvId,
+            effectId: msgKey,
+          ),
         );
       }
       _traceMsgBanner('skip reason=suppress_tip_unread');
@@ -810,6 +816,7 @@ class NotificationSettingsService {
       if (convId != null && convId.isNotEmpty) {
         GroupConversationUnreadHelper.scheduleClearForSelfOperatedGroupTips(
           convId,
+          effectId: msgKey,
         );
       }
       _traceMsgBanner('skip reason=friend_relationship_change');

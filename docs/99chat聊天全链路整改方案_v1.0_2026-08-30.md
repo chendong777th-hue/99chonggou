@@ -1,5 +1,7 @@
 # 99chat 聊天全链路整改方案 v1.0
 
+> **实施检查点（2026-08-30）**：本方案是整改基线，不代表条目仍处于文中“现状”。发送统一 Outbox、OutcomeUnknown 认领、原生 read/receipt outbox、群提示未读、socket ready、消息/会话 Listener 恢复已完成第一批代码修复；生产门禁和未完成项以 `docs/聊天可靠性第一批修复交接_2026-08-30.md` 为准。
+>
 > 版本：v1.0-remediation-plan
 > 日期：2026-08-30
 > 对照基线：`D:\bf\99chat_chat_full_chain_post_refactor_audit_v1.1.md`（v1.1-full-audit 2026-08-30）

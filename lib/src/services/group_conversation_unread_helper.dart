@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
@@ -14,10 +15,25 @@ import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 class GroupConversationUnreadHelper {
   GroupConversationUnreadHelper._();
 
+  static const int _effectLedgerCap = 512;
+  static final LinkedHashSet<String> _absorbedEffectIds =
+      LinkedHashSet<String>();
+  static final Set<String> _absorbingEffectIds = <String>{};
+
   /// 隐藏/静默 tip 被 SDK 计入未读时，本地扣回 1（不整会话清零，避免误伤真实未读）。
-  static Future<void> absorbOneUnreadBump(String conversationID) async {
+  static Future<void> absorbOneUnreadBump(
+    String conversationID, {
+    String? effectId,
+  }) async {
     final id = conversationID.trim();
     if (id.isEmpty) {
+      return;
+    }
+    final rawEffect = effectId?.trim() ?? '';
+    final effectKey = rawEffect.isEmpty ? '' : '$id|$rawEffect';
+    if (effectKey.isNotEmpty &&
+        (_absorbedEffectIds.contains(effectKey) ||
+            !_absorbingEffectIds.add(effectKey))) {
       return;
     }
     try {
@@ -38,9 +54,24 @@ class GroupConversationUnreadHelper {
       ConversationUnreadAggregate.instance.scheduleRefresh(
         reason: 'absorb_tip_unread',
       );
+      if (effectKey.isNotEmpty) {
+        _absorbedEffectIds.add(effectKey);
+        while (_absorbedEffectIds.length > _effectLedgerCap) {
+          _absorbedEffectIds.remove(_absorbedEffectIds.first);
+        }
+      }
     } catch (e) {
       debugPrint('absorb group tip unread bump failed: $e');
+    } finally {
+      if (effectKey.isNotEmpty) {
+        _absorbingEffectIds.remove(effectKey);
+      }
     }
+  }
+
+  static void clearSession() {
+    _absorbedEffectIds.clear();
+    _absorbingEffectIds.clear();
   }
 
   static Future<void> clearConversationUnread(
@@ -77,35 +108,34 @@ class GroupConversationUnreadHelper {
   static void scheduleClearAfterGroupCreate(
     String conversationID, {
     V2TimConversation? conversation,
+    String? effectId,
   }) {
-    scheduleClearRepeatedly(conversationID, conversation: conversation);
+    scheduleAbsorbOnce(conversationID, effectId: effectId);
   }
 
   /// 本人操作的群系统提示（邀请/踢人等）到达后，SDK 可能误增未读，延迟补清。
   static void scheduleClearForSelfOperatedGroupTips(
     String conversationID, {
     V2TimConversation? conversation,
+    String? effectId,
   }) {
-    scheduleClearRepeatedly(conversationID, conversation: conversation);
+    scheduleAbsorbOnce(conversationID, effectId: effectId);
   }
 
-  static void scheduleClearRepeatedly(
+  /// Wait once for the SDK unread snapshot, then absorb exactly one known
+  /// silent-tip effect. Repeated whole-conversation clears can consume real
+  /// messages that arrive during the delay window.
+  static void scheduleAbsorbOnce(
     String conversationID, {
-    V2TimConversation? conversation,
+    String? effectId,
+    Duration delay = const Duration(milliseconds: 600),
   }) {
     final id = conversationID.trim();
     if (id.isEmpty) {
       return;
     }
-    unawaited(clearConversationUnread(id, conversation: conversation));
-    for (final delay in const [
-      Duration(milliseconds: 600),
-      Duration(milliseconds: 1500),
-      Duration(milliseconds: 3000),
-    ]) {
-      Future<void>.delayed(delay, () {
-        unawaited(clearConversationUnread(id));
-      });
-    }
+    Future<void>.delayed(delay, () {
+      unawaited(absorbOneUnreadBump(id, effectId: effectId));
+    });
   }
 }

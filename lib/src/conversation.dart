@@ -3015,7 +3015,7 @@ class _ConversationState extends State<Conversation> {
         'embedded': widget.onConversationChanged != null,
       },
     );
-    ConversationUnreadClearService.clearLocalForOpenFast(
+    await ConversationUnreadClearService.clearLocalForOpenFast(
       conversation: selectedConv,
       markViewModelReadLocally: _controller.model.markConversationReadLocally,
     );

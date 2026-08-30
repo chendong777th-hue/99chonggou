@@ -104,13 +104,21 @@ class WalletCardImSender {
         return false;
       }
 
-      final ok = await ChatExternalMessageSender.sendCreatedMessage(
+      final sendResult =
+          await ChatExternalMessageSender.sendCreatedMessageDetailed(
         messageInfo: msg,
         receiverUserId: target.receiverUserId,
         groupId: target.groupId,
         reason: 'wallet_card_sent',
       );
-      if (!ok) {
+      if (sendResult.state == ExternalMessageSendState.outcomeUnknown) {
+        debugPrint(
+          'wallet-card outcome unknown; keep pending for adoption '
+          'clientOrderId=$clientOrderId',
+        );
+        return true;
+      }
+      if (!sendResult.succeeded) {
         debugPrint(
           'wallet-card sendMessage failed clientOrderId=$clientOrderId '
           'group=${target.groupId} peer=${target.receiverUserId}',

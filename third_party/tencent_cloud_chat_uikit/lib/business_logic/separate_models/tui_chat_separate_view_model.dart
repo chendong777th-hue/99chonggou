@@ -17,6 +17,8 @@ import 'package:tencent_cloud_chat_uikit/business_logic/mobile_async_commit_guar
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/contracts/contracts.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/outgoing_send_coordinator.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/read_receipt_outbox_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_sdk/enum/get_group_message_read_member_list_filter.dart';
 import 'package:tencent_cloud_chat_sdk/enum/group_member_filter_enum.dart';
 import 'package:tencent_cloud_chat_sdk/enum/group_member_role.dart';
@@ -337,6 +339,8 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
   final Set<String> _cancelledOutgoingMediaIds = <String>{};
   Map<String, V2TimMessage> _readReceiptMap = {};
   Timer? _readReceiptFlushTimer;
+  int _readReceiptRetryCount = 0;
+  static const int _readReceiptRetryLimit = 6;
   Timer? _groupMarkReadDebounce;
   int _chatOpenGeneration = 0;
   Future<void>? _openProfileEnrichmentInFlight;
@@ -4100,10 +4104,14 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       return;
     }
     _readReceiptMap[message.msgID!] = message;
+    _scheduleReadReceiptFlush(const Duration(milliseconds: 300));
+  }
+
+  void _scheduleReadReceiptFlush(Duration delay) {
     final generation = _chatOpenGeneration;
     final scheduledConversationID = conversationID;
     _readReceiptFlushTimer?.cancel();
-    _readReceiptFlushTimer = Timer(const Duration(milliseconds: 300), () {
+    _readReceiptFlushTimer = Timer(delay, () {
       if (!_isChatGenerationCurrent(generation, scheduledConversationID)) {
         return;
       }
@@ -4112,27 +4120,95 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
       // retain an ever-growing receipt set and rescan it on every flush.
       final batch = _readReceiptMap.values.toList(growable: false);
       _readReceiptMap.clear();
-      _setMsgReadReceipt(batch);
+      unawaited(_setMsgReadReceipt(
+        batch,
+        generation: generation,
+        scheduledConversationID: scheduledConversationID,
+      ));
     });
   }
 
-  _setMsgReadReceipt(List<V2TimMessage> messageList) async {
+  Future<void> _setMsgReadReceipt(
+    List<V2TimMessage> messageList, {
+    required int generation,
+    required String scheduledConversationID,
+  }) async {
     if (!_canUseReadReceipt) {
       _readReceiptMap.clear();
       return;
     }
     final msgIDList = List<String>.empty(growable: true);
+    final pending = <String, V2TimMessage>{};
     for (var item in messageList) {
       final isSelf = item.isSelf ?? true;
       final needReadReceipt = item.needReadReceipt ?? false;
       final isRead = item.isRead ?? false;
       if (!isRead && !isSelf && needReadReceipt && item.msgID != null) {
-        msgIDList.add(item.msgID!);
-        item.needReadReceipt = false;
+        final msgID = item.msgID!;
+        msgIDList.add(msgID);
+        pending[msgID] = item;
       }
     }
-    if (msgIDList.isNotEmpty) {
-      sendMessageReadReceipts(msgIDList);
+    if (msgIDList.isEmpty) return;
+
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) {
+      for (final entry in pending.entries) {
+        _readReceiptMap.putIfAbsent(entry.key, () => entry.value);
+      }
+      return;
+    }
+    try {
+      await ReadReceiptOutboxStore.instance.enqueue(
+        ownerUserId: identity.ownerUserId,
+        messageIds: msgIDList,
+      );
+    } catch (_) {
+      // Do not make an untracked SDK call. Restore the batch and retry after
+      // the durable store becomes available.
+      for (final entry in pending.entries) {
+        _readReceiptMap.putIfAbsent(entry.key, () => entry.value);
+      }
+      _scheduleReadReceiptFlush(const Duration(seconds: 2));
+      return;
+    }
+
+    dynamic result;
+    try {
+      result = await sendMessageReadReceipts(msgIDList);
+    } catch (_) {
+      result = null;
+    }
+    if (!_isChatGenerationCurrent(generation, scheduledConversationID)) {
+      return;
+    }
+    if (!SessionIdentityService.instance.isCurrent(identity)) {
+      return;
+    }
+    if (result?.code == 0) {
+      await ReadReceiptOutboxStore.instance.acknowledge(
+        ownerUserId: identity.ownerUserId,
+        messageIds: msgIDList,
+      );
+      for (final item in pending.values) {
+        item.needReadReceipt = false;
+      }
+      _readReceiptRetryCount = 0;
+      return;
+    }
+
+    // The SDK did not acknowledge the batch. Restore it instead of clearing
+    // needReadReceipt before the call and permanently losing the receipt.
+    for (final entry in pending.entries) {
+      _readReceiptMap.putIfAbsent(entry.key, () => entry.value);
+    }
+    if (_readReceiptRetryCount < _readReceiptRetryLimit) {
+      _readReceiptRetryCount++;
+      final exponent = _readReceiptRetryCount > 5
+          ? 4
+          : _readReceiptRetryCount - 1;
+      final seconds = 1 << exponent;
+      _scheduleReadReceiptFlush(Duration(seconds: seconds));
     }
   }
 
@@ -8516,6 +8592,7 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     globalModel.removeRoamingSyncListener(_onRoamingSyncFinished);
     _readReceiptFlushTimer?.cancel();
     _readReceiptFlushTimer = null;
+    _readReceiptRetryCount = 0;
     _fillTowardOlderHistoryResumeTimer?.cancel();
     _fillTowardOlderHistoryResumeTimer = null;
     _groupMarkReadDebounce?.cancel();

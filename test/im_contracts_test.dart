@@ -111,6 +111,24 @@ class _FakeAdvancedMessageService implements MessageService {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+class _FailingOnceImIngressStore implements ImIngressStore {
+  _FailingOnceImIngressStore(this.delegate);
+
+  final InMemoryImIngressStore delegate;
+  int failuresRemaining = 1;
+
+  @override
+  Future<T> transaction<T>(
+    Future<T> Function(ImIngressTransaction transaction) action,
+  ) {
+    if (failuresRemaining > 0) {
+      failuresRemaining--;
+      return Future<T>.error(StateError('injected ingress failure'));
+    }
+    return delegate.transaction<T>(action);
+  }
+}
+
 AccountScopedConversationKey _c2c({String owner = 'alice'}) {
   return AccountScopedConversationKey(
     ownerUserId: owner,
@@ -1113,6 +1131,55 @@ void main() {
       expect(service.removeCalls, 1);
       expect(service.listener, isNull);
       expect(adapter.isRegistered, isFalse);
+    });
+
+    test('listener ingress failure is reported and retried, not swallowed',
+        () async {
+      final service = _FakeAdvancedMessageService();
+      final memory = InMemoryImIngressStore();
+      final store = _FailingOnceImIngressStore(memory);
+      final delivered = Completer<EventEnvelope<dynamic>>();
+      var reported = 0;
+      final adapter = TencentAdvancedMessageAdapter(
+        messageService: service,
+        ingress: DurableIngressGateway(store: store),
+        ownerUserId: 'alice',
+        accountGeneration: 2,
+        domainGeneration: 3,
+        onEvent: (event) {
+          if (!delivered.isCompleted) delivered.complete(event);
+        },
+        onIngestFailure: (
+          draft,
+          error,
+          stackTrace, {
+          required int attempt,
+          required bool dropped,
+        }) {
+          reported++;
+          expect(draft.eventId, 'received:listener-retry-1');
+          expect(dropped, isFalse);
+        },
+      );
+      await adapter.register();
+      final message = V2TimMessage.fromJson(<String, Object?>{
+        'message_msg_id': 'listener-retry-1',
+        'message_sender': 'bob',
+        'message_conv_type': ConversationType.V2TIM_C2C,
+        'message_conv_id': 'bob',
+        'message_risk_type_identified': 0,
+        'message_elem_array': <Object?>[],
+      });
+
+      service.listener!.onRecvNewMessage(message);
+      await delivered.future.timeout(const Duration(seconds: 2));
+
+      expect(reported, 1);
+      expect(adapter.ingestFailureCount, 1);
+      expect(adapter.ingestDroppedCount, 0);
+      expect(adapter.pendingFailedIngressCount, 0);
+      expect(memory.inbox, hasLength(1));
+      await adapter.unregister();
     });
 
     test('can retry registration after the SDK rejects the first listener',

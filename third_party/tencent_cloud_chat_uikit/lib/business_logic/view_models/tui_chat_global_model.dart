@@ -682,6 +682,17 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       returnedBounds: returnedBounds,
       proofKind: resolvedProofKind,
     );
+    unawaited(
+      ImOutgoingSendCoordinator.instance
+          .adoptProviderHistory(historyList)
+          .catchError((Object error) {
+        debugPrint(
+          'OUTBOX_HISTORY_ADOPTION_FAILURE '
+          'errorType=${error.runtimeType}',
+        );
+        return 0;
+      }),
+    );
     return result;
   }
 
@@ -8323,6 +8334,8 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     bool? needReadReceipt,
     String? cloudCustomData,
     String? localCustomData,
+    bool recoverPreparedOutbox = false,
+    ValueChanged<ImCoordinatedSendResult>? onCoordinatedResult,
   }) {
     final TUIChatModelTools tools = serviceLocator<TUIChatModelTools>();
     if (messageInfo != null) {
@@ -8360,6 +8373,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         localCustomData: localCustomData,
         isExcludedFromContentModeration:
             messageInfo.isExcludedFromContentModeration ?? false,
+        recoverPreparedOutbox: recoverPreparedOutbox,
         messageInfo: messageInfoWithSender,
         convID: convID,
         setInputField: setInputField,
@@ -8368,6 +8382,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         offlinePushInfo: offlinePushInfo ??
             tools.buildMessagePushInfo(
                 messageInfo, convID, ConvType.values[convType.index]),
+        onCoordinatedResult: onCoordinatedResult,
       );
     }
     return null;
@@ -8589,6 +8604,8 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     String? localCustomData,
     V2TimMessage? messageInfo,
     bool isExcludedFromContentModeration = false,
+    bool recoverPreparedOutbox = false,
+    ValueChanged<ImCoordinatedSendResult>? onCoordinatedResult,
   }) async {
     String receiver = convType == ConvType.c2c ? convID : '';
     String groupID = convType == ConvType.group ? convID : '';
@@ -8633,10 +8650,12 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
             }
           }),
       persistOutbox: isEditStatusMessage != true,
+      recoverPreparedOutbox: recoverPreparedOutbox,
       onSyncMsgID: (syncMsgID) {
         bindOutgoingSyncMsgId(convID, id, syncMsgID);
       },
     );
+    onCoordinatedResult?.call(coordinatedSend);
     final sendMsgRes = coordinatedSend.sdkResult;
     // IM-08: when the SDK Future resolves OutcomeUnknown, the dispatch path
     // cannot prove the provider accepted or rejected the operation. The

@@ -6,6 +6,7 @@ import 'package:tencent_cloud_chat_demo/src/services/im/contracts/contracts.dart
 import 'package:tencent_cloud_chat_demo/src/services/im/im05_contracts.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/im05_persistence.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/tencent_message_adapter.dart';
+import 'package:tencent_cloud_chat_demo/src/utils/message_conversation_id.dart';
 import 'package:tencent_cloud_chat_sdk/enum/message_elem_type.dart';
 import 'package:tencent_cloud_chat_sdk/enum/message_priority_enum.dart';
 import 'package:tencent_cloud_chat_sdk/enum/offlinePushInfo.dart';
@@ -64,6 +65,7 @@ class ImOutgoingSendCoordinator {
     String? localCustomData,
     bool isExcludedFromContentModeration = false,
     bool persistOutbox = true,
+    bool recoverPreparedOutbox = false,
     void Function(String syncMsgID)? onSyncMsgID,
   }) async {
     final localId = sdkLocalId.trim();
@@ -93,23 +95,85 @@ class ImOutgoingSendCoordinator {
       );
     }
 
+    if (recoverPreparedOutbox && !persistOutbox) {
+      return _blocked(
+        fallbackMessage: fallbackMessage,
+        desc: 'prepared recovery requires durable Outbox',
+      );
+    }
     final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final persistence = Im05Persistence(store: context.store);
+    final operationId = _operationId(scope: scope, sdkLocalId: localId);
+    final clientCorrelationId = _clientCorrelationId(localId);
+    ImOutboxDispatchAssessment? recoveredPrepared;
+    if (recoverPreparedOutbox) {
+      recoveredPrepared = await persistence.assessOutboxForDispatch(
+        ownerUserId: context.ownerUserId,
+        operationId: operationId,
+        leaseOwnerId: context.lease.leaseOwnerId,
+        fencingToken: context.lease.fencingToken,
+        nowMs: nowMs,
+      );
+      final recoveredMain = recoveredPrepared.main;
+      if (!recoveredPrepared.canDispatch ||
+          recoveredMain == null ||
+          recoveredMain.state != ImOutboxState.prepared ||
+          recoveredMain.operationId != operationId ||
+          recoveredMain.clientCorrelationId != clientCorrelationId ||
+          recoveredMain.conversationId != scope.storageKey) {
+        return _blocked(
+          fallbackMessage: fallbackMessage,
+          usedOutbox: true,
+          decision: recoveredPrepared.decision,
+          outcomeUnknown: recoveredPrepared.requiresOutcomeQuery,
+          desc: 'prepared Outbox recovery identity rejected',
+        );
+      }
+    }
     final messageKind = _messageKindFor(fallbackMessage?.elemType);
+    final payloadEnvelope = recoveredPrepared?.main?.payloadReference ??
+        _encodeOutgoingEnvelope(
+          message: fallbackMessage,
+          sdkLocalId: localId,
+          conversationId: conversationId,
+          receiver: receiver,
+          groupID: groupID,
+          priority: priority,
+          onlineUserOnly: onlineUserOnly,
+          isExcludedFromUnreadCount: isExcludedFromUnreadCount,
+          needReadReceipt: needReadReceipt,
+          offlinePushInfo: offlinePushInfo,
+          businessCloudCustomData: businessCloudCustomData,
+          localCustomData: localCustomData,
+          isExcludedFromContentModeration: isExcludedFromContentModeration,
+        );
+    if (persistOutbox && payloadEnvelope == null) {
+      return _blocked(
+        fallbackMessage: fallbackMessage,
+        desc: 'durable outgoing payload is unavailable',
+      );
+    }
+    final payloadFingerprint = sha256
+        .convert(utf8.encode(payloadEnvelope ?? 'sdkLocalId:$localId'))
+        .toString();
+    if (recoveredPrepared != null &&
+        recoveredPrepared.main!.payloadHash != payloadFingerprint) {
+      return _blocked(
+        fallbackMessage: fallbackMessage,
+        usedOutbox: true,
+        decision: ImOutboxDispatchDecision.identityConflict,
+        desc: 'prepared Outbox payload fingerprint rejected',
+      );
+    }
     final identity = OutgoingIdentityContract(
       scope: scope,
-      operationId: _operationId(scope: scope, sdkLocalId: localId),
-      clientCorrelationId: _clientCorrelationId(localId),
+      operationId: operationId,
+      clientCorrelationId: clientCorrelationId,
       messageKind: messageKind,
-      payloadFingerprint: _payloadFingerprint(
-        message: fallbackMessage,
-        sdkLocalId: localId,
-        businessCloudCustomData: businessCloudCustomData,
-        localCustomData: localCustomData,
-      ),
-      createdAtMs: nowMs,
+      payloadFingerprint: payloadFingerprint,
+      createdAtMs: recoveredPrepared?.main?.createdAtMs ?? nowMs,
       sdkLocalId: localId,
     );
-    final persistence = Im05Persistence(store: context.store);
     final sendGeneration = ++_sendOperationGeneration;
 
     if (persistOutbox) {
@@ -119,7 +183,8 @@ class ImOutgoingSendCoordinator {
         conversationId: scope.storageKey,
         clientCorrelationId: identity.clientCorrelationId,
         messageType: fallbackMessage?.elemType ?? messageKind.index,
-        payloadReference: 'sdkLocalId:$localId',
+        payloadReference: payloadEnvelope!,
+        mediaLocalRef: _mediaLocalReference(fallbackMessage),
         payloadHash: identity.payloadFingerprint,
         contentChecksum: identity.payloadFingerprint,
         sdkMessageId: localId,
@@ -135,19 +200,20 @@ class ImOutgoingSendCoordinator {
         messageType: main.messageType,
         recoveryRevision: 1,
         state: ImOutboxCopyState.copyPrepared,
-        payloadReferenceOrCiphertext: 'sdkLocalId:$localId',
+        payloadReferenceOrCiphertext: payloadEnvelope,
         payloadHash: identity.payloadFingerprint,
         checksum: identity.payloadFingerprint,
         sdkLocalId: localId,
         updatedAtMs: nowMs,
       );
-      final prepared = await persistence.prepareOutbox(
-        main: main,
-        recoveryCopy: recovery,
-        leaseOwnerId: context.lease.leaseOwnerId,
-        fencingToken: context.lease.fencingToken,
-        nowMs: nowMs,
-      );
+      final prepared = recoveredPrepared ??
+          await persistence.prepareOutbox(
+            main: main,
+            recoveryCopy: recovery,
+            leaseOwnerId: context.lease.leaseOwnerId,
+            fencingToken: context.lease.fencingToken,
+            nowMs: nowMs,
+          );
       if (!prepared.canDispatch) {
         return _blocked(
           fallbackMessage: fallbackMessage,
@@ -230,11 +296,12 @@ class ImOutgoingSendCoordinator {
     );
 
     final formalIdentity = sdk.data?.identity ?? identity;
-    final callback = V2TimValueCallback<V2TimMessage>(
+    var callback = V2TimValueCallback<V2TimMessage>(
       code: sdk.code ?? (sdk.isSuccess ? 0 : -1),
       desc: sdk.resultDesc ?? '',
       data: sdk.data?.message ?? fallbackMessage,
     );
+    var providerConfirmed = false;
     if (persistOutbox) {
       final now = DateTime.now().millisecondsSinceEpoch;
       if (sdk.isSuccess) {
@@ -249,7 +316,7 @@ class ImOutgoingSendCoordinator {
           resultCode: '${callback.code}',
         );
       } else if (sdk.isOutcomeUnknown) {
-        await persistence.recordOutcomeUnknown(
+        final recorded = await persistence.recordOutcomeUnknown(
           ownerUserId: context.ownerUserId,
           operationId: identity.operationId,
           leaseOwnerId: context.lease.leaseOwnerId,
@@ -257,8 +324,15 @@ class ImOutgoingSendCoordinator {
           nowMs: now,
           resultCode: '${callback.code}',
         );
+        if (!recorded) {
+          providerConfirmed = await _providerAlreadyConfirmed(
+            persistence,
+            ownerUserId: context.ownerUserId,
+            operationId: identity.operationId,
+          );
+        }
       } else {
-        await persistence.recordOutboxSdkFailed(
+        final recorded = await persistence.recordOutboxSdkFailed(
           ownerUserId: context.ownerUserId,
           operationId: identity.operationId,
           leaseOwnerId: context.lease.leaseOwnerId,
@@ -268,7 +342,21 @@ class ImOutgoingSendCoordinator {
           serverMsgId: formalIdentity.serverMsgId,
           resultCode: '${callback.code}',
         );
+        if (!recorded) {
+          providerConfirmed = await _providerAlreadyConfirmed(
+            persistence,
+            ownerUserId: context.ownerUserId,
+            operationId: identity.operationId,
+          );
+        }
       }
+    }
+    if (providerConfirmed) {
+      callback = V2TimValueCallback<V2TimMessage>(
+        code: 0,
+        desc: 'provider evidence confirmed delivery',
+        data: sdk.data?.message ?? fallbackMessage,
+      );
     }
     return ImCoordinatedSendResult(
       sdkResult: callback,
@@ -276,7 +364,7 @@ class ImOutgoingSendCoordinator {
       identity: formalIdentity,
       accountGeneration: context.accountGeneration,
       domainGeneration: context.domainGeneration,
-      outcomeUnknown: sdk.isOutcomeUnknown,
+      outcomeUnknown: sdk.isOutcomeUnknown && !providerConfirmed,
     );
   }
 
@@ -302,7 +390,76 @@ class ImOutgoingSendCoordinator {
     );
   }
 
+  /// Reconciles durable unknown sends from an already-committed history page.
+  /// Only self messages carrying the exact outgoing identity envelope can
+  /// advance an Outbox row.
+  Future<int> adoptProviderHistory(
+    Iterable<V2TimMessage> messages,
+  ) async {
+    final context = await ConversationSyncService.instance
+        .messageCoreLeaseForOutgoingSend();
+    if (context == null) return 0;
+    final persistence = Im05Persistence(store: context.store);
+    var adoptedCount = 0;
+    for (final message in messages) {
+      if (message.isSelf != true) continue;
+      final conversationId = MessageConversationId.fromMessage(
+        message,
+        loginUserId: context.ownerUserId,
+      );
+      if (conversationId == null) continue;
+      final scope = AccountScopedConversationKey.tryParse(
+        ownerUserId: context.ownerUserId,
+        conversationType: conversationId.startsWith('group_')
+            ? ImConversationType.group
+            : ImConversationType.c2c,
+        conversationId: conversationId,
+      );
+      if (scope == null) continue;
+      final outgoing = OutgoingIdentityContract.fromCloudCustomData(
+        message.cloudCustomData,
+        scope: scope,
+      );
+      if (outgoing == null) continue;
+      final adopted = await persistence.adoptOutboxProviderSucceeded(
+        ownerUserId: context.ownerUserId,
+        operationId: outgoing.operationId,
+        clientCorrelationId: outgoing.clientCorrelationId,
+        conversationId: scope.storageKey,
+        payloadHash: outgoing.payloadFingerprint,
+        leaseOwnerId: context.lease.leaseOwnerId,
+        fencingToken: context.lease.fencingToken,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+        sdkLocalId: message.id,
+        serverMsgId: message.msgID,
+      );
+      if (!adopted) continue;
+      final completed = await persistence.completeOutboxProjection(
+        ownerUserId: context.ownerUserId,
+        operationId: outgoing.operationId,
+        leaseOwnerId: context.lease.leaseOwnerId,
+        fencingToken: context.lease.fencingToken,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      if (completed) adoptedCount++;
+    }
+    return adoptedCount;
+  }
+
   int _nextTransientIngressSequence() => ++_transientIngressSequence;
+}
+
+Future<bool> _providerAlreadyConfirmed(
+  Im05Persistence persistence, {
+  required String ownerUserId,
+  required String operationId,
+}) async {
+  final assessment = await persistence.recoverOutbox(
+    ownerUserId: ownerUserId,
+    operationId: operationId,
+  );
+  return assessment.main?.state == ImOutboxState.acknowledged ||
+      assessment.main?.state == ImOutboxState.completed;
 }
 
 ImCoordinatedSendResult _blocked({
@@ -335,26 +492,59 @@ String _operationId({
 String _clientCorrelationId(String sdkLocalId) =>
     hashOutgoingClientCorrelationId(sdkLocalId);
 
-String _payloadFingerprint({
+String? _encodeOutgoingEnvelope({
   required V2TimMessage? message,
   required String sdkLocalId,
+  required String conversationId,
+  required String receiver,
+  required String groupID,
+  required MessagePriorityEnum priority,
+  required bool onlineUserOnly,
+  required bool isExcludedFromUnreadCount,
+  required bool needReadReceipt,
+  required OfflinePushInfo? offlinePushInfo,
   required String? businessCloudCustomData,
   required String? localCustomData,
+  required bool isExcludedFromContentModeration,
 }) {
-  final payload = <String, Object?>{
-    'sdkLocalId': sdkLocalId.trim(),
-    'elemType': message?.elemType,
-    'text': message?.textElem?.text,
-    'custom': message?.customElem?.data,
-    'imagePath': message?.imageElem?.path,
-    'videoPath': message?.videoElem?.videoPath,
-    'soundPath': message?.soundElem?.path,
-    'fileName': message?.fileElem?.fileName,
-    'fileSize': message?.fileElem?.fileSize,
-    'businessCloudCustomData': businessCloudCustomData,
-    'localCustomData': localCustomData,
-  };
-  return sha256.convert(utf8.encode(jsonEncode(payload))).toString();
+  if (message == null) return null;
+  try {
+    return jsonEncode(<String, Object?>{
+      'schemaVersion': 1,
+      'sdkLocalId': sdkLocalId.trim(),
+      'conversationId': conversationId.trim(),
+      'receiver': receiver.trim(),
+      'groupID': groupID.trim(),
+      'priority': priority.index,
+      'onlineUserOnly': onlineUserOnly,
+      'isExcludedFromUnreadCount': isExcludedFromUnreadCount,
+      'needReadReceipt': needReadReceipt,
+      'offlinePushInfo': offlinePushInfo?.toJson(),
+      'businessCloudCustomData': businessCloudCustomData,
+      'localCustomData': localCustomData,
+      'isExcludedFromContentModeration': isExcludedFromContentModeration,
+      // V2TimMessage.fromJson can rebuild the SDK-created local message after
+      // a process restart. Media paths are retained separately as well.
+      'message': message.toJson(),
+    });
+  } catch (_) {
+    return null;
+  }
+}
+
+String? _mediaLocalReference(V2TimMessage? message) {
+  final candidates = <String?>[
+    message?.imageElem?.path,
+    message?.videoElem?.videoPath,
+    message?.videoElem?.snapshotPath,
+    message?.soundElem?.path,
+    message?.fileElem?.path,
+  ];
+  for (final candidate in candidates) {
+    final value = candidate?.trim() ?? '';
+    if (value.isNotEmpty) return value;
+  }
+  return null;
 }
 
 OutgoingMessageKind _messageKindFor(int? elemType) {

@@ -45,6 +45,7 @@ import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_history_trace.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/error_message_converter.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/platform.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'message_web_history_loader_stub.dart'
     if (dart.library.html) 'message_web_history_loader_web.dart';
 import 'outgoing_message_send_queue.dart';
@@ -643,6 +644,13 @@ class MessageServiceImpl extends MessageService {
     bool isExcludedFromContentModeration = false,
     void Function(String syncMsgID)? onSyncMsgID,
   }) async {
+    final sendIdentity = SessionIdentityService.instance.capture();
+    if (sendIdentity.ownerUserId.isEmpty) {
+      return V2TimValueCallback<V2TimMessage>(
+        code: -1,
+        desc: 'send blocked: account identity unavailable',
+      );
+    }
     final toOfficialAccount =
         groupID.isEmpty && _isOfficialAccountUserId(receiver);
     if (toOfficialAccount) {
@@ -653,27 +661,39 @@ class MessageServiceImpl extends MessageService {
     if (needReadReceipt && _looksLikeCommunityGroupId(groupID)) {
       needReadReceipt = false;
     }
-    final convKey = OutgoingMessageSendQueue.conversationKey(
+    final rawConvKey = OutgoingMessageSendQueue.conversationKey(
       receiver: receiver,
       groupID: groupID,
     );
+    final convKey = '${sendIdentity.ownerUserId}|'
+        '${sendIdentity.generation}|$rawConvKey';
     return OutgoingMessageSendQueue.instance.runSerial(
       convKey,
-      () => _sendMessageNow(
-        id: id,
-        receiver: receiver,
-        groupID: groupID,
-        priority: priority,
-        onlineUserOnly: onlineUserOnly,
-        offlinePushInfo: offlinePushInfo,
-        needReadReceipt: needReadReceipt,
-        localCustomData: localCustomData,
-        cloudCustomData: cloudCustomData,
-        isExcludedFromContentModeration: isExcludedFromContentModeration,
-        isExcludedFromUnreadCount: isExcludedFromUnreadCount,
-        toOfficialAccount: toOfficialAccount,
-        onSyncMsgID: onSyncMsgID,
-      ),
+      () {
+        if (!SessionIdentityService.instance.isCurrent(sendIdentity)) {
+          return Future<V2TimValueCallback<V2TimMessage>>.value(
+            V2TimValueCallback<V2TimMessage>(
+              code: -1,
+              desc: 'send blocked: stale account generation',
+            ),
+          );
+        }
+        return _sendMessageNow(
+          id: id,
+          receiver: receiver,
+          groupID: groupID,
+          priority: priority,
+          onlineUserOnly: onlineUserOnly,
+          offlinePushInfo: offlinePushInfo,
+          needReadReceipt: needReadReceipt,
+          localCustomData: localCustomData,
+          cloudCustomData: cloudCustomData,
+          isExcludedFromContentModeration: isExcludedFromContentModeration,
+          isExcludedFromUnreadCount: isExcludedFromUnreadCount,
+          toOfficialAccount: toOfficialAccount,
+          onSyncMsgID: onSyncMsgID,
+        );
+      },
     );
   }
 
@@ -693,7 +713,8 @@ class MessageServiceImpl extends MessageService {
     void Function(String syncMsgID)? onSyncMsgID,
   }) async {
     debugPrint(
-      '[IM_SEND] id=$id receiver=$receiver groupID=$groupID onlineOnly=$onlineUserOnly',
+      '[IM_SEND] target=${groupID.isNotEmpty ? 'group' : 'c2c'} '
+      'onlineOnly=$onlineUserOnly',
     );
     final result =
         await TencentImSDKPlugin.v2TIMManager.getMessageManager().sendMessage(
@@ -717,7 +738,8 @@ class MessageServiceImpl extends MessageService {
             );
     if (result.code != 0) {
       debugPrint(
-        '[IM_SEND_FAIL] id=$id code=${result.code} desc=${result.desc} receiver=$receiver groupID=$groupID',
+        '[IM_SEND_FAIL] target=${groupID.isNotEmpty ? 'group' : 'c2c'} '
+        'code=${result.code}',
       );
       String recommendText =
           ErrorMessageConverter.getErrorMessage(result.code, result.desc);
@@ -735,7 +757,8 @@ class MessageServiceImpl extends MessageService {
           infoRecommendText: recommendText));
     } else {
       debugPrint(
-        '[IM_SEND_DONE] id=$id msgID=${result.data?.msgID} status=${result.data?.status} code=${result.code} seq=${result.data?.seq}',
+        '[IM_SEND_DONE] target=${groupID.isNotEmpty ? 'group' : 'c2c'} '
+        'status=${result.data?.status} code=${result.code}',
       );
     }
     return result;

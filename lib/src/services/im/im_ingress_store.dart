@@ -671,6 +671,27 @@ class _SqliteImIngressTransaction implements ImIngressTransaction {
   }
 
   @override
+  Future<List<ImOutboxRecord>> listOutboxesForRecovery({
+    required String ownerUserId,
+    required List<ImOutboxState> states,
+    required int limit,
+  }) async {
+    if (states.isEmpty || limit <= 0) return const <ImOutboxRecord>[];
+    final placeholders = List<String>.filled(states.length, '?').join(',');
+    final rows = await _db.query(
+      _outboxTable,
+      where: 'owner_user_id = ? AND state IN ($placeholders)',
+      whereArgs: <Object?>[
+        ownerUserId,
+        ...states.map((state) => state.name),
+      ],
+      orderBy: 'updated_at ASC',
+      limit: limit,
+    );
+    return rows.map(imOutboxFromStorageMap).toList(growable: false);
+  }
+
+  @override
   Future<bool> insertOutboxIfAbsent(ImOutboxRecord record) async {
     final inserted = await _db.insert(
       _outboxTable,
@@ -1115,6 +1136,22 @@ class _MemoryImIngressTransaction implements ImIngressTransaction {
   }) async {
     final record = _store.outboxes[operationId];
     return record?.ownerUserId == ownerUserId ? record : null;
+  }
+
+  @override
+  Future<List<ImOutboxRecord>> listOutboxesForRecovery({
+    required String ownerUserId,
+    required List<ImOutboxState> states,
+    required int limit,
+  }) async {
+    if (states.isEmpty || limit <= 0) return const <ImOutboxRecord>[];
+    final allowed = states.toSet();
+    final rows = _store.outboxes.values
+        .where((row) =>
+            row.ownerUserId == ownerUserId && allowed.contains(row.state))
+        .toList(growable: false)
+      ..sort((a, b) => a.updatedAtMs.compareTo(b.updatedAtMs));
+    return rows.take(limit).toList(growable: false);
   }
 
   @override

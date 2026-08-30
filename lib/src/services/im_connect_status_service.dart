@@ -7,6 +7,9 @@ import 'package:provider/provider.dart';
 import 'package:tencent_cloud_chat_demo/src/provider/local_setting.dart';
 import 'package:tencent_cloud_chat_demo/src/services/login_coordinator.dart';
 import 'package:tencent_cloud_chat_demo/src/services/login_state.dart';
+import 'package:tencent_cloud_chat_demo/src/services/conversation_unread_clear_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/read_receipt_outbox_recovery_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/outgoing_outbox_recovery_service.dart';
 import 'package:tencent_cloud_chat_sdk/enum/login_status.dart';
 import 'package:tencent_cloud_chat_sdk/tencent_im_sdk_plugin.dart';
 
@@ -106,6 +109,29 @@ class ImConnectStatusService extends ChangeNotifier {
 
   void _onSdkConnectSuccess({BuildContext? context}) {
     _sdkSocketConnected = true;
+    unawaited(
+      ConversationUnreadClearService.recoverPendingReadOutbox().catchError(
+        (Object error) => debugPrint(
+          'recover conversation read outbox failed '
+          'errorType=${error.runtimeType}',
+        ),
+      ),
+    );
+    unawaited(
+      ReadReceiptOutboxRecoveryService.instance.recoverPending().catchError(
+        (Object error) => debugPrint(
+          'recover read receipt outbox failed '
+          'errorType=${error.runtimeType}',
+        ),
+      ),
+    );
+    unawaited(
+      OutgoingOutboxRecoveryService.instance.recoverPending().catchError(
+        (Object error) => debugPrint(
+          'recover outgoing outbox failed errorType=${error.runtimeType}',
+        ),
+      ),
+    );
     if (_handshakePending) {
       _scheduleHandshakeComplete(context: context);
     } else {
@@ -150,8 +176,10 @@ class ImConnectStatusService extends ChangeNotifier {
     if (!await isImLoggedIn()) {
       return;
     }
-    _sdkSocketConnected = true;
-    _scheduleHandshakeComplete(context: context);
+    // Login state only proves authentication. It does not prove that the SDK
+    // realtime socket is ready, so remain CONNECTING until onConnectSuccess.
+    _setConnectStatus(context, ConnectStatus.connecting);
+    notifyListeners();
   }
 
   void _scheduleHandshakeComplete({BuildContext? context}) {
@@ -231,7 +259,8 @@ class ImConnectStatusService extends ChangeNotifier {
     } catch (_) {}
   }
 
-  /// 冷启动进首页后兜底：登录已成功但 SDK 长时间未回调 onConnectSuccess。
+  /// 冷启动进首页后兜底：登录已成功但 SDK 长时间未回调
+  /// onConnectSuccess 时仍保持连接中，禁止伪造 socket ready。
   static Future<void> reconcileStaleConnectingAfterColdStart(
     BuildContext? context, {
     Duration gracePeriod = const Duration(seconds: 12),
@@ -241,8 +270,10 @@ class ImConnectStatusService extends ChangeNotifier {
     if (isSocketReady && !isHandshakePending) return;
     try {
       if (!await isImLoggedIn()) return;
-      instance._sdkSocketConnected = true;
-      instance._completeHandshake(context: context);
+      instance._sdkSocketConnected = false;
+      instance._handshakePending = true;
+      _setConnectStatus(context, ConnectStatus.connecting);
+      instance.notifyListeners();
     } catch (_) {}
   }
 

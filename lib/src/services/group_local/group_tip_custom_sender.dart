@@ -127,13 +127,20 @@ class GroupTipCustomSender {
           }
           continue;
         }
-        sentOk = await ChatExternalMessageSender.sendCreatedMessage(
+        final sendResult =
+            await ChatExternalMessageSender.sendCreatedMessageDetailed(
           messageInfo: created.data!.messageInfo,
           receiverUserId: '',
           groupId: id,
           reason: 'group_tip_$normalizedAction',
           isExcludedFromUnreadCount: true,
         );
+        sentOk = sendResult.mayHaveBeenSent;
+        if (sendResult.state == ExternalMessageSendState.outcomeUnknown) {
+          debugPrint(
+            'GroupTipCustomSender outcome unknown; wait for adoption',
+          );
+        }
         if (!sentOk && attempt == 0) {
           await Future<void>.delayed(const Duration(milliseconds: 350));
         }

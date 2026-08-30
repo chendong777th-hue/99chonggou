@@ -8,19 +8,29 @@ enum WalletCardImReject {
 class WalletCardImSendOutcome {
   final bool delivered;
   final WalletCardImReject reject;
+  final bool outcomeUnknown;
 
   const WalletCardImSendOutcome.success()
       : delivered = true,
-        reject = WalletCardImReject.none;
+        reject = WalletCardImReject.none,
+        outcomeUnknown = false;
 
   const WalletCardImSendOutcome.failed()
       : delivered = false,
-        reject = WalletCardImReject.none;
+        reject = WalletCardImReject.none,
+        outcomeUnknown = false;
+
+  const WalletCardImSendOutcome.unknown()
+      : delivered = false,
+        reject = WalletCardImReject.none,
+        outcomeUnknown = true;
 
   const WalletCardImSendOutcome.reject(this.reject)
-      : delivered = reject == WalletCardImReject.duplicate;
+      : delivered = reject == WalletCardImReject.duplicate,
+        outcomeUnknown = false;
 
-  bool get shouldRetry => !delivered && reject != WalletCardImReject.invalid;
+  bool get shouldRetry =>
+      !delivered && !outcomeUnknown && reject != WalletCardImReject.invalid;
 }
 
 class WalletCardSendFailure {

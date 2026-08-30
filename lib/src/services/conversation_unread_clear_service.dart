@@ -6,6 +6,7 @@ import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversa
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_unread_aggregate.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_unread_trace.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/read_outbox_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/services/web_read_service.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_callback.dart'
@@ -87,7 +88,9 @@ class ConversationUnreadClearService {
   /// 未读合计达到该阈值时，UI 应二次确认。
   static const int confirmUnreadSumThreshold = 200;
 
-  /// 归档等逐条 SDK 入队上限，避免万级排队。
+  /// Large batches yield after this many rows so the producer remains
+  /// bounded. It is not a truncation limit: every captured conversation must
+  /// eventually be offered to the SDK queue.
   static const int sdkQueueCap = 500;
 
   static final Map<String, Future<void>> _sdkCleanInFlight =
@@ -103,6 +106,7 @@ class ConversationUnreadClearService {
 
   static Future<void> _queueTail = Future<void>.value();
   static DateTime? _lastQueuedSdkCleanAt;
+  static Future<void>? _readOutboxRecoveryInFlight;
 
   static bool _isCurrentSession(int generation) {
     return SessionIdentityService.instance.isGenerationCurrent(generation);
@@ -120,6 +124,7 @@ class ConversationUnreadClearService {
     _leaveFinalizeInFlightById.clear();
     _queueTail = Future<void>.value();
     _lastQueuedSdkCleanAt = null;
+    _readOutboxRecoveryInFlight = null;
   }
 
   @visibleForTesting
@@ -253,6 +258,36 @@ class ConversationUnreadClearService {
       );
     }
 
+    final durableOwner =
+        ConversationLocalStore.instance.resolvedOwnerUserId();
+    final durableReadAtMs = DateTime.now().millisecondsSinceEpoch;
+    if (durableOwner.isEmpty) {
+      return MarkReadEditResult(
+        conversationCount: 0,
+        unreadSumBefore: local.unreadSumBefore,
+        sdkPath: 'none',
+        durationMs: DateTime.now().difference(started).inMilliseconds,
+      );
+    }
+    try {
+      await ConversationReadOutboxStore.instance.enqueueMany(
+        ownerUserId: durableOwner,
+        conversationIds: local.clearedIds,
+        lastReadAtMs: durableReadAtMs,
+      );
+    } catch (e) {
+      debugPrint(
+        'persist conversation read outbox failed '
+        'errorType=${e.runtimeType}',
+      );
+      return MarkReadEditResult(
+        conversationCount: 0,
+        unreadSumBefore: local.unreadSumBefore,
+        sdkPath: 'none',
+        durationMs: DateTime.now().difference(started).inMilliseconds,
+      );
+    }
+
     await ConversationSyncService.instance.markConversationsReadLocallyBatch(
       local.clearedIds,
     );
@@ -297,12 +332,7 @@ class ConversationUnreadClearService {
       if (mode == MarkReadEditMode.selected ||
           mode == MarkReadEditMode.archivedAll) {
         sdkPath = 'queue';
-        final queueIds = local.clearedIds.length > sdkQueueCap
-            ? local.clearedIds.take(sdkQueueCap)
-            : local.clearedIds;
-        for (final id in queueIds) {
-          unawaited(enqueueSdkUnreadClean(id, hadUnread: true));
-        }
+        unawaited(enqueueSdkUnreadCleanBatch(local.clearedIds));
       } else {
         // scopeAll：按 Tab 走类型 bulk（真·全部），禁止误用「可见全选」旧判定。
         sdkPath = 'type';
@@ -313,6 +343,9 @@ class ConversationUnreadClearService {
                 isGroup: false,
                 markViewModelReadLocally: markViewModelReadLocally,
                 markLocalAllOnSuccess: false,
+                durableConversationIds: local.clearedIds,
+                durableOwnerUserId: durableOwner,
+                durableReadAtMs: durableReadAtMs,
               ),
             );
             break;
@@ -322,6 +355,9 @@ class ConversationUnreadClearService {
                 isGroup: true,
                 markViewModelReadLocally: markViewModelReadLocally,
                 markLocalAllOnSuccess: false,
+                durableConversationIds: local.clearedIds,
+                durableOwnerUserId: durableOwner,
+                durableReadAtMs: durableReadAtMs,
               ),
             );
             break;
@@ -331,11 +367,19 @@ class ConversationUnreadClearService {
                 isGroup: false,
                 markViewModelReadLocally: markViewModelReadLocally,
                 markLocalAllOnSuccess: false,
+                durableConversationIds: local.clearedIds
+                    .where((id) => !id.startsWith('group_')),
+                durableOwnerUserId: durableOwner,
+                durableReadAtMs: durableReadAtMs,
               );
               await cleanSdkUnreadForType(
                 isGroup: true,
                 markViewModelReadLocally: markViewModelReadLocally,
                 markLocalAllOnSuccess: false,
+                durableConversationIds: local.clearedIds
+                    .where((id) => id.startsWith('group_')),
+                durableOwnerUserId: durableOwner,
+                durableReadAtMs: durableReadAtMs,
               );
             }());
             break;
@@ -466,6 +510,22 @@ class ConversationUnreadClearService {
     if (!_isCurrentSession(sessionGeneration)) {
       return;
     }
+    if (scheduleSdkUnreadCleanOnLeave && entryUnreadCount > 0) {
+      final owner = ConversationLocalStore.instance.resolvedOwnerUserId();
+      if (owner.isEmpty) return;
+      try {
+        await ConversationReadOutboxStore.instance.enqueue(
+          ownerUserId: owner,
+          conversationId: conversationID,
+          lastReadMessageId: lastMessageId ?? '',
+        );
+      } catch (e) {
+        debugPrint(
+          'persist leave read outbox failed errorType=${e.runtimeType}',
+        );
+        return;
+      }
+    }
     ConversationUnreadTrace.log(
       'finalize_leave_start',
       conversationID: conversationID,
@@ -503,11 +563,11 @@ class ConversationUnreadClearService {
     );
   }
 
-  /// 进聊天前快速清零未读：同步更新内存与 ViewModel，持久化后台执行，不阻塞导航。
-  static void clearLocalForOpenFast({
+  /// 进聊天前快速清零未读：先持久化可恢复意图，再更新内存与 ViewModel。
+  static Future<void> clearLocalForOpenFast({
     required V2TimConversation conversation,
     void Function(String conversationID)? markViewModelReadLocally,
-  }) {
+  }) async {
     final conversationID = conversation.conversationID.trim();
     if (conversationID.isEmpty) {
       return;
@@ -516,6 +576,20 @@ class ConversationUnreadClearService {
     final aggregate = ConversationUnreadAggregate.instance;
     final aggregateBefore =
         '${aggregate.c2cNotifiableUnreadSum}/${aggregate.groupNotifiableUnreadSum}';
+    final owner = ConversationLocalStore.instance.resolvedOwnerUserId();
+    if (owner.isEmpty) return;
+    try {
+      await ConversationReadOutboxStore.instance.enqueue(
+        ownerUserId: owner,
+        conversationId: conversationID,
+        lastReadMessageId: conversation.lastMessage?.msgID ?? '',
+      );
+    } catch (e) {
+      debugPrint(
+        'persist open read outbox failed errorType=${e.runtimeType}',
+      );
+      return;
+    }
     beginConversationChatSession(conversationID);
     ConversationListNotifier.instance.zeroUnreadLocally(conversationID);
     conversation.unreadCount = 0;
@@ -537,11 +611,9 @@ class ConversationUnreadClearService {
             '${aggregate.c2cNotifiableUnreadSum}/${aggregate.groupNotifiableUnreadSum}',
       },
     );
-    unawaited(
-      ConversationSyncService.instance.markConversationReadLocally(
-        conversationID,
-        forceImmediateUi: true,
-      ),
+    await ConversationSyncService.instance.markConversationReadLocally(
+      conversationID,
+      forceImmediateUi: true,
     );
   }
 
@@ -558,6 +630,21 @@ class ConversationUnreadClearService {
     final aggregate = ConversationUnreadAggregate.instance;
     final aggregateBefore =
         '${aggregate.c2cNotifiableUnreadSum}/${aggregate.groupNotifiableUnreadSum}';
+    final owner = ConversationLocalStore.instance.resolvedOwnerUserId();
+    if (owner.isEmpty) return;
+    try {
+      await ConversationReadOutboxStore.instance.enqueue(
+        ownerUserId: owner,
+        conversationId: conversationID,
+        lastReadMessageId: conversation.lastMessage?.msgID ?? '',
+      );
+    } catch (e) {
+      debugPrint(
+        'persist awaited open read outbox failed '
+        'errorType=${e.runtimeType}',
+      );
+      return;
+    }
     ConversationListNotifier.instance.zeroUnreadLocally(conversationID);
     conversation.unreadCount = 0;
     ConversationLocalStore.instance.recordReadClearedAnchor(
@@ -602,6 +689,9 @@ class ConversationUnreadClearService {
     required bool isGroup,
     void Function(String conversationID)? markViewModelReadLocally,
     bool markLocalAllOnSuccess = true,
+    Iterable<String> durableConversationIds = const <String>[],
+    String durableOwnerUserId = '',
+    int durableReadAtMs = 0,
   }) async {
     final sessionGeneration = SessionIdentityService.instance.generation;
     final typeId = isGroup ? sdkCleanTypeGroup : sdkCleanTypeC2c;
@@ -636,6 +726,13 @@ class ConversationUnreadClearService {
     }
     if (lastCode == 0) {
       _lastSuccessfulSdkClean[typeId] = DateTime.now();
+      if (durableOwnerUserId.isNotEmpty && durableReadAtMs > 0) {
+        await ConversationReadOutboxStore.instance.acknowledgeMany(
+          ownerUserId: durableOwnerUserId,
+          conversationIds: durableConversationIds,
+          lastReadAtMs: durableReadAtMs,
+        );
+      }
       if (markLocalAllOnSuccess) {
         MarkSelectedReadLog.log('sdk_type_clean_ok_mark_local_all', {
           'typeId': typeId,
@@ -704,6 +801,24 @@ class ConversationUnreadClearService {
       'cleared': result.conversationCount,
       'unreadSum': result.unreadSumBefore,
     });
+  }
+
+  /// 多选非全选：跨会话串行清 SDK 未读，间隔限速，撞频控则等到 block 结束再继续。
+  static Future<void> enqueueSdkUnreadCleanBatch(
+    Iterable<String> conversationIDs,
+  ) async {
+    final sessionGeneration = SessionIdentityService.instance.generation;
+    var processed = 0;
+    for (final conversationID in conversationIDs) {
+      if (!_isCurrentSession(sessionGeneration)) return;
+      await enqueueSdkUnreadClean(conversationID, hadUnread: true);
+      processed++;
+      if (processed % sdkQueueCap == 0) {
+        // Release the producer turn between bounded chunks. Unlike the old
+        // take(500), rows after the first chunk are never discarded.
+        await Future<void>.delayed(Duration.zero);
+      }
+    }
   }
 
   /// 多选非全选：跨会话串行清 SDK 未读，间隔限速，撞频控则等到 block 结束再继续。
@@ -937,6 +1052,26 @@ class ConversationUnreadClearService {
     required bool breakOnSuccess,
     required int sessionGeneration,
   }) async {
+    final owner = ConversationLocalStore.instance.resolvedOwnerUserId();
+    if (owner.isEmpty) return;
+    final snapshot =
+        await ConversationLocalStore.instance.conversationById(conversationID);
+    final readAtMs = DateTime.now().millisecondsSinceEpoch;
+    try {
+      await ConversationReadOutboxStore.instance.enqueue(
+        ownerUserId: owner,
+        conversationId: conversationID,
+        lastReadMessageId: snapshot?.lastMessage?.msgID ?? '',
+        lastReadAtMs: readAtMs,
+      );
+    } catch (e) {
+      debugPrint(
+        'persist read outbox before SDK clean failed '
+        'errorType=${e.runtimeType}',
+      );
+      return;
+    }
+    if (!_isCurrentSession(sessionGeneration)) return;
     final lastCode = await _cleanSdkWithRetry(
       conversationID,
       delays: delays,
@@ -948,12 +1083,67 @@ class ConversationUnreadClearService {
     }
     if (lastCode == 0) {
       _lastSuccessfulSdkClean[conversationID] = DateTime.now();
+      await ConversationReadOutboxStore.instance.acknowledge(
+        ownerUserId: owner,
+        conversationId: conversationID,
+        lastReadAtMs: readAtMs,
+      );
     }
     ConversationUnreadTrace.log(
       'sdk_clean_done',
       conversationID: conversationID,
       extras: <String, Object?>{'sdkCode': lastCode},
     );
+  }
+
+  /// Replays durable mark-read rows after a real SDK socket connection.
+  static Future<void> recoverPendingReadOutbox() {
+    final running = _readOutboxRecoveryInFlight;
+    if (running != null) return running;
+    late final Future<void> task;
+    task = _recoverPendingReadOutbox().whenComplete(() {
+      if (identical(_readOutboxRecoveryInFlight, task)) {
+        _readOutboxRecoveryInFlight = null;
+      }
+    });
+    _readOutboxRecoveryInFlight = task;
+    return task;
+  }
+
+  static Future<void> _recoverPendingReadOutbox() async {
+    final identity = SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty) return;
+    for (var page = 0; page < 20; page++) {
+      final rows = await ConversationReadOutboxStore.instance.listDue(
+        ownerUserId: identity.ownerUserId,
+        limit: sdkQueueCap,
+      );
+      if (rows.isEmpty ||
+          !SessionIdentityService.instance.isCurrent(identity)) {
+        return;
+      }
+      for (final row in rows) {
+        if (!SessionIdentityService.instance.isCurrent(identity)) return;
+        final code = await _cleanSdkWithRetry(
+          row.conversationId,
+          delays: openSdkRetryDelays,
+          breakOnSuccess: true,
+          sessionGeneration: identity.generation,
+        );
+        if (!SessionIdentityService.instance.isCurrent(identity)) return;
+        if (code == 0) {
+          await ConversationReadOutboxStore.instance.acknowledge(
+            ownerUserId: identity.ownerUserId,
+            conversationId: row.conversationId,
+            lastReadAtMs: row.lastReadAtMs,
+          );
+        } else {
+          await ConversationReadOutboxStore.instance.markRetry(row);
+        }
+      }
+      if (rows.length < sdkQueueCap) return;
+      await Future<void>.delayed(Duration.zero);
+    }
   }
 
   /// 兼容旧调用：本地 + SDK 同步清未读。
@@ -1053,7 +1243,9 @@ class ConversationUnreadClearService {
           break;
         }
       } catch (e) {
-        debugPrint('cleanConversationUnread failed: $conversationID $e');
+        debugPrint(
+          'cleanConversationUnread failed errorType=${e.runtimeType}',
+        );
         MarkSelectedReadLog.log('sdk_clean_attempt_exception', {
           'conv': conversationID,
           'attempt': attempt,

@@ -1,10 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:tencent_cloud_chat_sdk/enum/message_priority_enum.dart';
+import 'package:tencent_cloud_chat_sdk/enum/offlinePushInfo.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_history_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
-import 'package:tencent_cloud_chat_demo/src/services/im/contracts/account_scoped_conversation_key.dart';
-import 'package:tencent_cloud_chat_demo/src/services/im/outgoing_external_send_helper.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/im05_contracts.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/outgoing_send_coordinator.dart';
 import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/external_chat_entry_service.dart';
@@ -12,6 +14,34 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
+
+enum ExternalMessageSendState {
+  succeeded,
+  failed,
+  outcomeUnknown,
+  blocked,
+}
+
+class ExternalMessageSendResult {
+  const ExternalMessageSendResult({
+    required this.state,
+    this.sdkCode,
+    this.description = '',
+  });
+
+  final ExternalMessageSendState state;
+  final int? sdkCode;
+  final String description;
+
+  bool get succeeded => state == ExternalMessageSendState.succeeded;
+
+  /// True means the provider may already have accepted the message. Callers
+  /// must wait for realtime/history adoption and must never create a new SDK
+  /// message as an automatic retry.
+  bool get mayHaveBeenSent =>
+      state == ExternalMessageSendState.succeeded ||
+      state == ExternalMessageSendState.outcomeUnknown;
+}
 
 /// Sends messages created outside an opened chat page.
 ///
@@ -42,6 +72,33 @@ class ChatExternalMessageSender {
     String reason = 'external_message_sent',
     bool isExcludedFromUnreadCount = false,
   }) async {
+    final result = await sendCreatedMessageDetailed(
+      messageInfo: messageInfo,
+      receiverUserId: receiverUserId,
+      groupId: groupId,
+      reason: reason,
+      isExcludedFromUnreadCount: isExcludedFromUnreadCount,
+    );
+    // Legacy bool callers cannot represent OutcomeUnknown. Treat it as
+    // accepted/pending so UI and business retry loops do not create a second
+    // SDK message. Detailed callers can render a pending state explicitly.
+    return result.mayHaveBeenSent;
+  }
+
+  static Future<ExternalMessageSendResult> sendCreatedMessageDetailed({
+    required V2TimMessage? messageInfo,
+    required String receiverUserId,
+    required String groupId,
+    String reason = 'external_message_sent',
+    bool isExcludedFromUnreadCount = false,
+    MessagePriorityEnum priority = MessagePriorityEnum.V2TIM_PRIORITY_NORMAL,
+    bool onlineUserOnly = false,
+    bool needReadReceipt = false,
+    OfflinePushInfo? offlinePushInfo,
+    String? cloudCustomData,
+    String? localCustomData,
+    bool recoverPreparedOutbox = false,
+  }) async {
     var receiver = receiverUserId.trim();
     var group = groupId.trim();
     if (receiver.toLowerCase().startsWith('c2c_') && receiver.length > 4) {
@@ -51,7 +108,10 @@ class ChatExternalMessageSender {
       group = group.substring(6);
     }
     if (messageInfo == null || (receiver.isEmpty && group.isEmpty)) {
-      return false;
+      return const ExternalMessageSendResult(
+        state: ExternalMessageSendState.blocked,
+        description: 'message or target is missing',
+      );
     }
 
     final isGroup = group.isNotEmpty;
@@ -62,47 +122,44 @@ class ChatExternalMessageSender {
       groupId: group,
     );
 
-    // 提前声明,catch 块才能访问 (finalize Outbox 必须)
-    SessionIdentity identity = SessionIdentityService.instance.capture();
-    ExternalOutboxRecordOutcome externalOutcome =
-        const ExternalOutboxRecordOutcome(
-            prepared: false, outcomeUnknown: false);
+    final identity = SessionIdentityService.instance.capture();
+    ImCoordinatedSendResult? coordinated;
     try {
-      // IM-08 P0-Critical 第二刀:外发前在 Outbox 主表写入 prepared/dispatchIntent/sending。
-      // 这样失败重试/历史回写/认领都走同一条 Outbox 路径,不污染。
-      identity = SessionIdentityService.instance.capture();
-      externalOutcome =
-          await OutgoingExternalSendHelper.recordOutboxEntryForExternal(
-        message: messageInfo,
-        sdkLocalId: messageInfo.id ?? '',
-        ownerUserId: identity.ownerUserId,
-        conversationType: convType == ConvType.group
-            ? ImConversationType.group
-            : ImConversationType.c2c,
-        conversationId:
-            fullConversationId.isNotEmpty ? fullConversationId : convId,
-      );
+      // The GlobalModel path already owns the one durable Outbox through
+      // ImOutgoingSendCoordinator. Do not create/finalize a second Outbox here.
       final sendRes =
           await serviceLocator<TUIChatGlobalModel>().sendMessageFromController(
         messageInfo: messageInfo,
         convType: convType,
         convID: convId,
+        priority: priority,
+        onlineUserOnly: onlineUserOnly,
         isExcludedFromUnreadCount: isExcludedFromUnreadCount,
+        needReadReceipt: needReadReceipt,
+        offlinePushInfo: offlinePushInfo,
+        cloudCustomData: cloudCustomData,
+        localCustomData: localCustomData,
+        recoverPreparedOutbox: recoverPreparedOutbox,
+        onCoordinatedResult: (result) => coordinated = result,
       );
       final ok = sendRes?.code == 0;
-      // IM-08 P0-Critical:UIKit 返回后,把 Outbox 主表最终态落地。
-      if (identity.ownerUserId.isNotEmpty && externalOutcome.prepared) {
-        await OutgoingExternalSendHelper.finalizeOutboxForExternal(
-          ownerUserId: identity.ownerUserId,
-          conversationId:
-              fullConversationId.isNotEmpty ? fullConversationId : convId,
-          sdkLocalId: messageInfo.id ?? '',
-          serverMsgId: sendRes?.data?.msgID,
-          resultCode: sendRes?.code ?? -1,
-          outcomeUnknown: externalOutcome.outcomeUnknown,
+      final dispatchDecision = coordinated?.dispatchDecision;
+      if (coordinated?.outcomeUnknown == true ||
+          dispatchDecision == ImOutboxDispatchDecision.outcomeUnknown) {
+        return ExternalMessageSendResult(
+          state: ExternalMessageSendState.outcomeUnknown,
+          sdkCode: sendRes?.code,
+          description: sendRes?.desc ?? 'outcome unknown',
         );
       }
-      if (ok) {
+      if (coordinated == null || coordinated?.usedOutbox != true) {
+        return ExternalMessageSendResult(
+          state: ExternalMessageSendState.blocked,
+          sdkCode: sendRes?.code,
+          description: sendRes?.desc ?? 'coordinated send unavailable',
+        );
+      }
+      if (ok && SessionIdentityService.instance.isCurrent(identity)) {
         ConversationRefreshBus.instance.requestRefresh(
           reason: reason,
           conversationId:
@@ -126,28 +183,26 @@ class ChatExternalMessageSender {
           );
         }
       }
-      return ok;
+      return ExternalMessageSendResult(
+        state: ok
+            ? ExternalMessageSendState.succeeded
+            : ExternalMessageSendState.failed,
+        sdkCode: sendRes?.code,
+        description: sendRes?.desc ?? '',
+      );
     } catch (e) {
-      // IM-08 P0-Critical: UIKit 异常路径必须 finalize Outbox,否则记录
-      // 永远停在 sending 状态,ImRecoveryWorker 会反复认领。
-      // 异常等同于无法证明 SDK 未调用,所以标 outcomeUnknown=true。
-      if (identity.ownerUserId.isNotEmpty && externalOutcome.prepared) {
-        try {
-          await OutgoingExternalSendHelper.finalizeOutboxForExternal(
-            ownerUserId: identity.ownerUserId,
-            conversationId:
-                fullConversationId.isNotEmpty ? fullConversationId : convId,
-            sdkLocalId: messageInfo.id ?? '',
-            serverMsgId: null,
-            resultCode: -1,
-            outcomeUnknown: true,
-          );
-        } catch (finalizeErr) {
-          debugPrint('finalize outbox on exception failed: $finalizeErr');
-        }
-      }
-      debugPrint('send external message failed: $e');
-      return false;
+      debugPrint(
+        'send external message failed errorType=${e.runtimeType}',
+      );
+      // If dispatch reached the Coordinator, an exception cannot prove that
+      // Tencent rejected the message. Preserve OutcomeUnknown and let
+      // realtime/history adoption settle it.
+      return ExternalMessageSendResult(
+        state: coordinated != null
+            ? ExternalMessageSendState.outcomeUnknown
+            : ExternalMessageSendState.blocked,
+        description: '$e',
+      );
     }
   }
 }
