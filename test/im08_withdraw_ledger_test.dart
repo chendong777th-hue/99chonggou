@@ -41,7 +41,7 @@ void main() {
         src.replaceAll(' ', '').replaceAll('\n', '');
     expect(
       compact,
-      contains('MessageWithdrawLedger.instance.recordRevoked(normalized)'),
+      contains('MessageWithdrawLedger.instance.recordRevokedWithInfo('),
       reason: '_submitRevoked must call ledger.recordRevoked for every '
           'revoke event to survive SDK listener loss',
     );

@@ -18,16 +18,42 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+class MessageWithdrawLedgerEntry {
+  const MessageWithdrawLedgerEntry({
+    required this.atMs,
+    this.isAdmin = false,
+    this.revokerID,
+  });
+  final int atMs;
+  final bool isAdmin;
+  final String? revokerID;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'atMs': atMs,
+        if (isAdmin) 'isAdmin': 1,
+        if (revokerID != null) 'revokerID': revokerID,
+      };
+
+  static MessageWithdrawLedgerEntry fromJson(Map<String, Object?> row) {
+    return MessageWithdrawLedgerEntry(
+      atMs: int.tryParse(row['atMs']?.toString() ?? '') ?? 0,
+      isAdmin: row['isAdmin']?.toString() == '1',
+      revokerID: row['revokerID']?.toString(),
+    );
+  }
+}
+
 class MessageWithdrawLedger {
   MessageWithdrawLedger._();
 
   static final MessageWithdrawLedger instance = MessageWithdrawLedger._();
 
-  static const String _storageKey = 'im_withdraw_ledger_v1';
+  static const String _storageKey = 'im_withdraw_ledger_v2';
   static const Duration _ttl = Duration(days: 30);
   static const int _maxEntries = 5000;
 
-  final Map<String, int> _entries = <String, int>{}; // msgID -> observedAtMs
+  final Map<String, MessageWithdrawLedgerEntry> _entries =
+      <String, MessageWithdrawLedgerEntry>{};
   int _clearGeneration = 0;
   Future<void>? _readyTask;
   Future<void>? _persistTask;
@@ -62,7 +88,7 @@ class MessageWithdrawLedger {
         final atMs = int.tryParse(item['atMs']?.toString() ?? '');
         if (id.isEmpty || atMs == null) continue;
         if (now - atMs <= _ttl.inMilliseconds) {
-          _entries[id] = atMs;
+          _entries[id] = MessageWithdrawLedgerEntry(atMs: atMs);
         }
       }
     } catch (_) {
@@ -87,9 +113,9 @@ class MessageWithdrawLedger {
         final prefs = await SharedPreferences.getInstance();
         _purgeExpired();
         final payload = _entries.entries
-            .map((e) => <String, Object>{
+            .map((e) => <String, Object?>{
               'id': e.key,
-              'atMs': e.value,
+              ...e.value.toJson(),
             })
             .toList(growable: false);
         await prefs.setString(_storageKey, jsonEncode(payload));
@@ -101,12 +127,29 @@ class MessageWithdrawLedger {
     });
   }
 
-  /// 记录一条撤回事件。供 tencent_advanced_message_adapter._submitRevoked 调用。
+  /// 记录一条撤回事件(无 revoker 信息)。供 tencent_advanced_message_adapter._submitRevoked 调用。
   Future<void> recordRevoked(String msgID) async {
+    await recordRevokedWithInfo(
+      msgID: msgID,
+      isAdmin: false,
+      revokerID: null,
+    );
+  }
+
+  /// 记录一条撤回事件,带 isAdmin 和 revokerID。SDK 重启后仍可查询"谁撤回"。
+  Future<void> recordRevokedWithInfo({
+    required String msgID,
+    bool isAdmin = false,
+    String? revokerID,
+  }) async {
     final id = msgID.trim();
     if (id.isEmpty) return;
     await ensureReady();
-    _entries[id] = DateTime.now().millisecondsSinceEpoch;
+    _entries[id] = MessageWithdrawLedgerEntry(
+      atMs: DateTime.now().millisecondsSinceEpoch,
+      isAdmin: isAdmin,
+      revokerID: revokerID?.trim().isEmpty == true ? null : revokerID,
+    );
     if (_entries.length > _maxEntries) {
       _purgeExpired();
     }
@@ -118,9 +161,9 @@ class MessageWithdrawLedger {
     final id = msgID.trim();
     if (id.isEmpty) return false;
     await ensureReady();
-    final atMs = _entries[id];
-    if (atMs == null) return false;
-    final age = DateTime.now().millisecondsSinceEpoch - atMs;
+    final entry = _entries[id];
+    if (entry == null) return false;
+    final age = DateTime.now().millisecondsSinceEpoch - entry.atMs;
     if (age > _ttl.inMilliseconds) {
       _entries.remove(id);
       return false;
@@ -128,9 +171,24 @@ class MessageWithdrawLedger {
     return true;
   }
 
+  /// 获取已记录条目的元数据(供 UI 显示"谁撤回")。
+  Future<MessageWithdrawLedgerEntry?> entryOf(String msgID) async {
+    final id = msgID.trim();
+    if (id.isEmpty) return null;
+    await ensureReady();
+    final entry = _entries[id];
+    if (entry == null) return null;
+    final age = DateTime.now().millisecondsSinceEpoch - entry.atMs;
+    if (age > _ttl.inMilliseconds) {
+      _entries.remove(id);
+      return null;
+    }
+    return entry;
+  }
+
   void _purgeExpired() {
     final cutoff = DateTime.now().millisecondsSinceEpoch - _ttl.inMilliseconds;
-    _entries.removeWhere((_, atMs) => atMs < cutoff);
+    _entries.removeWhere((_, entry) => entry.atMs < cutoff);
   }
 
   /// 切账号时清空本地账本(冷启动恢复后由 SDK listener 重建)。
@@ -141,5 +199,6 @@ class MessageWithdrawLedger {
   }
 
   @visibleForTesting
-  Map<String, int> debugEntries() => Map<String, int>.unmodifiable(_entries);
+  Map<String, MessageWithdrawLedgerEntry> debugEntries() =>
+      Map<String, MessageWithdrawLedgerEntry>.unmodifiable(_entries);
 }

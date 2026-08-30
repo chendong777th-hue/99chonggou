@@ -53,4 +53,34 @@ void main() {
     await ledger.ensureReady();
     expect(await ledger.wasRevoked('msg-pre'), isFalse);
   });
+
+  test('recordRevokedWithInfo stores isAdmin + revokerID, entryOf retrieves',
+      () async {
+    final ledger = MessageWithdrawLedger.instance;
+    ledger.clearLocal();
+    await ledger.ensureReady();
+    await ledger.recordRevokedWithInfo(
+      msgID: 'msg-A',
+      isAdmin: true,
+      revokerID: 'adminUser',
+    );
+    final entry = await ledger.entryOf('msg-A');
+    expect(entry, isNotNull);
+    expect(entry!.isAdmin, isTrue);
+    expect(entry.revokerID, 'adminUser');
+  });
+
+  test('recordRevokedWithInfo with null revokerID is preserved', () async {
+    final ledger = MessageWithdrawLedger.instance;
+    ledger.clearLocal();
+    await ledger.ensureReady();
+    await ledger.recordRevokedWithInfo(
+      msgID: 'msg-B',
+      isAdmin: false,
+    );
+    final entry = await ledger.entryOf('msg-B');
+    expect(entry, isNotNull);
+    expect(entry!.isAdmin, isFalse);
+    expect(entry.revokerID, isNull);
+  });
 }

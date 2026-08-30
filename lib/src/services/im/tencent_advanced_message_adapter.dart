@@ -311,7 +311,14 @@ class TencentAdvancedMessageAdapter {
     );
     // IM-08 P0-High B2: 每条撤回事件持久化到本地账本,
     // 防止 SDK listener 回调丢失导致冷启动 UI 残留原消息。
-    unawaited(MessageWithdrawLedger.instance.recordRevoked(normalized));
+    // IM-08 P0-High B2: 持久化撤回事件,带 isAdmin + revokerID
+    // 让 SDK 重启后 UI 仍能恢复"谁撤回"信息。
+    final revokerID = revoker?.userID?.trim();
+    unawaited(MessageWithdrawLedger.instance.recordRevokedWithInfo(
+      msgID: normalized,
+      isAdmin: isAdmin,
+      revokerID: (revokerID == null || revokerID.isEmpty) ? null : revokerID,
+    ));
   }
 
   void _submitAccountEvent({
