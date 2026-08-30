@@ -2,14 +2,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/contracts/contracts.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/history_search_coordinator.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_search_param.dart'
-    if (dart.library.html)
-        'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_search_param.dart';
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_search_param.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_search_result.dart'
-    if (dart.library.html)
-        'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_search_result.dart';
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_search_result.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_value_callback.dart'
-    if (dart.library.html)
-        'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_value_callback.dart';
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_value_callback.dart';
 
 class _FakeAdapter implements Im06HistorySearchAdapter {
   Im06HistoryPage? historyPage;
@@ -365,16 +362,17 @@ void main() {
     expect(complete.canReportSuccess, isTrue);
   });
 
-  test('message-search coordinator rejects Web local before adapter call', () async {
+  test('message-search coordinator rejects Web local before adapter call',
+      () async {
     final adapter = _FakeMessageSearchAdapter();
     final coordinator = Im06MessageSearchCoordinator(adapter: adapter);
     final result = await coordinator.search(
       platform: ImPlatform.web,
       requestedSource: ImHistorySource.local,
-       searchParam: V2TimMessageSearchParam(
-         type: 0,
-         keywordList: const ['needle'],
-       ),
+      searchParam: V2TimMessageSearchParam(
+        type: 0,
+        keywordList: const ['needle'],
+      ),
     );
 
     expect(result.error, Im06CoordinatorError.platformUnavailable);
@@ -383,16 +381,17 @@ void main() {
     expect(adapter.cloudCalled, isFalse);
   });
 
-  test('message-search coordinator delegates Flutter source unchanged', () async {
+  test('message-search coordinator delegates Flutter source unchanged',
+      () async {
     final adapter = _FakeMessageSearchAdapter();
     final coordinator = Im06MessageSearchCoordinator(adapter: adapter);
     final result = await coordinator.search(
       platform: ImPlatform.android,
       requestedSource: ImHistorySource.local,
-       searchParam: V2TimMessageSearchParam(
-         type: 0,
-         keywordList: const ['needle'],
-       ),
+      searchParam: V2TimMessageSearchParam(
+        type: 0,
+        keywordList: const ['needle'],
+      ),
     );
 
     expect(result.isSuccess, isTrue);
@@ -401,7 +400,8 @@ void main() {
     expect(adapter.cloudCalled, isFalse);
   });
 
-  test('history coordinator loads and saves Coverage through its port', () async {
+  test('history coordinator loads and saves Coverage through its port',
+      () async {
     final adapter = _FakeAdapter();
     final coverageStore = _FakeCoverageStore();
     final persisted = Im06HistoryCoverage(scope: scope, clearEpoch: 7);

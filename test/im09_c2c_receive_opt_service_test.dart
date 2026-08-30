@@ -86,7 +86,8 @@ void main() {
       );
     });
 
-    test('empty current owner (test/bootstrap) falls back to generation only', () {
+    test('empty current owner (test/bootstrap) falls back to generation only',
+        () {
       final id = sessionService.capture(ownerUserId: '');
       expect(
         C2cReceiveOptService.fenceValid(
@@ -201,7 +202,9 @@ void main() {
         capturedIdentity: id,
       );
       expect(res.code, 6014);
-      expect(svc.calls, [['bob']]);
+      expect(svc.calls, [
+        ['bob']
+      ]);
     });
   });
 

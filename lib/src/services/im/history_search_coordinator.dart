@@ -3,14 +3,11 @@ import 'contracts/history_proof.dart';
 import 'contracts/sdk_result.dart';
 import 'package:tencent_cloud_chat_demo/src/services/message_history_coverage_store.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_search_param.dart'
-    if (dart.library.html)
-        'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_search_param.dart';
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_search_param.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_search_result.dart'
-    if (dart.library.html)
-        'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_search_result.dart';
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_search_result.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_value_callback.dart'
-    if (dart.library.html)
-        'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_value_callback.dart';
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_value_callback.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_history_coverage.dart'
     as uikit_history;
 import 'package:tencent_cloud_chat_uikit/data_services/message/message_services.dart';
@@ -654,8 +651,7 @@ class Im06MessageHistoryCoverageStoreAdapter
       status: ranges.isEmpty
           ? uikit_history.MessageHistoryCoverageStatus.empty
           : uikit_history.MessageHistoryCoverageStatus.partial,
-      olderExhausted:
-          coverage.isClosed(Im06HistoryCoverageDirection.older),
+      olderExhausted: coverage.isClosed(Im06HistoryCoverageDirection.older),
       newerHasMore: !coverage.isClosed(Im06HistoryCoverageDirection.newer),
       holes: const <uikit_history.MessageHistoryHole>[],
       ranges: ranges,

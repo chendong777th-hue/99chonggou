@@ -47,13 +47,12 @@ void main() {
     test(
         'ADR mentions every allow-list entry '
         '(drift detector)', () async {
-      final adr = File('${Directory.current.path}/docs/im10_overlay_row_namespace.md')
-          .readAsStringSync();
+      final adr =
+          File('${Directory.current.path}/docs/im10_overlay_row_namespace.md')
+              .readAsStringSync();
       final tableRe = RegExp(r'lib/src/[^\s`]+\.dart:\d+');
-      final tableEntries = tableRe
-          .allMatches(adr)
-          .map((m) => m.group(0)!.trim())
-          .toSet();
+      final tableEntries =
+          tableRe.allMatches(adr).map((m) => m.group(0)!.trim()).toSet();
       final testEntries = _allowList.toSet();
       final missingFromAdr = testEntries.difference(tableEntries);
       expect(
@@ -71,7 +70,8 @@ void main() {
         'rg',
         <String>[
           '-n',
-          '--glob', 'lib/src/**/*.dart',
+          '--glob',
+          'lib/src/**/*.dart',
           'setMessageList\\s*\\(',
           'lib/src',
         ],
