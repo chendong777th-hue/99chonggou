@@ -3,6 +3,9 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_history_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/contracts/account_scoped_conversation_key.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/outgoing_external_send_helper.dart';
+import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/external_chat_entry_service.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
@@ -60,6 +63,18 @@ class ChatExternalMessageSender {
     );
 
     try {
+      // IM-08 P0-Critical 第二刀:外发前在 Outbox 主表写入 prepared/dispatchIntent/sending。
+      // 这样失败重试/历史回写/认领都走同一条 Outbox 路径,不污染。
+      final identity = SessionIdentityService.instance.capture();
+      final externalOutcome = await OutgoingExternalSendHelper
+          .recordOutboxEntryForExternal(
+        message: messageInfo,
+        sdkLocalId: messageInfo.id ?? '',
+        ownerUserId: identity.ownerUserId,
+        conversationType:
+            convType == ConvType.group ? ImConversationType.group : ImConversationType.c2c,
+        conversationId: fullConversationId.isNotEmpty ? fullConversationId : convId,
+      );
       final sendRes = await serviceLocator<TUIChatGlobalModel>()
           .sendMessageFromController(
         messageInfo: messageInfo,
@@ -68,6 +83,19 @@ class ChatExternalMessageSender {
         isExcludedFromUnreadCount: isExcludedFromUnreadCount,
       );
       final ok = sendRes?.code == 0;
+      // IM-08 P0-Critical:UIKit 返回后,把 Outbox 主表最终态落地。
+      if (identity.ownerUserId.isNotEmpty && externalOutcome.prepared) {
+        await OutgoingExternalSendHelper.finalizeOutboxForExternal(
+          ownerUserId: identity.ownerUserId,
+          conversationId: fullConversationId.isNotEmpty
+              ? fullConversationId
+              : convId,
+          sdkLocalId: messageInfo.id ?? '',
+          serverMsgId: sendRes?.data?.msgID,
+          resultCode: sendRes?.code ?? -1,
+          outcomeUnknown: externalOutcome.outcomeUnknown,
+        );
+      }
       if (ok) {
         ConversationRefreshBus.instance.requestRefresh(
           reason: reason,
