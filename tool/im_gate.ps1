@@ -116,6 +116,11 @@ if (-not $SkipTest) {
         'test/im05_persistence_test.dart',
         'test/im06_history_search_coordinator_test.dart',
         'test/im08_outgoing_send_coordinator_test.dart',
+        'test/im08_voice_to_text_port_test.dart',
+        'test/im08_external_sender_outbox_test.dart',
+        'test/im08_external_helper_runtime_test.dart',
+        'test/im08_withdraw_ledger_test.dart',
+        'test/im08_withdraw_ledger_runtime_test.dart',
         'test/im09_c2c_receive_opt_service_test.dart',
         'test/im10_migration_scan_test.dart',
         'test/im_contracts_test.dart'

@@ -17,7 +17,6 @@ import 'package:tencent_cloud_chat_demo/src/services/im/contracts/account_scoped
 import 'package:tencent_cloud_chat_demo/src/services/im/contracts/outgoing_identity_contract.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/im05_contracts.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/im05_persistence.dart';
-import 'package:tencent_cloud_chat_sdk/enum/message_elem_type.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 import 'package:crypto/crypto.dart';
@@ -74,14 +73,13 @@ class OutgoingExternalSendHelper {
       );
     }
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final elemType = message.elemType ?? MessageElemType.V2TIM_ELEM_TYPE_CUSTOM;
+    final elemType = message.elemType;
     final payloadHash = sha256
-        .convert(utf8.encode(
-            '${sdkLocalId}:${elemType}:${message.timestamp ?? 0}'))
+        .convert(utf8.encode('$sdkLocalId:$elemType:$message.timestamp'))
         .toString();
     final identity = OutgoingIdentityContract(
       scope: scope,
-      operationId: 'external:${scope.storageKey}:${sdkLocalId}',
+      operationId: 'external:${scope.storageKey}:$sdkLocalId',
       clientCorrelationId: sdkLocalId,
       messageKind: OutgoingMessageKind.custom,
       payloadFingerprint: payloadHash,
@@ -158,7 +156,8 @@ class OutgoingExternalSendHelper {
           outcomeUnknown: false,
         );
       }
-      return const ExternalOutboxRecordOutcome(prepared: true, outcomeUnknown: false);
+      return const ExternalOutboxRecordOutcome(
+          prepared: true, outcomeUnknown: false);
     } on Im05IdentityConflictException {
       return const ExternalOutboxRecordOutcome(
         prepared: false,
@@ -187,7 +186,7 @@ class OutgoingExternalSendHelper {
       return;
     }
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final operationId = 'external:${ownerUserId}|${conversationId}:${sdkLocalId}';
+    final operationId = 'external:$ownerUserId|$conversationId:$sdkLocalId';
     final persistence = Im05Persistence(store: context.store);
     if (outcomeUnknown) {
       await persistence.recordOutcomeUnknown(

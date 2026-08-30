@@ -18,15 +18,13 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  const targetPath =
-      'lib/src/services/tencent_voice_to_text_service.dart';
+  const targetPath = 'lib/src/services/tencent_voice_to_text_service.dart';
 
   test('voice-to-text source file exists and is non-empty', () {
     final f = File('${Directory.current.path}/$targetPath');
     expect(f.existsSync(), isTrue, reason: '$targetPath missing');
     final lines = f.readAsLinesSync();
-    expect(lines.length, greaterThan(50),
-        reason: 'unexpected truncation');
+    expect(lines.length, greaterThan(50), reason: 'unexpected truncation');
   });
 
   test(

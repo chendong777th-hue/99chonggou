@@ -28,17 +28,16 @@ void main() {
         reason: 'ledger must persist across restarts');
   });
 
-  test('adapter routes _submitRevoked through MessageWithdrawLedger',
-      () {
+  test('adapter routes _submitRevoked through MessageWithdrawLedger', () {
     final src =
         File('${Directory.current.path}/$adapterPath').readAsStringSync();
     expect(
       src,
-      contains("import 'package:tencent_cloud_chat_demo/src/services/im/message_withdraw_ledger.dart'"),
+      contains(
+          "import 'package:tencent_cloud_chat_demo/src/services/im/message_withdraw_ledger.dart'"),
       reason: 'adapter must import the ledger',
     );
-    final compact =
-        src.replaceAll(' ', '').replaceAll('\n', '');
+    final compact = src.replaceAll(' ', '').replaceAll('\n', '');
     expect(
       compact,
       contains('MessageWithdrawLedger.instance.recordRevokedWithInfo('),

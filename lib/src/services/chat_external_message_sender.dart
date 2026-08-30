@@ -65,22 +65,25 @@ class ChatExternalMessageSender {
     // 提前声明,catch 块才能访问 (finalize Outbox 必须)
     SessionIdentity identity = SessionIdentityService.instance.capture();
     ExternalOutboxRecordOutcome externalOutcome =
-        const ExternalOutboxRecordOutcome(prepared: false, outcomeUnknown: false);
+        const ExternalOutboxRecordOutcome(
+            prepared: false, outcomeUnknown: false);
     try {
       // IM-08 P0-Critical 第二刀:外发前在 Outbox 主表写入 prepared/dispatchIntent/sending。
       // 这样失败重试/历史回写/认领都走同一条 Outbox 路径,不污染。
       identity = SessionIdentityService.instance.capture();
-      externalOutcome = await OutgoingExternalSendHelper
-          .recordOutboxEntryForExternal(
+      externalOutcome =
+          await OutgoingExternalSendHelper.recordOutboxEntryForExternal(
         message: messageInfo,
         sdkLocalId: messageInfo.id ?? '',
         ownerUserId: identity.ownerUserId,
-        conversationType:
-            convType == ConvType.group ? ImConversationType.group : ImConversationType.c2c,
-        conversationId: fullConversationId.isNotEmpty ? fullConversationId : convId,
+        conversationType: convType == ConvType.group
+            ? ImConversationType.group
+            : ImConversationType.c2c,
+        conversationId:
+            fullConversationId.isNotEmpty ? fullConversationId : convId,
       );
-      final sendRes = await serviceLocator<TUIChatGlobalModel>()
-          .sendMessageFromController(
+      final sendRes =
+          await serviceLocator<TUIChatGlobalModel>().sendMessageFromController(
         messageInfo: messageInfo,
         convType: convType,
         convID: convId,
@@ -91,9 +94,8 @@ class ChatExternalMessageSender {
       if (identity.ownerUserId.isNotEmpty && externalOutcome.prepared) {
         await OutgoingExternalSendHelper.finalizeOutboxForExternal(
           ownerUserId: identity.ownerUserId,
-          conversationId: fullConversationId.isNotEmpty
-              ? fullConversationId
-              : convId,
+          conversationId:
+              fullConversationId.isNotEmpty ? fullConversationId : convId,
           sdkLocalId: messageInfo.id ?? '',
           serverMsgId: sendRes?.data?.msgID,
           resultCode: sendRes?.code ?? -1,
@@ -133,9 +135,8 @@ class ChatExternalMessageSender {
         try {
           await OutgoingExternalSendHelper.finalizeOutboxForExternal(
             ownerUserId: identity.ownerUserId,
-            conversationId: fullConversationId.isNotEmpty
-                ? fullConversationId
-                : convId,
+            conversationId:
+                fullConversationId.isNotEmpty ? fullConversationId : convId,
             sdkLocalId: messageInfo.id ?? '',
             serverMsgId: null,
             resultCode: -1,
