@@ -62,11 +62,15 @@ class ChatExternalMessageSender {
       groupId: group,
     );
 
+    // 提前声明,catch 块才能访问 (finalize Outbox 必须)
+    SessionIdentity identity = SessionIdentityService.instance.capture();
+    ExternalOutboxRecordOutcome externalOutcome =
+        const ExternalOutboxRecordOutcome(prepared: false, outcomeUnknown: false);
     try {
       // IM-08 P0-Critical 第二刀:外发前在 Outbox 主表写入 prepared/dispatchIntent/sending。
       // 这样失败重试/历史回写/认领都走同一条 Outbox 路径,不污染。
-      final identity = SessionIdentityService.instance.capture();
-      final externalOutcome = await OutgoingExternalSendHelper
+      identity = SessionIdentityService.instance.capture();
+      externalOutcome = await OutgoingExternalSendHelper
           .recordOutboxEntryForExternal(
         message: messageInfo,
         sdkLocalId: messageInfo.id ?? '',
@@ -122,6 +126,25 @@ class ChatExternalMessageSender {
       }
       return ok;
     } catch (e) {
+      // IM-08 P0-Critical: UIKit 异常路径必须 finalize Outbox,否则记录
+      // 永远停在 sending 状态,ImRecoveryWorker 会反复认领。
+      // 异常等同于无法证明 SDK 未调用,所以标 outcomeUnknown=true。
+      if (identity.ownerUserId.isNotEmpty && externalOutcome.prepared) {
+        try {
+          await OutgoingExternalSendHelper.finalizeOutboxForExternal(
+            ownerUserId: identity.ownerUserId,
+            conversationId: fullConversationId.isNotEmpty
+                ? fullConversationId
+                : convId,
+            sdkLocalId: messageInfo.id ?? '',
+            serverMsgId: null,
+            resultCode: -1,
+            outcomeUnknown: true,
+          );
+        } catch (finalizeErr) {
+          debugPrint('finalize outbox on exception failed: $finalizeErr');
+        }
+      }
       debugPrint('send external message failed: $e');
       return false;
     }
