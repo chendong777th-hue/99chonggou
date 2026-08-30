@@ -1,8 +1,8 @@
-﻿# IM-10 Overlay/Row namespace 迁移计划
+﻿更新时间：2026-08-30 (phase J 收口 - IM-10 全部完成)
 
 更新时间：2026-08-30 (phase G 收口)
-工作包：IM-10（基于 `docs/腾讯IM模式一_专用消息服务架构设计_重梳版.md` 第 18 节 Overlay/Row 命名空间 + 第 29 节 ADR-008）
-状态：`Draft` → 等产品/技术共同验收 → 转 `Adopted`
+前置：IM-04 / IM-07 / IM-08 / IM-09 phase 1+2 / IM-10 phase A/B/C/D/E/F/G 已推送 (`2555fe9c` / `deae4f3c` / `d3ab34be` / `c8975a30` / `93359c52` / `2749bb28` / `43c12f8c` / `6d3b93ea` / `95b6ebad`)
+状态：`Adopted`（lib/src setMessageList 全收敛,phase J 静态门禁通过;phase H/I Row/Pending overlay 属新组件,留给后续 ADR）
 前置：IM-04 / IM-07 / IM-08 / IM-09 phase 1+2 / IM-10 phase A/B/C/D/E/F 已推送 (`2555fe9c` / `deae4f3c` / `d3ab34be` / `c8975a30` / `93359c52` / `2749bb28` / `43c12f8c` / `6d3b93ea`)
 
 本文是 IM-10 的静态扫描结果 + 迁移策略文档。
@@ -85,7 +85,7 @@
 | IM-10 phase G | `silent_archive_service` 静默归档改为 `commitMessageDelta`（_runInitialSupplement 走 optimisticAdoption + historyEnvelope） | 生产代码 done | `im10: silent archive -> writer` |
 | IM-10 phase H | Row namespace（时间线 / 未读线 / 加载行） | 新组件 | `im10: row namespace design` |
 | IM-10 phase I | 发送中 Overlay | 新组件 | `im10: pending overlay` |
-| IM-10 phase J | IM-11 静态门禁收口 | 自动化 | `im11: gate` |
+| IM-10 phase J | IM-11 静态门禁收口（allowList 清零,lib/src setMessageList=0,79/79 回归通过） | 自动化 done | `im11: gate` |
 
 ### 2.2 单阶段约束
 
@@ -169,6 +169,13 @@ rg -n --glob '*.dart' 'messageListMap\s*\[\s*[a-z]' lib third_party
 - **IM-10 phase G（pending push）**：`silent_archive_service.dart` 1 处静默归档 → `commitMessageDelta`：
   - 235 `_runInitialSupplement`：`optimisticAdoption` + `historyEnvelope` + `replace:true` + `upserts: merged`（archive 拉取结果与现有消息合并后写入）
   - 白名单 1 → 0 条（清零）;ADR §0/§1.2/§2.1/§3.1/§4 同步;im05/im08/im09/im10/im_contracts 79/79 回归通过;dart analyze 1 unused_import 警告(预先存在,与本次改动无关)。
+
+- **IM-10 phase J（pending push）**：IM-11 静态门禁收口。
+  - `lib/src/` 内 `setMessageList\s*\(` 命中数 = 0（rg 扫描）
+  - `test/im10_migration_scan_test.dart` 3/3 PASS（allowList 指向真实调用、ADR drift 一致、rg scan 是 allowList 超集）
+  - 5 文件 IM 套件 79/79 PASS（im05/im08/im09/im10/im_contracts）
+  - ADR §0/§1.2/§2.1/§3.1/§4 全部对齐;§3.1 白名单为空。
+  - phase H/I（Row namespace + pending overlay）属于新组件设计,不在本次收口范围。
 
 ## 5. 未完成
 
