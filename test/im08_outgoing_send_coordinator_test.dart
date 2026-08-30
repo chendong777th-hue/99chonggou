@@ -1,4 +1,4 @@
-﻿// IM-08 failure-path contracts for the single outgoing-send pipeline.
+// IM-08 failure-path contracts for the single outgoing-send pipeline.
 //
 // These tests enforce the design-document invariants around OutcomeUnknown,
 // failed message marking, cross-account rejection, and per-image operation
@@ -6,6 +6,9 @@
 // and must not be relaxed to satisfy unrelated code.
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:tencent_cloud_chat_demo/src/services/chat_failed_message_retry_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/contracts/account_scoped_conversation_key.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/contracts/outgoing_identity_contract.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/contracts/sdk_result.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/im05_contracts.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im/im05_persistence.dart';
@@ -548,6 +551,173 @@ void main() {
         ),
       );
       expect(main?.state, ImOutboxState.failedTerminal);
+    });
+  });
+
+  group('IM-08 hashOutgoingOperationId covers multi-image and cross-account',
+      () {
+    AccountScopedConversationKey scopeFor({
+      required String owner,
+      required ImConversationType type,
+      required String conversationId,
+    }) =>
+        AccountScopedConversationKey(
+          ownerUserId: owner,
+          conversationType: type,
+          conversationId: conversationId,
+        );
+
+    test(
+        'same scope + different sdkLocalIds produce distinct operationIds '
+        'and stable clientCorrelationIds', () {
+      final scope = scopeFor(
+        owner: 'alice',
+        type: ImConversationType.c2c,
+        conversationId: 'c2c_bob',
+      );
+      final img1 = hashOutgoingOperationId(scope: scope, sdkLocalId: 'img-1');
+      final img2 = hashOutgoingOperationId(scope: scope, sdkLocalId: 'img-2');
+      final img3 = hashOutgoingOperationId(scope: scope, sdkLocalId: 'img-3');
+
+      expect(img1, isNot(equals(img2)));
+      expect(img2, isNot(equals(img3)));
+      expect(img1, isNot(equals(img3)));
+
+      // Stability: the same input always hashes to the same key.
+      expect(
+        hashOutgoingOperationId(scope: scope, sdkLocalId: 'img-1'),
+        equals(img1),
+      );
+
+      final client1 = hashOutgoingClientCorrelationId('img-1');
+      final client2 = hashOutgoingClientCorrelationId('img-2');
+      expect(client1, isNot(equals(client2)));
+      expect(client1, equals(hashOutgoingClientCorrelationId('img-1')));
+    });
+
+    test(
+        'same sdkLocalId in two conversations of the same owner produces '
+        'distinct operationIds', () {
+      final c2c = scopeFor(
+        owner: 'alice',
+        type: ImConversationType.c2c,
+        conversationId: 'c2c_bob',
+      );
+      final group = scopeFor(
+        owner: 'alice',
+        type: ImConversationType.group,
+        conversationId: 'group_@TGS#_room',
+      );
+      final secondC2c = scopeFor(
+        owner: 'alice',
+        type: ImConversationType.c2c,
+        conversationId: 'c2c_carol',
+      );
+
+      final c2cId = hashOutgoingOperationId(scope: c2c, sdkLocalId: 'img-1');
+      final groupId =
+          hashOutgoingOperationId(scope: group, sdkLocalId: 'img-1');
+      final secondC2cId =
+          hashOutgoingOperationId(scope: secondC2c, sdkLocalId: 'img-1');
+
+      expect(c2cId, isNot(equals(groupId)));
+      expect(c2cId, isNot(equals(secondC2cId)));
+      expect(groupId, isNot(equals(secondC2cId)));
+    });
+
+    test(
+        'two logged-in accounts with the same conversation + sdkLocalId '
+        'produce distinct operationIds', () {
+      final aliceScope = scopeFor(
+        owner: 'alice',
+        type: ImConversationType.c2c,
+        conversationId: 'c2c_bob',
+      );
+      final carolScope = scopeFor(
+        owner: 'carol',
+        type: ImConversationType.c2c,
+        conversationId: 'c2c_bob',
+      );
+
+      final aliceId =
+          hashOutgoingOperationId(scope: aliceScope, sdkLocalId: 'img-1');
+      final carolId =
+          hashOutgoingOperationId(scope: carolScope, sdkLocalId: 'img-1');
+
+      expect(aliceId, isNot(equals(carolId)),
+          reason: 'Outbox operation identity must be scoped by owner to '
+              'prevent cross-account pollution from late callbacks');
+    });
+
+    test('rejects empty sdkLocalId with ArgumentError', () {
+      final scope = scopeFor(
+        owner: 'alice',
+        type: ImConversationType.c2c,
+        conversationId: 'c2c_bob',
+      );
+      expect(
+        () => hashOutgoingOperationId(scope: scope, sdkLocalId: ''),
+        throwsArgumentError,
+      );
+      expect(
+        () => hashOutgoingOperationId(scope: scope, sdkLocalId: '   '),
+        throwsArgumentError,
+      );
+      expect(
+        () => hashOutgoingClientCorrelationId(''),
+        throwsArgumentError,
+      );
+    });
+  });
+
+  group(
+      'IM-08 ChatFailedMessageRetryService.detectConversationType routes '
+      'stuck messages through the Outbox', () {
+    final service = ChatFailedMessageRetryService.instance;
+
+    test('c2c storage keys resolve to ImConversationType.c2c', () {
+      expect(service.detectConversationType('c2c_bob'), ImConversationType.c2c);
+      expect(
+        service.detectConversationType('C2C_BOB'),
+        ImConversationType.c2c,
+        reason: 'prefix detection must be case-insensitive',
+      );
+    });
+
+    test('group storage keys resolve to ImConversationType.group', () {
+      expect(
+        service.detectConversationType('group_@TGS#_room'),
+        ImConversationType.group,
+      );
+      expect(
+        service.detectConversationType('GROUP_room1'),
+        ImConversationType.group,
+      );
+    });
+
+    test('empty or unknown shapes return null (UI fallback only)', () {
+      expect(service.detectConversationType(''), isNull);
+      expect(service.detectConversationType('   '), isNull);
+      expect(service.detectConversationType('bob'), isNull);
+      expect(service.detectConversationType('@TGS#_room'), isNull);
+    });
+
+    test('c2c and group storage keys never collide for the same peer id', () {
+      // Defends against a regression that would route a c2c_<uid> message
+      // through ImConversationType.group (or vice versa) and orphan the
+      // Outbox row.
+      expect(
+        service.detectConversationType('c2c_@TGS#_room'),
+        ImConversationType.c2c,
+      );
+      expect(
+        service.detectConversationType('group_@TGS#_room'),
+        ImConversationType.group,
+      );
+      expect(
+        service.detectConversationType('c2c_@TGS#_room'),
+        isNot(equals(service.detectConversationType('group_@TGS#_room'))),
+      );
     });
   });
 }

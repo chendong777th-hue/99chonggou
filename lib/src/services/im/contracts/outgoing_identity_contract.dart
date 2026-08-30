@@ -1,4 +1,6 @@
-import 'dart:convert';
+﻿import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
 
 import 'account_scoped_conversation_key.dart';
 
@@ -172,4 +174,33 @@ String? _optionalId(String? value) {
 int? _asInt(Object? value) {
   if (value is int) return value;
   return int.tryParse(value?.toString() ?? '');
+}
+
+/// Canonical hashes shared by the coordinator and any caller that needs to
+/// re-derive the Outbox key for an in-flight outgoing operation (for
+/// example a late failed-retry reconciliation). The hashing scheme must
+/// stay stable; changing it would orphan live Outbox rows and resurrect
+/// duplicate optimistic bubbles.
+String hashOutgoingOperationId({
+  required AccountScopedConversationKey scope,
+  required String sdkLocalId,
+}) {
+  final localId = sdkLocalId.trim();
+  if (localId.isEmpty) {
+    throw ArgumentError.value(sdkLocalId, 'sdkLocalId', 'must not be empty');
+  }
+  final digest = sha256
+      .convert(utf8.encode('send|${scope.storageKey}|$localId'))
+      .toString()
+      .substring(0, 32);
+  return 'send_$digest';
+}
+
+String hashOutgoingClientCorrelationId(String sdkLocalId) {
+  final localId = sdkLocalId.trim();
+  if (localId.isEmpty) {
+    throw ArgumentError.value(sdkLocalId, 'sdkLocalId', 'must not be empty');
+  }
+  final digest = sha256.convert(utf8.encode('client|$localId')).toString();
+  return 'client_${digest.substring(0, 24)}';
 }

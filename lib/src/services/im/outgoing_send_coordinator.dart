@@ -1,4 +1,4 @@
-import 'dart:convert';
+﻿import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
@@ -329,17 +329,11 @@ ImCoordinatedSendResult _blocked({
 String _operationId({
   required AccountScopedConversationKey scope,
   required String sdkLocalId,
-}) {
-  final digest = sha256.convert(
-    utf8.encode('send|${scope.storageKey}|${sdkLocalId.trim()}'),
-  );
-  return 'send_${digest.toString().substring(0, 32)}';
-}
+}) =>
+    hashOutgoingOperationId(scope: scope, sdkLocalId: sdkLocalId);
 
-String _clientCorrelationId(String sdkLocalId) {
-  final digest = sha256.convert(utf8.encode('client|${sdkLocalId.trim()}'));
-  return 'client_${digest.toString().substring(0, 24)}';
-}
+String _clientCorrelationId(String sdkLocalId) =>
+    hashOutgoingClientCorrelationId(sdkLocalId);
 
 String _payloadFingerprint({
   required V2TimMessage? message,
