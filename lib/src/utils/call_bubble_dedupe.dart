@@ -6,6 +6,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/web_chat_open_policy.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_delta.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/regexp_probe.dart';
@@ -280,12 +281,20 @@ class CallBubbleDedupe {
           );
           return;
         }
-        globalModel.setMessageList(
-          convKey,
-          deduped,
-          needResetNewMessageCount: false,
-          replace: applyCallOnly,
-          isDeleteMsg: !applyCallOnly,
+        globalModel.commitMessageDelta(
+          MessageDelta<V2TimMessage>(
+            conversationKey: convKey,
+            eventID:
+                'call_bubble_dedupe${applyCallOnly ? "_call_only" : "_full"}:${DateTime.now().microsecondsSinceEpoch}',
+            kind: applyCallOnly
+                ? MessageDeltaKind.localMetadata
+                : MessageDeltaKind.delete,
+            source: MessageDeltaSource.compatibilityProjection,
+            generation: globalModel.messageDeltaGenerationFor(convKey),
+            clearEpoch: globalModel.messageDeltaClearEpochFor(convKey),
+            replace: true,
+            upserts: deduped.map(globalModel.messageDeltaRecord),
+          ),
         );
         debugPrint(
           '[CallBubble] dedupeConversation reason=$reason conv=$convKey '

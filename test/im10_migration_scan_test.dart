@@ -15,7 +15,6 @@ import 'package:flutter_test/flutter_test.dart';
 
 const List<String> _allowList = <String>[
   'lib/src/services/silent_archive_service.dart:235',
-  'lib/src/utils/call_bubble_dedupe.dart:283',
 ];
 
 void main() {
