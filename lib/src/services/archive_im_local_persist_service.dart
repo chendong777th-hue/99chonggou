@@ -8,6 +8,7 @@ import 'package:tencent_cloud_chat_sdk/enum/message_status.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 import 'package:tencent_cloud_chat_sdk/tencent_im_sdk_plugin.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_delta.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/chat_history_trace.dart';
@@ -341,7 +342,19 @@ class ArchiveImLocalPersistService {
         if (next.length == list.length) {
           continue;
         }
-        global.setMessageList(key, next, replace: true);
+        global.commitMessageDelta(
+          MessageDelta<V2TimMessage>(
+            conversationKey: key,
+            eventID:
+                'archive_strip_memory_ids:${DateTime.now().microsecondsSinceEpoch}',
+            kind: MessageDeltaKind.delete,
+            source: MessageDeltaSource.compatibilityProjection,
+            generation: global.messageDeltaGenerationFor(key),
+            clearEpoch: global.messageDeltaClearEpochFor(key),
+            replace: true,
+            upserts: next.map(global.messageDeltaRecord),
+          ),
+        );
       }
     } catch (_) {
       // serviceLocator 未就绪时忽略；本地删除仍继续。
@@ -763,9 +776,18 @@ class ArchiveImLocalPersistService {
           return m;
         }).toList(growable: false);
         if (changed) {
-          global.setMessageList(
-            key,
-            next,
+          global.commitMessageDelta(
+            MessageDelta<V2TimMessage>(
+              conversationKey: key,
+              eventID:
+                  'archive_rewrite_memory_identity:${DateTime.now().microsecondsSinceEpoch}',
+              kind: MessageDeltaKind.edit,
+              source: MessageDeltaSource.compatibilityProjection,
+              generation: global.messageDeltaGenerationFor(key),
+              clearEpoch: global.messageDeltaClearEpochFor(key),
+              replace: true,
+              upserts: next.map(global.messageDeltaRecord),
+            ),
           );
         }
       }
