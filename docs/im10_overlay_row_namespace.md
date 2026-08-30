@@ -2,7 +2,7 @@
 
 更新时间：2026-08-30 (phase G 收口)
 前置：IM-04 / IM-07 / IM-08 / IM-09 phase 1+2 / IM-10 phase A/B/C/D/E/F/G 已推送 (`2555fe9c` / `deae4f3c` / `d3ab34be` / `c8975a30` / `93359c52` / `2749bb28` / `43c12f8c` / `6d3b93ea` / `95b6ebad`)
-状态：`Adopted`（lib/src setMessageList 全收敛,phase J 静态门禁通过;phase H/I Row/Pending overlay 属新组件,留给后续 ADR）
+状态：`Adopted`（IM-11 静态+单元+扫描门禁脚本化 + GitHub Actions 接入;lib/src setMessageList 全收敛;phase H/I Row/Pending overlay 属新组件,留给后续 ADR）
 前置：IM-04 / IM-07 / IM-08 / IM-09 phase 1+2 / IM-10 phase A/B/C/D/E/F 已推送 (`2555fe9c` / `deae4f3c` / `d3ab34be` / `c8975a30` / `93359c52` / `2749bb28` / `43c12f8c` / `6d3b93ea`)
 
 本文是 IM-10 的静态扫描结果 + 迁移策略文档。
@@ -132,13 +132,27 @@ rg -n --glob '*.dart' 'messageListMap\s*\[\s*[a-z]' lib third_party
 
 ### 3.2 门禁脚本
 
-`tool/im10_migration_scan.ps1`：
+IM-11 由两条脚本组成：
 
-1. 扫描 `setMessageList` 调用方
-2. 对比白名单
-3. 任何白名单外的命中 → exit 1
+- `tool/im10_migration_scan.ps1` — 仅做静态 rg 扫描 + 白名单比对。独立可跑，CI 和本地都用。
+- `tool/im_gate.ps1` — IM-11 主入口，按顺序执行：
+  1. `dart format --output=none --set-exit-if-changed`（`lib/src/services/im/**` + `test/im*_*.dart`）
+  2. `dart analyze --fatal-infos --fatal-warnings`（同上路径）
+  3. `flutter test --no-pub`（7 文件 IM 套件：im04/im05/im06/im08/im09/im10/im_contracts）
+  4. `pwsh -File tool/im10_migration_scan.ps1`（静态扫描）
+  5. 汇总 + `exit 0` / `exit 1`
 
-预期 IM-10 phase J 跑时白名单为空。
+用法：
+
+```powershell
+pwsh -NoProfile -ExecutionPolicy Bypass -File tool/im_gate.ps1            # 全跑
+./tool/im_gate.ps1 -SkipFormat    ./tool/im_gate.ps1 -SkipAnalyze
+./tool/im_gate.ps1 -SkipTest      ./tool/im_gate.ps1 -SkipScan
+```
+
+CI：`.github/workflows/im-gate.yml`（push / PR → windows-latest → 跑 `tool/im_gate.ps1`）。
+
+预期：本地 + CI 都必须 `exit 0`。任何 1 → 阻止 PR 合并。
 
 ---
 
@@ -176,6 +190,13 @@ rg -n --glob '*.dart' 'messageListMap\s*\[\s*[a-z]' lib third_party
   - 5 文件 IM 套件 79/79 PASS（im05/im08/im09/im10/im_contracts）
   - ADR §0/§1.2/§2.1/§3.1/§4 全部对齐;§3.1 白名单为空。
   - phase H/I（Row namespace + pending overlay）属于新组件设计,不在本次收口范围。
+
+- **IM-11（pending push / adopted）**：静态 + 单元 + 扫描门禁脚本化 + GitHub Actions 接入。
+  - `tool/im_gate.ps1` 串起 format / analyze / 7 文件 IM 套件 / `tool/im10_migration_scan.ps1`。修了一个 PowerShell 函数返回 bug：`& $dartExe @all` 的 stdout 会进入函数 success stream,加上 `return $LASTEXITCODE` 后调用方拿到 `[stdout..., exitcode]` 数组,导致 `$code -ne 0` 永远为 true。修复：`& $dartExe @all | Out-Host`（把 stdout 路由到信息流）+ `return [int] $LASTEXITCODE`（强转保证纯整数）。
+  - `.github/workflows/im-gate.yml`：`on: push/pull_request branches:[main]` + `runs-on: windows-latest` + `subosito/flutter-action@v2 flutter-version:3.44.1 channel:stable` + 跑 `pwsh -NoProfile -ExecutionPolicy Bypass -File tool/im_gate.ps1` + 失败时 `upload-artifact im-gate-log`。
+  - 本地验证 (`pwsh -File tool/im_gate.ps1`)：format OK / analyze OK / 7 文件 93 测试全 PASS（im04:4 im05:10 im06:10 im08:19 im09:21 im10:3 im_contracts:26）/ scan OK；最终 `[IM-11] all gates PASS` + `exit 0`。
+  - `lib/src/` `setMessageList` 命中 = 0，`messageListMap` 写路径 = 0，allowList 空；与 IM-10 phase J 不变量一致。
+
 
 ## 5. 未完成
 
