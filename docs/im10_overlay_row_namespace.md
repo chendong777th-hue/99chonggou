@@ -22,7 +22,7 @@
 | 群提示 | `LocalMessageOverlayStore.upsert` + `group_local_tips_service.dart` | Overlay（已就位） |
 | 群提示补丁 | `group_tips_operator_patch_service.dart::setMessageList` | 必须改走 Writer（`commitMessageDelta`） |
 | 通话气泡去重 | `utils/call_bubble_dedupe.dart::setMessageList` | 必须改走 Writer（`commitMessageDelta`） |
-| 历史 bootstrap | `chat.dart:3853/3862/8053/8422/9868` | 必须改走 Writer |
+| 历史 bootstrap | `chat.dart:8070/8439/9885 (3853/3862 已迁至 writer)` | 必须改走 Writer |
 | 归档写入 | `archive_im_local_persist_service.dart:344/766` | 必须改走 Writer |
 | 静默归档 | `silent_archive_service.dart:235` | 必须改走 Writer |
 | 时间线 / 未读线 / 加载行 | chat list 内嵌渲染 | Row namespace（待设计） |
@@ -53,11 +53,9 @@
 `lib/src/` 内（11 处）：
 
 ```
-lib/src/chat.dart:3853       _normalizeOfficialAccountMessageAvatars + setMessageList
-lib/src/chat.dart:3862       _normalizeOfficialAccountMessageAvatars + setMessageList
-lib/src/chat.dart:8053       _refreshChatHistoryPreviewMerge + setMessageList
-lib/src/chat.dart:8422       unknown bootstrap path
-lib/src/chat.dart:9868       unknown bootstrap path
+lib/src/chat.dart:8070       _refreshChatHistoryPreviewMerge + setMessageList
+lib/src/chat.dart:8439       unknown bootstrap path
+lib/src/chat.dart:9885       unknown bootstrap path
 lib/src/services/archive_im_local_persist_service.dart:344
 lib/src/services/archive_im_local_persist_service.dart:766
 lib/src/services/group_local/group_tips_operator_patch_service.dart:207
@@ -88,8 +86,8 @@ lib/src/utils/call_bubble_dedupe.dart:283
 | 阶段 | 子阶段 | 范围 | PR 编号 |
 | --- | --- | --- | --- |
 | **IM-10 phase A**（本阶段） | ADR + 静态扫描脚本 + 1 个静态门禁测试 | 文档 + 脚本 | `im10: ADR + 静态扫描 + 门禁` |
-| IM-10 phase B | `chat.dart:3853/3862` 历史 bootstrap 改为 `commitMessageDelta` | 生产代码 | `im10: chat history bootstrap -> writer` |
-| IM-10 phase C | `chat.dart:8053/8422/9868` 预览合并改为 `commitMessageDelta` | 生产代码 | `im10: chat preview merge -> writer` |
+| IM-10 phase B | `chat.dart:3853/3862` 历史 bootstrap 改为 `commitMessageDelta` | 生产代码 done | `im10: chat history bootstrap -> writer` |
+| IM-10 phase C | `chat.dart:8070/8439/9885` 预览合并改为 `commitMessageDelta` | 生产代码 | `im10: chat preview merge -> writer` |
 | IM-10 phase D | `archive_im_local_persist_service` 归档写改为 `commitMessageDelta` | 生产代码 | `im10: archive write -> writer` |
 | IM-10 phase E | `group_tips_operator_patch_service` 群提示补丁改为 `commitMessageDelta` | 生产代码 | `im10: group tips patch -> writer` |
 | IM-10 phase F | `call_bubble_dedupe` 通话气泡去重视图合并改为 `commitMessageDelta` | 生产代码 | `im10: call bubble dedupe -> writer` |
@@ -137,11 +135,9 @@ rg -n --glob '*.dart' 'messageListMap\s*\[\s*[a-z]' lib third_party
 `lib/src/` 内允许的 `setMessageList` 调用方：
 
 ```
-lib/src/chat.dart:3853
-lib/src/chat.dart:3862
-lib/src/chat.dart:8053
-lib/src/chat.dart:8422
-lib/src/chat.dart:9868
+lib/src/chat.dart:8070
+lib/src/chat.dart:8439
+lib/src/chat.dart:9885
 lib/src/services/archive_im_local_persist_service.dart:344
 lib/src/services/archive_im_local_persist_service.dart:766
 lib/src/services/group_local/group_tips_operator_patch_service.dart:207

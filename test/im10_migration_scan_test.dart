@@ -14,11 +14,9 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 const List<String> _allowList = <String>[
-  'lib/src/chat.dart:3853',
-  'lib/src/chat.dart:3862',
-  'lib/src/chat.dart:8053',
-  'lib/src/chat.dart:8422',
-  'lib/src/chat.dart:9868',
+  'lib/src/chat.dart:8070',
+  'lib/src/chat.dart:8439',
+  'lib/src/chat.dart:9885',
   'lib/src/services/archive_im_local_persist_service.dart:344',
   'lib/src/services/archive_im_local_persist_service.dart:766',
   'lib/src/services/group_local/group_tips_operator_patch_service.dart:207',

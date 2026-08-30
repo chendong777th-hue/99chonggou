@@ -186,6 +186,7 @@ import 'package:tencent_cloud_chat_uikit/business_logic/life_cycle/chat_life_cyc
 import 'package:tencent_cloud_chat_uikit/business_logic/separate_models/tui_chat_model_tools.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/services/group_member_store.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_delta.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_conversation_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/core/tim_uikit_wide_modal_operation_key.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/archive_history_provider.dart';
@@ -3850,19 +3851,35 @@ class _ChatState extends State<Chat> with WidgetsBindingObserver {
     if (existing != null && existing.isNotEmpty) {
       _normalizeOfficialAccountMessageAvatars(userId, existing);
       _normalizeSelfMessageAvatars(existing);
-      globalModel.setMessageList(
-        userId,
-        existing,
-        needResetNewMessageCount: false,
+      globalModel.commitMessageDelta(
+        MessageDelta<V2TimMessage>(
+          conversationKey: userId,
+          eventID:
+              'official_account_hydrate_existing:${DateTime.now().microsecondsSinceEpoch}',
+          kind: MessageDeltaKind.optimisticAdoption,
+          source: MessageDeltaSource.historyEnvelope,
+          generation: globalModel.messageDeltaGenerationFor(userId),
+          clearEpoch: globalModel.messageDeltaClearEpochFor(userId),
+          replace: true,
+          upserts: existing.map(globalModel.messageDeltaRecord),
+        ),
       );
       return;
     }
     _normalizeOfficialAccountMessageAvatars(userId, messages);
     _normalizeSelfMessageAvatars(messages);
-    globalModel.setMessageList(
-      userId,
-      messages,
-      needResetNewMessageCount: false,
+    globalModel.commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: userId,
+        eventID:
+            'official_account_hydrate:${DateTime.now().microsecondsSinceEpoch}',
+        kind: MessageDeltaKind.optimisticAdoption,
+        source: MessageDeltaSource.historyEnvelope,
+        generation: globalModel.messageDeltaGenerationFor(userId),
+        clearEpoch: globalModel.messageDeltaClearEpochFor(userId),
+        replace: true,
+        upserts: messages.map(globalModel.messageDeltaRecord),
+      ),
     );
     globalModel.setMessageListPosition(userId, HistoryMessagePosition.bottom);
   }
