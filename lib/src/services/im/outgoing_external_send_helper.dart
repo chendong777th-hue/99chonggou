@@ -42,12 +42,18 @@ class OutgoingExternalSendHelper {
   ///   - prepared=false: lease 不可用或 scope 非法,Outbox 没写入
   ///   - outcomeUnknown=true: 主表或恢复副本状态冲突,不能继续
   static Future<ExternalOutboxRecordOutcome> recordOutboxEntryForExternal({
-    required V2TimMessage message,
+    required V2TimMessage? message,
     required String sdkLocalId,
     required String ownerUserId,
     required ImConversationType conversationType,
     required String conversationId,
   }) async {
+    if (message == null) {
+      return const ExternalOutboxRecordOutcome(
+        prepared: false,
+        outcomeUnknown: false,
+      );
+    }
     final context = await ConversationSyncService.instance
         .messageCoreLeaseForOutgoingSend();
     if (context == null || context.ownerUserId != ownerUserId) {
