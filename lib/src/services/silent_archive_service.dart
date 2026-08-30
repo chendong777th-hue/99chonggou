@@ -10,6 +10,7 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/life_cycle/chat_life_cycle.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_delta.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/archive_history_provider.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
@@ -232,11 +233,18 @@ class SilentArchiveService {
         return;
       }
 
-      globalModel.setMessageList(
-        key,
-        merged,
-        needResetNewMessageCount: false,
-        replace: true,
+      globalModel.commitMessageDelta(
+        MessageDelta<V2TimMessage>(
+          conversationKey: key,
+          eventID:
+              'silent_archive_initial_supplement:${DateTime.now().microsecondsSinceEpoch}',
+          kind: MessageDeltaKind.optimisticAdoption,
+          source: MessageDeltaSource.historyEnvelope,
+          generation: globalModel.messageDeltaGenerationFor(key),
+          clearEpoch: globalModel.messageDeltaClearEpochFor(key),
+          replace: true,
+          upserts: merged.map(globalModel.messageDeltaRecord),
+        ),
       );
       globalModel.markInitialHistoryLoaded(key);
       globalModel.markInitialHistoryMayHaveOlder(

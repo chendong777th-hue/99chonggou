@@ -13,9 +13,7 @@
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
-const List<String> _allowList = <String>[
-  'lib/src/services/silent_archive_service.dart:235',
-];
+const List<String> _allowList = <String>[];
 
 void main() {
   group('IM-10 allow list points at real setMessageList calls', () {
