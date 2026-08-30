@@ -1,0 +1,54 @@
+name: im-gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  im-gate:
+    name: IM-11 static + unit gate
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      FLUTTER_ROOT: D:\flutter_windows_3.44.1-stable\flutter
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Setup Flutter (Windows)
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.1
+          channel: stable
+          cache: true
+
+      - name: Show Flutter version
+        shell: pwsh
+        run: flutter --version
+
+      - name: Pre-create flutter cache dirs (sandbox path safety)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path .dart-appdata,.dart-localappdata | Out-Null
+
+      - name: Run IM-11 gate
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass -File tool/im_gate.ps1
+
+      - name: Upload gate log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: im-gate-log
+          path: |
+            _im_gate_run.log
+            **/*.log
+          if-no-files-found: ignore
