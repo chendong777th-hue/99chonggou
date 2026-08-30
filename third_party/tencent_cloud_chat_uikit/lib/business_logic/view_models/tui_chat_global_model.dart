@@ -8638,10 +8638,19 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       },
     );
     final sendMsgRes = coordinatedSend.sdkResult;
+    // IM-08: when the SDK Future resolves OutcomeUnknown, the dispatch path
+    // cannot prove the provider accepted or rejected the operation. The
+    // Outbox main + recovery copy already record OutcomeUnknown; the
+    // single Writer must keep the optimistic bubble in SENDING and wait
+    // for history/realtime to claim it. Auto-committing a success/failed
+    // projection here would resurrect an in-flight message or flash a
+    // red retry icon on a still-pending send.
     var projectionCommitted = true;
-    if (isEditStatusMessage == false) {
+    if (isEditStatusMessage == false && !coordinatedSend.outcomeUnknown) {
       projectionCommitted = applyOutgoingSendResult(
           sendMsgRes, convID, id, convType, receiptGroupType, setInputField);
+    } else if (coordinatedSend.outcomeUnknown) {
+      projectionCommitted = false;
     }
     if (projectionCommitted && coordinatedSend.canCompleteProjection) {
       await ImOutgoingSendCoordinator.instance.completeSuccessfulProjection(

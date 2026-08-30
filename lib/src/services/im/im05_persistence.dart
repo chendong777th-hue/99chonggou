@@ -910,8 +910,13 @@ class Im05Persistence {
               copy.state == ImOutboxCopyState.reconciled)) {
         return true;
       }
-      if (main.state != ImOutboxState.sending &&
-          main.state != ImOutboxState.outcomeUnknown) {
+      // IM-08: a late SDK success/failure callback must never silently
+      // overwrite an already-resolved OutcomeUnknown. The single Writer
+      // keeps OutcomeUnknown open until history, realtime or an explicit
+      // recovery query adopts the operation; transitioning it from the
+      // dispatch path would resurrect or fail UI bubbles that the user
+      // is still waiting on.
+      if (main.state != ImOutboxState.sending) {
         return false;
       }
 
