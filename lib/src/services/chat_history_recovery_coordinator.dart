@@ -144,16 +144,15 @@ class ChatHistoryRecoveryCoordinator {
       return true;
     }
     final normalizedReason = reason.trim();
-    // im_reconnected (real socket disconnect+reconnect) must never be
-    // coalesced — it is the most authoritative recovery signal and the
-    // missing messages may only be retrievable via this path.
-    if (normalizedReason == 'im_reconnected') {
-      return false;
-    }
     if (normalizedReason != 'app_resumed' &&
-        normalizedReason != 'connect_success') {
+        normalizedReason != 'connect_success' &&
+        normalizedReason != 'im_reconnected') {
       return false;
     }
+    // IM_RECONNECT 仍然走 coalesce 窗口:同一个 unlock 事件可能在几百毫秒内
+    // 触发 app_resumed + im_reconnected 两个信号,合并第二次避免重复拉历史。
+    // 超过窗口 (foregroundRequestCoalesceWindow) 后,im_reconnected 会再次
+    // 通过,作为权威恢复路径处理真正的断线重连。
     final state = _states.putIfAbsent(key, _ConversationRecoveryState.new);
     final now = DateTime.now();
     final last = state.lastForegroundRequestAt;
