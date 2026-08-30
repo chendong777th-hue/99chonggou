@@ -13,6 +13,7 @@ import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_demo/utils/group_tips_message_helper.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/message_delta.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/group/self_hosted_group_bridge.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
@@ -204,11 +205,18 @@ class GroupTipsOperatorPatchService {
         current,
         filtered,
       )) {
-        globalModel.setMessageList(
-          key,
-          filtered,
-          needResetNewMessageCount: false,
-          replace: true,
+        globalModel.commitMessageDelta(
+          MessageDelta<V2TimMessage>(
+            conversationKey: key,
+            eventID:
+                'group_tips_patch_operator:${DateTime.now().microsecondsSinceEpoch}',
+            kind: MessageDeltaKind.localMetadata,
+            source: MessageDeltaSource.userAction,
+            generation: globalModel.messageDeltaGenerationFor(key),
+            clearEpoch: globalModel.messageDeltaClearEpochFor(key),
+            replace: true,
+            upserts: filtered.map(globalModel.messageDeltaRecord),
+          ),
         );
         patchedAny = true;
       }
@@ -252,11 +260,18 @@ class GroupTipsOperatorPatchService {
       )) {
         continue;
       }
-      globalModel.setMessageList(
-        key,
-        newestFirst,
-        needResetNewMessageCount: false,
-        replace: true,
+      globalModel.commitMessageDelta(
+        MessageDelta<V2TimMessage>(
+          conversationKey: key,
+          eventID:
+              'group_tips_decorate:${DateTime.now().microsecondsSinceEpoch}',
+          kind: MessageDeltaKind.localMetadata,
+          source: MessageDeltaSource.userAction,
+          generation: globalModel.messageDeltaGenerationFor(key),
+          clearEpoch: globalModel.messageDeltaClearEpochFor(key),
+          replace: true,
+          upserts: newestFirst.map(globalModel.messageDeltaRecord),
+        ),
       );
     }
   }

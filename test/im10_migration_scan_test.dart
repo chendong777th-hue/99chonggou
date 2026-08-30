@@ -14,8 +14,6 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 
 const List<String> _allowList = <String>[
-  'lib/src/services/group_local/group_tips_operator_patch_service.dart:207',
-  'lib/src/services/group_local/group_tips_operator_patch_service.dart:255',
   'lib/src/services/silent_archive_service.dart:235',
   'lib/src/utils/call_bubble_dedupe.dart:283',
 ];

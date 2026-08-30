@@ -1,4 +1,4 @@
-# IM-10 Overlay/Row namespace 迁移计划
+﻿# IM-10 Overlay/Row namespace 迁移计划
 
 更新时间：2026-08-30 (phase C 收口)
 工作包：IM-10（基于 `docs/腾讯IM模式一_专用消息服务架构设计_重梳版.md` 第 18 节 Overlay/Row 命名空间 + 第 29 节 ADR-008）
@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | 通话气泡 | `LocalMessageOverlayStore.upsert` + `chat.dart:messageListProjectionBuilder` | Overlay（已就位） |
 | 群提示 | `LocalMessageOverlayStore.upsert` + `group_local_tips_service.dart` | Overlay（已就位） |
-| 群提示补丁 | `group_tips_operator_patch_service.dart::setMessageList` | 必须改走 Writer（`commitMessageDelta`） |
+| 群提示补丁 | `group_tips_operator_patch_service.dart::setMessageList` (已迁至 writer) | Writer 已就位 |
 | 通话气泡去重 | `utils/call_bubble_dedupe.dart::setMessageList` | 必须改走 Writer（`commitMessageDelta`） |
 | 历史 bootstrap | `chat.dart:8070/8439/9885 (已迁至 writer)` | Writer 已就位 |
 | 归档写入 | `archive_im_local_persist_service.dart:344/766` (已迁至 writer) | Writer 已就位 |
@@ -53,8 +53,6 @@
 `lib/src/` 内（11 处）：
 
 ```
-lib/src/services/group_local/group_tips_operator_patch_service.dart:207
-lib/src/services/group_local/group_tips_operator_patch_service.dart:255
 lib/src/services/silent_archive_service.dart:235
 lib/src/utils/call_bubble_dedupe.dart:283
 ```
@@ -84,7 +82,7 @@ lib/src/utils/call_bubble_dedupe.dart:283
 | IM-10 phase B | `chat.dart:3853/3862` 历史 bootstrap 改为 `commitMessageDelta` | 生产代码 done | `im10: chat history bootstrap -> writer` |
 | IM-10 phase C | `chat.dart:8070/8439/9885` 预览合并/全局去重/通话占位删除改为 `commitMessageDelta` | 生产代码 done | `im10: chat preview/dedupe/call placeholder -> writer` |
 | IM-10 phase D | `archive_im_local_persist_service` 归档写改为 `commitMessageDelta`（_stripMemoryIds/_rewriteMemoryIdentity 走 delete/edit + replace） | 生产代码 done | `im10: archive write -> writer` |
-| IM-10 phase E | `group_tips_operator_patch_service` 群提示补丁改为 `commitMessageDelta` | 生产代码 | `im10: group tips patch -> writer` |
+| IM-10 phase E | `group_tips_operator_patch_service` 群提示补丁改为 `commitMessageDelta`（_patchVisibleMessages/_decorateVisibleMessageList 走 localMetadata + replace） | 生产代码 done | `im10: group tips patch -> writer` |
 | IM-10 phase F | `call_bubble_dedupe` 通话气泡去重视图合并改为 `commitMessageDelta` | 生产代码 | `im10: call bubble dedupe -> writer` |
 | IM-10 phase G | `silent_archive_service` 静默归档改为 `commitMessageDelta` | 生产代码 | `im10: silent archive -> writer` |
 | IM-10 phase H | Row namespace（时间线 / 未读线 / 加载行） | 新组件 | `im10: row namespace design` |
@@ -130,8 +128,6 @@ rg -n --glob '*.dart' 'messageListMap\s*\[\s*[a-z]' lib third_party
 `lib/src/` 内允许的 `setMessageList` 调用方：
 
 ```
-lib/src/services/group_local/group_tips_operator_patch_service.dart:207
-lib/src/services/group_local/group_tips_operator_patch_service.dart:255
 lib/src/services/silent_archive_service.dart:235
 lib/src/utils/call_bubble_dedupe.dart:283
 ```
@@ -165,6 +161,11 @@ lib/src/utils/call_bubble_dedupe.dart:283
   - 344 `_stripMemoryIds`：`delete` + `compatibilityProjection` + `replace:true` + `upserts: next`（按 msgID 集合剥除内存中 spurious 记录，跨 alias key 多卷同步）
   - 766 `_rewriteMemoryIdentity`：`edit` + `compatibilityProjection` + `replace:true` + `upserts: next`（archive → cloud 提升时把本地 msgID 改写成 cloud msgID）
   - 白名单 6 → 4 条；ADR §0/§1.2/§2.1/§3.1 同步；`dart analyze archive_im_local_persist_service.dart` 0 issues。
+- **IM-10 phase E（pending push）**：`group_tips_operator_patch_service.dart` 2 处群提示补丁 → `commitMessageDelta`：
+  - 207 `_patchVisibleMessages`：`localMetadata` + `userAction` + `replace:true` + `upserts: filtered`（管理员群提示元数据修复,跨 alias key 同步）
+  - 255 `_decorateVisibleMessageList`：`localMetadata` + `userAction` + `replace:true` + `upserts: newestFirst`（群提示装饰排序,最新优先）
+  - 白名单 4 → 2 条;ADR §0/§1.2/§2.1/§3.1 同步;im05/im08/im09/im10/im_contracts 79/79 回归通过;dart analyze 1 unused_element 警告(预先存在,与本次改动无关)。
+
 ## 5. 未完成
 
 - 真机验证：6 类组件迁到 Overlay/Row 后的渲染顺序、滚动不跳底、撤回/删除前后锚点稳定、双 View 各自维护 anchor
