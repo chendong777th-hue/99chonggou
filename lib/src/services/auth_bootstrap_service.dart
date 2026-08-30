@@ -22,6 +22,7 @@ import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
 import 'package:tencent_cloud_chat_demo/src/services/session_diagnostics.dart';
 import 'package:tencent_cloud_chat_demo/src/services/notification_settings_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/platform_official_account_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/local_message_overlay_store.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/push_identity_cache.dart';
 import 'package:tencent_cloud_chat_demo/src/platform/listener_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
@@ -55,6 +56,7 @@ import 'package:tencent_cloud_chat_demo/utils/user_avatar.dart';
 import 'package:tencent_cloud_chat_sdk/tencent_im_sdk_plugin.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_conversation_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_friendship_view_model.dart';
+import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 
@@ -109,11 +111,61 @@ class AuthBootstrapService {
 
   /// SDK listeners are process-wide. A callback from an uninitialized SDK
   /// instance must never be interpreted as an event for the next account.
-  int registerImListenerEpoch() => ++_imListenerEpoch;
+  int registerImListenerEpoch() {
+    final epoch = ++_imListenerEpoch;
+    ConversationSyncService.instance.setMessageDomainGeneration(epoch);
+    return epoch;
+  }
 
-  int invalidateImListenerEpoch() => ++_imListenerEpoch;
+  int invalidateImListenerEpoch() {
+    final epoch = ++_imListenerEpoch;
+    ConversationSyncService.instance.setMessageDomainGeneration(epoch);
+    LocalMessageOverlayStore.instance.invalidateScope();
+    return epoch;
+  }
 
   bool isImListenerEpochCurrent(int epoch) => epoch == _imListenerEpoch;
+
+  /// Installs the host-owned account and IM-session scope before SDK login.
+  ///
+  /// The advanced message listener is registered before login completes, so
+  /// the Writer must already know which account/domain may accept an early
+  /// callback. The UIKit model deliberately does not infer this scope.
+  void configureMessageWriterScopeForSession({
+    required String ownerUserId,
+    required int accountGeneration,
+  }) {
+    final owner = ownerUserId.trim();
+    if (owner.isEmpty || accountGeneration < 0) {
+      _diag(
+        'AuthBootstrap: skip Message Writer scope with invalid session '
+        'owner=${owner.isEmpty ? '<empty>' : '<present>'} '
+        'accountGeneration=$accountGeneration',
+      );
+      return;
+    }
+    try {
+      serviceLocator<TUIChatGlobalModel>().configureMessageWriterScope(
+        ownerUserID: owner,
+        accountGeneration: accountGeneration,
+        domainGeneration: _imListenerEpoch,
+      );
+      LocalMessageOverlayStore.instance.configureScope(
+        ownerUserId: owner,
+        domainGeneration: _imListenerEpoch,
+      );
+      _trace(
+        'AuthBootstrap: Message Writer scope configured '
+        'accountGeneration=$accountGeneration '
+        'domainGeneration=$_imListenerEpoch',
+      );
+    } catch (e) {
+      // A missing UIKit locator is a real integration failure. Keep login
+      // behavior unchanged, but leave evidence instead of silently claiming
+      // that the Writer is scoped.
+      _diag('AuthBootstrap: Message Writer scope configure failed: $e');
+    }
+  }
 
   void bumpBootstrapGeneration({String reason = 'manual'}) {
     _bootstrapGeneration++;
@@ -1416,6 +1468,10 @@ class AuthBootstrapService {
     required int sessionGeneration,
   }) async {
     final gen = _loginGeneration;
+    configureMessageWriterScopeForSession(
+      ownerUserId: sig.userId,
+      accountGeneration: sessionGeneration,
+    );
     _trace(
       'AuthBootstrap: _doLoginImStack START gen=$gen loginKey=$loginKey',
     );
@@ -1577,7 +1633,7 @@ class AuthBootstrapService {
     );
 
     // Helper to attempt one login call.
-    Future<dynamic> _attemptLogin() async {
+    Future<dynamic> attemptLogin() async {
       final loginFuture = _trackImOperation(
         TIMUIKitCore.getInstance().login(
           userID: sig.userId,
@@ -1594,7 +1650,7 @@ class AuthBootstrapService {
       }
     }
 
-    final imRes = await _attemptLogin();
+    final imRes = await attemptLogin();
 
     // Timeout: native may already be logged in — check and treat as success.
     if (imRes == null) {
@@ -1625,7 +1681,7 @@ class AuthBootstrapService {
       _trace(
         'AuthBootstrap: _tryTimUIKitLogin code=6013, retrying once',
       );
-      final retryRes = await _attemptLogin();
+      final retryRes = await attemptLogin();
       if (retryRes != null && retryRes.code == 0) {
         _trace(
           'AuthBootstrap: _tryTimUIKitLogin retry OK code=0',

@@ -105,7 +105,8 @@ abstract class MessageService {
       OfflinePushInfo? offlinePushInfo,
       String? cloudCustomData, // 云自定义消息字段，只能在消息发送前添加
       String? localCustomData,
-      bool isExcludedFromContentModeration});
+      bool isExcludedFromContentModeration,
+      void Function(String syncMsgID)? onSyncMsgID});
 
   Future<V2TimValueCallback<V2TimMessage>> sendReplyMessage({
     required String id, // 自己创建的ID

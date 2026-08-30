@@ -13,6 +13,7 @@ import 'package:tencent_cloud_chat_demo/src/services/group_local/group_membershi
 import 'package:tencent_cloud_chat_demo/src/services/group_notice_incremental_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im_session_cache.dart';
 import 'package:tencent_cloud_chat_demo/src/services/local_account_data_purge.dart';
+import 'package:tencent_cloud_chat_demo/src/services/local_message_overlay_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/native_post_home_bootstrap_queue.dart';
 import 'package:tencent_cloud_chat_demo/src/provider/login_user_Info.dart';
 import 'package:tencent_cloud_chat_demo/src/services/session_identity.dart';
@@ -65,6 +66,7 @@ class AuthSessionService {
         SessionIdentityService.instance.resolveCurrentOwnerUserId();
     SessionIdentityService.instance.invalidate(reason: 'begin_login');
     ConversationUnreadClearService.clearSession();
+    LocalMessageOverlayStore.instance.invalidateScope();
     final previousOwner = await previousOwnerFuture;
     NativePostHomeBootstrapQueue.instance.reset(reason: 'begin_login');
     await ApiClient.instance.ensureDeviceIdReady();

@@ -35,24 +35,22 @@ class ChatFailedMessageRetryService {
       final list = entry.value;
       if (list == null || list.isEmpty) continue;
 
-      var changed = false;
-      final next = list.map((message) {
-        if (message.isSelf != true) return message;
+      for (final message in list) {
+        if (message.isSelf != true) continue;
         if (message.status != MessageStatus.V2TIM_MSG_STATUS_SENDING) {
-          return message;
+          continue;
         }
         final ts = message.timestamp ?? 0;
         // 无时间戳或已卡住足够久：落成失败，留给用户手动点感叹号重发。
         if (ts > 0 && ts > stuckBefore) {
-          return message;
+          continue;
         }
-        message.status = MessageStatus.V2TIM_MSG_STATUS_SEND_FAIL;
-        changed = true;
-        return message;
-      }).toList();
-
-      if (changed) {
-        globalModel.setMessageList(convID, next);
+        globalModel.markOutgoingSendFailedByIdentity(
+          conversationID: convID,
+          clientId: message.id,
+          msgID: message.msgID,
+          reason: 'stuck_sending',
+        );
       }
     }
 

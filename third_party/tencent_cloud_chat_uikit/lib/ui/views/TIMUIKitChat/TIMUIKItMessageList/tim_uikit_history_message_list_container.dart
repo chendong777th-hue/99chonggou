@@ -49,6 +49,14 @@ class TIMUIKitHistoryMessageListContainer extends StatefulWidget {
   /// message item builder, works for customize all message types and row layout.
   final MessageItemBuilder? messageItemBuilder;
 
+  /// Optional UI-only projection. The callback may add local overlay rows to
+  /// the formal message snapshot without changing pagination or Writer state.
+  final List<V2TimMessage?> Function(
+    String conversationID,
+    List<V2TimMessage?> formalMessages,
+  )? messageListProjectionBuilder;
+  final Listenable? messageListProjectionListenable;
+
   /// The controller for text field.
   final TIMUIKitInputTextFieldController? textFieldController;
 
@@ -106,6 +114,8 @@ class TIMUIKitHistoryMessageListContainer extends StatefulWidget {
     this.onAtUserWhenReply,
     this.groupAtInfoList,
     this.messageItemBuilder,
+    this.messageListProjectionBuilder,
+    this.messageListProjectionListenable,
     this.tongueItemBuilder,
     this.extraTipsActionItemBuilder,
     this.isAllowScroll = true,
@@ -267,59 +277,78 @@ class _TIMUIKitHistoryMessageListContainerState
     final TUIChatSeparateViewModel model =
         Provider.of<TUIChatSeparateViewModel>(context, listen: false);
 
-    return TIMUIKitHistoryMessageListSelector(
-      conversationID: model.conversationID,
-      builder: (context, messageList, child) {
-        return TIMUIKitHistoryMessageList(
-          key: chatHistoryListKeyFor(model.conversationID),
-          conversation: widget.conversation,
-          model: model,
-          isAllowScroll: widget.isAllowScroll,
-          controller: _historyMessageListController,
-          groupAtInfoList: widget.groupAtInfoList,
-          mainHistoryListConfig: widget.mainHistoryListConfig,
-          itemBuilder: (context, message) {
-            return TIMUIKitHistoryMessageListItem(
-              customMessageHoverBarOnDesktop:
-                  widget.customMessageHoverBarOnDesktop,
-              groupMemberInfo: widget.groupMemberInfo,
-              textFieldController: widget.textFieldController,
-              userAvatarBuilder: widget.userAvatarBuilder,
-              customEmojiStickerList: widget.customEmojiStickerList,
-              topRowBuilder: _getTopRowBuilder(model),
-              bottomRowBuilder: _getBottomRowBuilder(),
-              onScrollToIndex: _historyMessageListController.scrollToIndex,
-              onScrollToIndexBegin:
-                  _historyMessageListController.scrollToIndexBegin,
-              toolTipsConfig: widget.toolTipsConfig ??
-                  ToolTipsConfig(
-                      additionalItemBuilder: widget.extraTipsActionItemBuilder),
-              message: message!,
-              showAvatar: chatConfig.isShowAvatar,
-              onSecondaryTapForOthersPortrait: widget.onSecondaryTapAvatar,
-              onTapForOthersPortrait: widget.onTapAvatar,
-              messageItemBuilder: widget.messageItemBuilder,
-              onLongPressForOthersHeadPortrait:
-                  widget.onLongPressForOthersHeadPortrait,
-              onAtUserWhenReply: widget.onAtUserWhenReply,
-              allowAtUserWhenReply: chatConfig.isAtWhenReply,
-              allowAvatarTap: chatConfig.isAllowClickAvatar,
-              allowLongPress: chatConfig.isAllowLongPressMessage,
-              isUseMessageReaction: chatConfig.isUseMessageReaction,
-              renderingDirectionCallback:
-                  widget.messageItemBuilder?.renderingDirectionCallback,
-            );
-          },
-          tongueItemBuilder: widget.tongueItemBuilder,
-          initFindingMsg: widget.initFindingMsg,
-          searchJumpAnchor: widget.searchJumpAnchor,
-          messageList: messageList,
-          onLoadMore: (String? a, LoadDirection direction,
-              [int? b, int? lastSeq]) async {
-            return await requestForData(a, direction, model, b, lastSeq);
-          },
-        );
-      },
+    Widget buildProjectedList() {
+      return TIMUIKitHistoryMessageListSelector(
+        conversationID: model.conversationID,
+        builder: (context, messageList, child) {
+          final projectedMessageList =
+              widget.messageListProjectionBuilder?.call(
+                    model.conversationID,
+                    messageList,
+                  ) ??
+                  messageList;
+          return TIMUIKitHistoryMessageList(
+            key: chatHistoryListKeyFor(model.conversationID),
+            conversation: widget.conversation,
+            model: model,
+            isAllowScroll: widget.isAllowScroll,
+            controller: _historyMessageListController,
+            groupAtInfoList: widget.groupAtInfoList,
+            mainHistoryListConfig: widget.mainHistoryListConfig,
+            itemBuilder: (context, message) {
+              return TIMUIKitHistoryMessageListItem(
+                customMessageHoverBarOnDesktop:
+                    widget.customMessageHoverBarOnDesktop,
+                groupMemberInfo: widget.groupMemberInfo,
+                textFieldController: widget.textFieldController,
+                userAvatarBuilder: widget.userAvatarBuilder,
+                customEmojiStickerList: widget.customEmojiStickerList,
+                topRowBuilder: _getTopRowBuilder(model),
+                bottomRowBuilder: _getBottomRowBuilder(),
+                onScrollToIndex: _historyMessageListController.scrollToIndex,
+                onScrollToIndexBegin:
+                    _historyMessageListController.scrollToIndexBegin,
+                toolTipsConfig: widget.toolTipsConfig ??
+                    ToolTipsConfig(
+                        additionalItemBuilder:
+                            widget.extraTipsActionItemBuilder),
+                message: message!,
+                showAvatar: chatConfig.isShowAvatar,
+                onSecondaryTapForOthersPortrait: widget.onSecondaryTapAvatar,
+                onTapForOthersPortrait: widget.onTapAvatar,
+                messageItemBuilder: widget.messageItemBuilder,
+                onLongPressForOthersHeadPortrait:
+                    widget.onLongPressForOthersHeadPortrait,
+                onAtUserWhenReply: widget.onAtUserWhenReply,
+                allowAtUserWhenReply: chatConfig.isAtWhenReply,
+                allowAvatarTap: chatConfig.isAllowClickAvatar,
+                allowLongPress: chatConfig.isAllowLongPressMessage,
+                isUseMessageReaction: chatConfig.isUseMessageReaction,
+                renderingDirectionCallback:
+                    widget.messageItemBuilder?.renderingDirectionCallback,
+              );
+            },
+            tongueItemBuilder: widget.tongueItemBuilder,
+            initFindingMsg: widget.initFindingMsg,
+            searchJumpAnchor: widget.searchJumpAnchor,
+            messageList: projectedMessageList,
+            onLoadMore: (String? a, LoadDirection direction,
+                [int? b, int? lastSeq]) async {
+              return await requestForData(a, direction, model, b, lastSeq);
+            },
+          );
+        },
+      );
+    }
+
+    final overlayListenable = widget.messageListProjectionListenable;
+    if (overlayListenable == null ||
+        widget.messageListProjectionBuilder == null) {
+      return buildProjectedList();
+    }
+    return ListenableBuilder(
+      listenable: overlayListenable,
+      builder: (context, child) => buildProjectedList(),
     );
   }
 }

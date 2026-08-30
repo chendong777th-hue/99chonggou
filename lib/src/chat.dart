@@ -88,6 +88,7 @@ import 'package:tencent_cloud_chat_demo/src/services/call_result_repository.dart
 import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_deleted_bus.dart';
+import 'package:tencent_cloud_chat_demo/src/services/local_message_overlay_store.dart';
 import 'package:tencent_cloud_chat_demo/src/widgets/conversation_profile_pin_bar.dart';
 import 'package:tencent_cloud_chat_demo/src/services/peer_profile_refresh_bus.dart';
 import 'package:tencent_cloud_chat_demo/src/services/user_profile_local/user_profile_local_service.dart';
@@ -9498,6 +9499,10 @@ class _ChatState extends State<Chat> with WidgetsBindingObserver {
     return CallingMessageDataProvider.looksLikeCallMessage(message);
   }
 
+  bool _isLegacyLocalCallBubble(V2TimMessage message) {
+    return _localCallBubbleMarker(message) != null;
+  }
+
   bool _hasMultipleCallMessagesForMount(List<V2TimMessage> messages) {
     var count = 0;
     for (final message in messages) {
@@ -10295,6 +10300,28 @@ class _ChatState extends State<Chat> with WidgetsBindingObserver {
                     initFindingMsg: widget.initFindingMsg,
                     searchJumpAnchor: widget.searchJumpAnchor,
                     messageItemBuilder: _messageItemBuilder!,
+                    messageListProjectionListenable:
+                        LocalMessageOverlayStore.instance,
+                    messageListProjectionBuilder:
+                        (conversationID, formalMessages) {
+                      final overlays = LocalMessageOverlayStore.instance
+                          .messagesFor(conversationID);
+                      final formal = formalMessages
+                          .whereType<V2TimMessage>()
+                          .where(
+                            (message) =>
+                                !ConversationPreviewHistorySync
+                                    .isSyntheticLocalMessage(message) &&
+                                !_isLegacyLocalCallBubble(message),
+                          )
+                          .toList(growable: false);
+                      if (overlays.isEmpty) {
+                        return formal;
+                      }
+                      return CallBubbleDedupe.prepareOpenHistoryMessages(
+                        <V2TimMessage>[...formal, ...overlays],
+                      );
+                    },
                     abstractMessageBuilder: buildReplyAbstractMessage,
                     morePanelConfig: _cachedMorePanelConfig!,
                     topFixWidget: _buildChatTopFixWidget(),

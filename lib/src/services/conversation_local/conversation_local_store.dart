@@ -175,6 +175,15 @@ class ConversationLocalStore {
   static const _coordinatorStateTable = 'conversation_commit_state';
   static const _pageAnchorTable = 'conversation_page_anchor';
   static const _viewStateTable = 'conversation_view_state';
+  static const _messageEventInboxTable = 'message_event_inbox';
+  static const _messageWriterLeaseTable = 'message_writer_lease';
+  static const _messageIngressCounterTable = 'message_ingress_counter';
+  static const _messageCommitJournalTable = 'message_commit_journal';
+  static const _messageProjectionCheckpointTable =
+      'message_projection_checkpoint';
+  static const _messageCommitEffectTable = 'message_commit_effect';
+  static const _messageOutboxTable = 'message_outbox';
+  static const _messageOutboxRecoveryTable = 'message_outbox_recovery_copy';
 
   Database? _db;
   Future<Database>? _dbOpenInFlight;
@@ -247,7 +256,7 @@ class ConversationLocalStore {
     _factoryReady = true;
   }
 
-  static const _dbVersion = 14;
+  static const _dbVersion = 17;
   static const _localReadGraceMs = 12000;
 
   static const _persistedComparisonColumns = <String>[
@@ -370,6 +379,8 @@ class ConversationLocalStore {
         await _createCoordinatorStateTable(db);
         await _createPageAnchorTable(db);
         await _createViewStateTable(db);
+        await _createMessageIngressTables(db);
+        await _createIm05Tables(db);
       },
       onOpen: _ensureRawJsonFingerprintColumn,
       onUpgrade: (db, oldVersion, newVersion) async {
@@ -412,6 +423,15 @@ class ConversationLocalStore {
         if (oldVersion < 14) {
           await _upgradeToV14(db);
         }
+        if (oldVersion < 15) {
+          await _upgradeToV15(db);
+        }
+        if (oldVersion < 16) {
+          await _upgradeToV16(db);
+        }
+        if (oldVersion < 17) {
+          await _upgradeToV17(db);
+        }
       },
     );
     if (!SqfliteLifecycleGuard.instance.canOpenDatabase) {
@@ -433,6 +453,19 @@ class ConversationLocalStore {
     final db = _db;
     _db = null;
     await SqfliteLifecycleGuard.closeDatabase(db);
+  }
+
+  /// Shared transaction boundary for the IM ingress/lease tables.
+  ///
+  /// The ingress coordinator must allocate sequence numbers, check the
+  /// idempotency key and insert the Inbox row in one SQLite transaction. This
+  /// narrow bridge keeps the database ownership in this store without
+  /// exposing the conversation tables to the IM domain.
+  Future<T> runImIngressTransaction<T>(
+    Future<T> Function(DatabaseExecutor transaction) action,
+  ) async {
+    final db = await _openDb();
+    return db.transaction<T>((transaction) => action(transaction));
   }
 
   @visibleForTesting
@@ -656,6 +689,205 @@ class ConversationLocalStore {
             .execute('ALTER TABLE $_pageAnchorTable ADD COLUMN $definition');
       }
     }
+  }
+
+  Future<void> _upgradeToV15(Database db) => _createMessageIngressTables(db);
+
+  Future<void> _upgradeToV16(Database db) async {
+    final columns = await db.rawQuery(
+      'PRAGMA table_info($_messageEventInboxTable)',
+    );
+    if (!columns.any((row) => row['name'] == 'processing_started_at')) {
+      await db.execute(
+        'ALTER TABLE $_messageEventInboxTable '
+        'ADD COLUMN processing_started_at INTEGER',
+      );
+    }
+  }
+
+  Future<void> _upgradeToV17(Database db) => _createIm05Tables(db);
+
+  Future<void> _createMessageIngressTables(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $_messageEventInboxTable (
+        owner_user_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        event_namespace TEXT NOT NULL,
+        conversation_id TEXT NOT NULL DEFAULT '',
+        event_kind TEXT NOT NULL,
+        operation_id TEXT NOT NULL DEFAULT '',
+        account_generation INTEGER NOT NULL,
+        domain_generation INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        authority TEXT NOT NULL,
+        view_instance_id TEXT NOT NULL DEFAULT '',
+        surface_id TEXT NOT NULL DEFAULT '',
+        view_session_generation INTEGER,
+        history_request_generation INTEGER,
+        send_operation_generation INTEGER,
+        clear_epoch INTEGER NOT NULL,
+        account_ingress_sequence INTEGER NOT NULL,
+        scope_ingress_sequence INTEGER NOT NULL,
+        provider_sequence INTEGER,
+        source_revision INTEGER,
+        membership_revision INTEGER,
+        payload_hash TEXT NOT NULL,
+        recovery_mode TEXT NOT NULL,
+        recovery_ref TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL,
+        observed_at INTEGER NOT NULL,
+        committed_at INTEGER,
+        processing_started_at INTEGER,
+        PRIMARY KEY(owner_user_id, event_namespace, event_id)
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_message_event_scope
+      ON $_messageEventInboxTable(owner_user_id, conversation_id, status)
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_message_event_account_sequence
+      ON $_messageEventInboxTable(owner_user_id, account_ingress_sequence)
+    ''');
+    await db.execute('''
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_message_event_scope_sequence
+      ON $_messageEventInboxTable(
+        owner_user_id,
+        conversation_id,
+        scope_ingress_sequence
+      )
+      WHERE conversation_id <> ''
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $_messageWriterLeaseTable (
+        owner_user_id TEXT PRIMARY KEY,
+        lease_owner_id TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL,
+        acquired_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        heartbeat_at INTEGER NOT NULL
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $_messageIngressCounterTable (
+        owner_user_id TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        next_sequence INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(owner_user_id, scope_key)
+      )
+    ''');
+  }
+
+  Future<void> _createIm05Tables(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $_messageCommitJournalTable (
+        owner_user_id TEXT NOT NULL,
+        journal_id TEXT NOT NULL,
+        event_namespace TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        scope TEXT NOT NULL DEFAULT '',
+        commit_revision INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        metadata_revision INTEGER,
+        projection_revision INTEGER,
+        side_effect_revision INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        lease_owner_id TEXT NOT NULL DEFAULT '',
+        fencing_token INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(owner_user_id, journal_id),
+        UNIQUE(owner_user_id, event_namespace, event_id)
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $_messageProjectionCheckpointTable (
+        owner_user_id TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        commit_revision INTEGER NOT NULL,
+        last_journal_id TEXT NOT NULL,
+        coverage_revision INTEGER NOT NULL,
+        watermark_revision INTEGER NOT NULL,
+        barrier_revision INTEGER NOT NULL,
+        projection_version INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        lease_owner_id TEXT NOT NULL DEFAULT '',
+        fencing_token INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(owner_user_id, scope)
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $_messageCommitEffectTable (
+        owner_user_id TEXT NOT NULL,
+        effect_id TEXT NOT NULL,
+        journal_id TEXT NOT NULL,
+        effect_kind TEXT NOT NULL,
+        state TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        lease_owner_id TEXT NOT NULL DEFAULT '',
+        fencing_token INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(owner_user_id, effect_id)
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $_messageOutboxTable (
+        operation_id TEXT PRIMARY KEY,
+        owner_user_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        client_correlation_id TEXT NOT NULL,
+        message_type INTEGER NOT NULL,
+        payload_reference TEXT NOT NULL,
+        media_local_ref TEXT,
+        encryption_version INTEGER,
+        key_id TEXT,
+        cipher_algorithm TEXT,
+        nonce TEXT,
+        content_checksum TEXT,
+        payload_hash TEXT NOT NULL DEFAULT '',
+        state TEXT NOT NULL,
+        sdk_message_id TEXT,
+        server_msg_id TEXT,
+        dispatch_attempt_id TEXT,
+        dispatch_intent_at INTEGER,
+        result_code TEXT,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        next_retry_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        lease_owner_id TEXT NOT NULL DEFAULT '',
+        fencing_token INTEGER NOT NULL DEFAULT 0,
+        recovery_lag INTEGER NOT NULL DEFAULT 0,
+        recovery_conflict INTEGER NOT NULL DEFAULT 0
+      )
+    ''');
+    await db.execute('''
+      CREATE INDEX IF NOT EXISTS idx_message_outbox_ready
+      ON $_messageOutboxTable(owner_user_id, state, next_retry_at)
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS $_messageOutboxRecoveryTable (
+        owner_user_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        client_correlation_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        message_type INTEGER NOT NULL,
+        recovery_revision INTEGER NOT NULL,
+        state TEXT NOT NULL,
+        dispatch_attempt_id TEXT,
+        dispatch_intent_at INTEGER,
+        payload_reference_or_ciphertext TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        checksum TEXT NOT NULL,
+        sdk_local_id TEXT,
+        server_msg_id TEXT,
+        result_code TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY(owner_user_id, operation_id)
+      )
+    ''');
   }
 
   Future<void> _ensureRawJsonFingerprintColumn(Database db) async {

@@ -26,7 +26,6 @@ import 'package:tencent_cloud_chat_demo/src/services/conversation_refresh_bus.da
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_list_notifier.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_perf_gate_log.dart';
-import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/message_conversation_id.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/voip_push_payload.dart';
 import 'package:tencent_cloud_chat_demo/src/services/call_lifecycle_service.dart'
@@ -52,7 +51,6 @@ import 'package:tencent_cloud_chat_demo/src/widgets/message_notification_banner.
 import 'package:tencent_cloud_chat_push/common/tim_push_listener.dart';
 import 'package:tencent_cloud_chat_push/common/tim_push_message.dart';
 import 'package:tencent_cloud_chat_push/tencent_cloud_chat_push.dart';
-import 'package:tencent_cloud_chat_sdk/enum/V2TimAdvancedMsgListener.dart';
 import 'package:tencent_cloud_chat_sdk/enum/message_elem_type.dart';
 import 'package:tencent_cloud_chat_sdk/enum/receive_message_opt_enum.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_group_at_info.dart'
@@ -82,9 +80,6 @@ class NotificationSettingsService {
 
   LocalSetting? _localSetting;
   NotificationClickHandler? _onNotificationClicked;
-  bool _msgListenerAttached = false;
-  Future<void>? _attachTask;
-  int _attachGeneration = 0;
   final Set<String> _inflightMsgKeys = <String>{};
   bool _pushListenerAttached = false;
   bool _pushRegistered = false;
@@ -99,12 +94,6 @@ class NotificationSettingsService {
   final TIMPushListener _pushListener = TIMPushListener(
     onRecvPushMessage: (message) {
       instance._onRecvPushMessage(message);
-    },
-  );
-
-  late final V2TimAdvancedMsgListener _msgListener = V2TimAdvancedMsgListener(
-    onRecvNewMessage: (V2TimMessage message) {
-      unawaited(instance._onRecvNewMessage(message));
     },
   );
 
@@ -207,77 +196,20 @@ class NotificationSettingsService {
     if (kIsWeb) {
       return;
     }
-    await ensureMessageListenerReady(force: forceMessageListener);
     if (PlatformUtils().isIOS && !_useSelfHostedPush) {
       await _ensurePushListenerAttached();
     }
   }
 
-  /// IM 登录后确保消息监听可用。Android 上 SDK 重连后可能出现
-  /// [_msgListenerAttached] 仍为 true 但监听已失效，因此支持 [force] 重挂。
+  /// Compatibility entry retained for bootstrap callers. The ordinary
+  /// message listener is owned by ConversationSyncService's adapter.
   Future<void> ensureMessageListenerReady({bool force = false}) async {
-    if (kIsWeb) {
-      return;
-    }
-    final previous = _attachTask;
-    if (previous != null) {
-      await previous;
-    }
-    late final Future<void> task;
-    task = _ensureMessageListenerReadyImpl(force: force).whenComplete(() {
-      if (identical(_attachTask, task)) {
-        _attachTask = null;
-      }
-    });
-    _attachTask = task;
-    return task;
-  }
-
-  Future<void> _ensureMessageListenerReadyImpl({bool force = false}) async {
-    if (force && _msgListenerAttached) {
-      await _detachMessageListenerOnly();
-    }
-    await _ensureMsgAndCallListenersAttached();
+    // Ordinary IM messages are delivered by ConversationSyncService's single
+    // TencentAdvancedMessageAdapter. Keep this method as a compatibility no-op
+    // for existing bootstrap callers while push listeners remain independent.
   }
 
   bool get _useSelfHostedPush => IMDemoConfig.selfHostedPushEnabled;
-
-  Future<void> _detachMessageListenerOnly() async {
-    _msgListenerAttached = false;
-    for (var attempt = 0; attempt < 3; attempt++) {
-      try {
-        await TencentImSDKPlugin.v2TIMManager
-            .getMessageManager()
-            .removeAdvancedMsgListener(listener: _msgListener);
-        _traceMsgBanner('msg_listener_detached attempt=$attempt');
-        return;
-      } catch (e) {
-        _traceMsgBanner(
-          'msg_listener_detach_failed attempt=$attempt error=$e',
-        );
-      }
-    }
-  }
-
-  Future<void> _ensureMsgAndCallListenersAttached() async {
-    if (kIsWeb) {
-      return;
-    }
-    if (_msgListenerAttached) {
-      return;
-    }
-    try {
-      await TencentImSDKPlugin.v2TIMManager
-          .getMessageManager()
-          .addAdvancedMsgListener(listener: _msgListener);
-    } catch (e) {
-      _traceMsgBanner('msg_listener_attach_failed error=$e');
-      return;
-    }
-    _msgListenerAttached = true;
-    _attachGeneration++;
-    _traceMsgBanner('msg_listener_attached generation=$_attachGeneration');
-  }
 
   // 前台系统横幅排查：真机对照 MSG_BANNER_TRACE / show_result；稳定后可改回 false。
   static const bool _msgBannerTraceEnabled = false;
@@ -302,9 +234,7 @@ class NotificationSettingsService {
       return;
     }
 
-    await ensureListenersAttached(
-      forceMessageListener: PlatformUtils().isAndroid && !_msgListenerAttached,
-    );
+    await ensureListenersAttached();
     await CallLifecycleService.instance.ensureObserversAttached();
 
     if (PlatformUtils().isAndroid) {
@@ -749,29 +679,9 @@ class NotificationSettingsService {
     return false;
   }
 
-  void _optimisticallyPatchConversationPreview(V2TimMessage message) {
-    if (TypingStatusMessage.isTypingStatus(message)) {
-      return;
-    }
-    if (message.isSelf == true) {
-      return;
-    }
-    final convId = _conversationIdFromMessage(message)?.trim() ?? '';
-    if (convId.isEmpty) {
-      return;
-    }
-    final loginUser = ContactSocialCacheStore.safeLoginUserId();
-    if (MessageConversationId.isSelfC2CConversation(convId, loginUser)) {
-      return;
-    }
-    unawaited(
-      ConversationSyncService.instance
-          .patchConversationLastMessage(
-            conversationID: convId,
-            message: message,
-          )
-          .catchError((_) {}),
-    );
+  /// Application-layer entry called by the single ordinary-message ingress.
+  Future<void> handleAppRealtimeMessage(V2TimMessage message) {
+    return _onRecvNewMessage(message);
   }
 
   Future<void> _onRecvNewMessage(V2TimMessage message) async {
@@ -823,7 +733,6 @@ class NotificationSettingsService {
       conversationId: _conversationIdFromMessage(message),
       debounce: Duration.zero,
     );
-    _optimisticallyPatchConversationPreview(message);
     // 横幅门禁之前入库：settings 为空或关系统通知时仍要把对方写进通讯录。
     unawaited(applyInboundFriendBecameFriendsIfNeeded(message));
     // 群改名/换头 tip → 只写对应 Group Entity（非全量）。
@@ -969,21 +878,6 @@ class NotificationSettingsService {
     final displayMode = inForeground
         ? settings.notifyBannerDisplayContent
         : settings.notifyDisplayContent;
-
-    // 前台横幅：先弹出，会话列表补丁不阻塞入场（避免顿挫感）。
-    if (inForeground) {
-      if (convId != null && convId.isNotEmpty) {
-        unawaited(() async {
-          try {
-            await ConversationSyncService.instance.patchConversationLastMessage(
-              conversationID: convId,
-              message: message,
-            );
-          } catch (_) {}
-          await _waitForMessageUiCatchUp(conversationId: convId);
-        }());
-      }
-    }
 
     // 前台已改走本地系统通知横幅；勿在展示前 cancelByMsgKey，
     // 否则会与即将弹出的本地条抢同一 msgKey。远程残留仍由 willPresent 清理。
@@ -1258,7 +1152,6 @@ class NotificationSettingsService {
     InAppMessageNotificationBanner.hide();
     InAppMessageNotificationBanner.resetRateLimit();
     if (kIsWeb) {
-      _msgListenerAttached = false;
       _pushListenerAttached = false;
       _pushRegistered = false;
       _pushRegisterTask = null;
@@ -1276,10 +1169,6 @@ class NotificationSettingsService {
       return;
     }
     try {
-      (TencentImSDKPlugin.v2TIMManager.getMessageManager() as dynamic)
-          .removeAdvancedMsgListener(listener: _msgListener);
-    } catch (_) {}
-    try {
       await (TencentCloudChatPush() as dynamic).removePushListener(
         listener: _pushListener,
       );
@@ -1294,7 +1183,6 @@ class NotificationSettingsService {
     ImChatNotificationRegistry.instance.clearAll();
     IncomingCallPushHandler.instance.clear();
     IncomingCallCoordinator.instance.clear();
-    _msgListenerAttached = false;
     _pushListenerAttached = false;
     _pushRegistered = false;
     _pushRegisterTask = null;
@@ -1309,7 +1197,6 @@ class NotificationSettingsService {
     _homeRouteReady = false;
     _lastSystemNotificationAt.clear();
     _inflightMsgKeys.clear();
-    _attachTask = null;
     ActiveChatRegistry.instance.reset();
   }
 

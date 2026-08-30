@@ -187,24 +187,20 @@ class CoreServicesImpl implements CoreServices {
   void addInitListener() {
     final TUIFriendShipViewModel tuiFriendShipViewModel = serviceLocator<TUIFriendShipViewModel>();
     final TUIConversationViewModel tuiConversationViewModel = serviceLocator<TUIConversationViewModel>();
-    final TUIChatGlobalModel tuiChatViewModel = serviceLocator<TUIChatGlobalModel>();
     final TUIGroupListenerModel tuiGroupListenerModel = serviceLocator<TUIGroupListenerModel>();
 
     tuiFriendShipViewModel.addFriendListener();
     tuiConversationViewModel.setConversationListener();
-    tuiChatViewModel.addAdvancedMsgListener();
     tuiGroupListenerModel.setGroupListener();
   }
 
   void removeListener() {
     final TUIFriendShipViewModel tuiFriendShipViewModel = serviceLocator<TUIFriendShipViewModel>();
     final TUIConversationViewModel tuiConversationViewModel = serviceLocator<TUIConversationViewModel>();
-    final TUIChatGlobalModel tuiChatViewModel = serviceLocator<TUIChatGlobalModel>();
     final TUIGroupListenerModel tuiGroupListenerModel = serviceLocator<TUIGroupListenerModel>();
 
     tuiFriendShipViewModel.removeFriendshipListener();
     tuiConversationViewModel.removeConversationListener();
-    tuiChatViewModel.removeAdvanceMsgListener();
     tuiGroupListenerModel.removeGroupListener();
   }
 

@@ -3,6 +3,7 @@
 import 'dart:async';
 
 import 'package:collection/collection.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
@@ -41,6 +42,8 @@ import 'package:tencent_cloud_chat_uikit/data_services/group/self_hosted_group_b
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitSearch/conversation_search_utils.dart';
 import 'package:tencent_cloud_chat_uikit/ui/utils/picker_user_filter.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/contracts/history_proof.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/history_search_coordinator.dart';
 
 enum KeywordListMatchType {
   V2TIM_KEYWORD_LIST_MATCH_TYPE_OR,
@@ -51,6 +54,10 @@ class TUISearchViewModel extends ChangeNotifier {
   final FriendshipServices _friendshipServices =
       serviceLocator<FriendshipServices>();
   final MessageService _messageService = serviceLocator<MessageService>();
+  late final Im06MessageSearchCoordinator _im06MessageSearchCoordinator =
+      Im06MessageSearchCoordinator(
+    adapter: TUIKitIm06MessageSearchAdapter(_messageService),
+  );
   final ConversationService _conversationService =
       serviceLocator<ConversationService>();
   final GroupServices _groupServices = serviceLocator<GroupServices>();
@@ -350,6 +357,23 @@ class TUISearchViewModel extends ChangeNotifier {
     }
     _boundLoginUserId = current;
     return true;
+  }
+
+  Future<V2TimValueCallback<V2TimMessageSearchResult>>
+      _searchMessagesThroughIm06({
+    required ImHistorySource source,
+    required V2TimMessageSearchParam searchParam,
+  }) async {
+    final response = await _im06MessageSearchCoordinator.search(
+      platform: kIsWeb ? ImPlatform.web : ImPlatform.android,
+      requestedSource: source,
+      searchParam: searchParam,
+    );
+    return response.result ??
+        V2TimValueCallback<V2TimMessageSearchResult>(
+          code: -1,
+          desc: response.errorDescription ?? 'IM-06 message search unavailable',
+        );
   }
 
   String _messageSearchIdentity(V2TimMessage message) {
@@ -1825,7 +1849,8 @@ class TUISearchViewModel extends ChangeNotifier {
       late V2TimValueCallback<V2TimMessageSearchResult> searchResult;
       if (_globalMessageSearchCloudEnabled) {
         try {
-          searchResult = await _messageService.searchCloudMessages(
+          searchResult = await _searchMessagesThroughIm06(
+            source: ImHistorySource.cloud,
             searchParam: V2TimMessageSearchParam(
               keywordList: [searchKey],
               pageSize: 5,
@@ -1845,7 +1870,8 @@ class TUISearchViewModel extends ChangeNotifier {
       }
       if (!_globalMessageSearchCloudEnabled) {
         if (!_canSearchLocalMessagesForCurrentUser()) return;
-        searchResult = await _messageService.searchLocalMessages(
+        searchResult = await _searchMessagesThroughIm06(
+          source: ImHistorySource.local,
           searchParam: V2TimMessageSearchParam(
             keywordList: [searchKey],
             pageIndex: msgPage,
@@ -1903,7 +1929,8 @@ class TUISearchViewModel extends ChangeNotifier {
     late V2TimValueCallback<V2TimMessageSearchResult> searchResult;
     if (_globalMessageSearchCloudEnabled) {
       try {
-        searchResult = await _messageService.searchCloudMessages(
+        searchResult = await _searchMessagesThroughIm06(
+          source: ImHistorySource.cloud,
           searchParam: V2TimMessageSearchParam(
             keywordList: [searchKey],
             pageSize: 5,
@@ -1923,7 +1950,8 @@ class TUISearchViewModel extends ChangeNotifier {
     }
     if (!_globalMessageSearchCloudEnabled) {
       if (generation != _globalSearchGeneration) return;
-      searchResult = await _messageService.searchLocalMessages(
+      searchResult = await _searchMessagesThroughIm06(
+        source: ImHistorySource.local,
         searchParam: V2TimMessageSearchParam(
           keywordList: [searchKey],
           pageIndex: 0,

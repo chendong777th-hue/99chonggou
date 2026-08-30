@@ -16,10 +16,8 @@ import 'package:tencent_cloud_chat_demo/src/services/call_bubble_insert_service.
 import 'package:tencent_cloud_chat_demo/src/services/notification_settings_service.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/call_user_id.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/voip_push_payload.dart';
-import 'package:tencent_cloud_chat_sdk/enum/V2TimAdvancedMsgListener.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
-import 'package:tencent_cloud_chat_sdk/tencent_im_sdk_plugin.dart';
 import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 
 /// Whether to push the Flutter fullscreen incoming-call page.
@@ -42,38 +40,13 @@ class LiveKitCallSignaling {
 
   static final LiveKitCallSignaling instance = LiveKitCallSignaling._();
 
-  V2TimAdvancedMsgListener? _listener;
-  bool _attached = false;
+  /// Kept for lifecycle compatibility. Ordinary IM callbacks are now routed
+  /// by ConversationSyncService's single message adapter.
+  Future<void> ensureAttached() async {}
 
-  Future<void> ensureAttached() async {
-    if (_attached) return;
-    _listener = V2TimAdvancedMsgListener(
-      onRecvNewMessage: (message) {
-        unawaited(_onMessage(message));
-      },
-    );
-    await TencentImSDKPlugin.v2TIMManager
-        .getMessageManager()
-        .addAdvancedMsgListener(listener: _listener!);
-    _attached = true;
-    if (kDebugMode) {
-      debugPrint('LiveKitCallSignaling: attached');
-    }
-  }
+  Future<void> detach() async {}
 
-  Future<void> detach() async {
-    final listener = _listener;
-    _listener = null;
-    _attached = false;
-    if (listener == null) return;
-    try {
-      await TencentImSDKPlugin.v2TIMManager
-          .getMessageManager()
-          .removeAdvancedMsgListener(listener: listener);
-    } catch (_) {}
-  }
-
-  Future<void> _onMessage(V2TimMessage message) async {
+  Future<void> handleAppMessage(V2TimMessage message) async {
     final data = message.customElem?.data?.trim() ?? '';
     if (data.isEmpty) return;
     Map<String, dynamic>? map;

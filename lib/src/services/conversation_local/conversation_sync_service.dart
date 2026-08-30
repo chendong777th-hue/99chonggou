@@ -33,6 +33,8 @@ import 'package:tencent_cloud_chat_demo/src/services/conversation_history_warm_s
 import 'package:tencent_cloud_chat_demo/src/services/im_recovery_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/im_snapshot_bootstrap_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/resume_foreground_policy.dart';
+import 'package:tencent_cloud_chat_demo/src/services/livekit_call_signaling.dart';
+import 'package:tencent_cloud_chat_demo/src/services/notification_settings_service.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/group_conversation_visibility.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/message_conversation_id.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/typing_status_message.dart';
@@ -46,13 +48,14 @@ import 'package:tencent_cloud_chat_sdk/enum/conversation_type.dart';
 import 'package:tencent_cloud_chat_sdk/enum/history_msg_get_type_enum.dart';
 import 'package:tencent_cloud_chat_sdk/enum/message_status.dart';
 import 'package:tencent_cloud_chat_sdk/enum/V2TimConversationListener.dart';
-import 'package:tencent_cloud_chat_sdk/enum/V2TimAdvancedMsgListener.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_conversation_filter.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_conversation_filter.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
+import 'package:tencent_cloud_chat_sdk/models/v2_tim_message_receipt.dart'
+    if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message_receipt.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_user_full_info.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_user_full_info.dart';
 import 'package:tencent_cloud_chat_sdk/tencent_im_sdk_plugin.dart';
@@ -64,6 +67,15 @@ import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_conversa
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_friendship_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/mobile_async_commit_guard.dart';
+import 'package:uuid/uuid.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/durable_ingress_gateway.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/contracts/contracts.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/im_ingress_store.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/im_ingress_store_platform.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/im_mailbox.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/im_recovery_worker.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/tencent_advanced_message_adapter.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/writer_lease.dart';
 
 class _PendingConversationEvent {
   const _PendingConversationEvent({
@@ -76,6 +88,7 @@ class _PendingConversationEvent {
     required this.reason,
     required this.snapshot,
     required this.fingerprint,
+    this.identity,
   });
 
   final String ownerUserId;
@@ -87,6 +100,7 @@ class _PendingConversationEvent {
   final String reason;
   final V2TimConversation snapshot;
   final String fingerprint;
+  final SessionIdentity? identity;
 }
 
 enum _TypedPagePullResult {
@@ -110,13 +124,40 @@ class ConversationSyncService {
   String _pageSyncOwner = '';
   int _pageSyncOwnerGeneration = -1;
   int _syncGeneration = 0;
+  int _messageDomainGeneration = 0;
   final MobileAsyncCommitGuard _lifecycleGuard = MobileAsyncCommitGuard();
   V2TimConversationListener? _listener;
-  V2TimAdvancedMsgListener? _messageListener;
+  TencentAdvancedMessageAdapter? _messageAdapter;
   bool _messageListenerAttached = false;
   Future<void>? _messageListenerAttachInFlight;
   Future<void>? _conversationListenerAttachInFlight;
   SessionIdentity? _realtimeIdentity;
+  ImRecoveryWorker? _messageRecoveryWorker;
+  Timer? _messageRecoveryTimer;
+  Future<void>? _messageRecoveryInFlight;
+  static const Duration _messageRecoveryInterval = Duration(seconds: 30);
+  static const int _messageRecoveryBatchSize = 100;
+  late final ImIngressStore _messageIngressStore =
+      createPlatformImIngressStore();
+  late final DurableIngressGateway _messageIngress = DurableIngressGateway(
+    store: _messageIngressStore,
+  );
+  late final ImWriterLeaseService _messageWriterLeaseService =
+      ImWriterLeaseService(
+    store: _messageIngressStore,
+  );
+  late final ImMailboxRouter _messageMailbox = ImMailboxRouter(
+    handler: _handleMessageIngress,
+  );
+  final String _messageCoreLeaseOwnerId =
+      'flutter-message-core:${const Uuid().v4()}';
+  ImWriterLease? _messageCoreLease;
+  Timer? _messageCoreHeartbeatTimer;
+  Timer? _messageCoreAcquireRetryTimer;
+  Future<void>? _messageCoreHeartbeatInFlight;
+  static const int _messageCoreLeaseTtlMs = 15000;
+  static const Duration _messageCoreHeartbeatInterval = Duration(seconds: 5);
+  static const Duration _messageCoreAcquireRetryDelay = Duration(seconds: 5);
   DateTime? _lastSyncServerFinishAt;
   Timer? _syncServerFinishTimer;
   static const Duration _syncServerFinishDebounce = Duration(seconds: 45);
@@ -585,6 +626,27 @@ class ConversationSyncService {
     _installed = true;
   }
 
+  /// AuthBootstrapService owns the SDK-session generation. Conversation
+  /// pagination keeps its separate request lock generation in [_syncGeneration].
+  /// Keeping these values distinct prevents a page reset from invalidating
+  /// otherwise valid realtime message events.
+  void setMessageDomainGeneration(int generation) {
+    if (generation < 0) {
+      throw ArgumentError.value(
+        generation,
+        'generation',
+        'must not be negative',
+      );
+    }
+    if (generation < _messageDomainGeneration) {
+      throw StateError(
+        'message domain generation cannot move backwards: '
+        'current=$_messageDomainGeneration next=$generation',
+      );
+    }
+    _messageDomainGeneration = generation;
+  }
+
   V2TimConversationListener _createConversationListener(
     SessionIdentity identity,
   ) {
@@ -625,38 +687,329 @@ class ConversationSyncService {
     return _listener!;
   }
 
-  V2TimAdvancedMsgListener _createMessageListener(SessionIdentity identity) {
-    _messageListener = V2TimAdvancedMsgListener(
-      onRecvMessageRevoked: (msgID) {
-        if (!_isCurrentRealtimeIdentity(identity)) return;
-        unawaited(
-          markConversationLastMessageRevoked(
-            msgID: msgID,
-            identity: identity,
-          ),
-        );
-      },
-      onRecvMessageRevokedWithInfo: (msgID, operateUser, reason) {
-        if (!_isCurrentRealtimeIdentity(identity)) return;
-        unawaited(
-          markConversationLastMessageRevoked(
-            msgID: msgID,
-            isAdmin: _isAdminRevokeReason(reason),
-            revoker: operateUser,
-            identity: identity,
-          ),
-        );
-      },
-      onRecvNewMessage: (message) {
-        if (!_isCurrentRealtimeIdentity(identity)) return;
-        _patchInboundConversationPreview(message, identity: identity);
-        _onRecvNewMessageForMembershipBridge(message, identity: identity);
-        if ((message.groupID?.trim() ?? '').isEmpty) {
-          ChatImageMessagePrefetch.prefetchThumbnailForMessage(message);
-        }
-      },
+  TencentAdvancedMessageAdapter _createMessageAdapter(
+    SessionIdentity identity,
+  ) {
+    final adapter = TencentAdvancedMessageAdapter(
+      messageService: serviceLocator<MessageService>(),
+      ingress: _messageIngress,
+      ownerUserId: identity.ownerUserId,
+      accountGeneration: identity.generation,
+      domainGeneration: _messageDomainGeneration,
+      onEvent: (event) => _messageMailbox.dispatch(
+        event,
+        lane: _laneForMessageEvent(event),
+      ),
     );
-    return _messageListener!;
+    _messageAdapter = adapter;
+    return adapter;
+  }
+
+  Future<ImRecoveryPayload> _loadMessageRecoveryPayload(
+    ImInboxRecord record,
+  ) async {
+    final identity = _realtimeIdentity;
+    if (identity == null ||
+        !record.event.belongsToDomain(
+          ownerUserId: identity.ownerUserId,
+          accountGeneration: identity.generation,
+          domainGeneration: _messageDomainGeneration,
+        )) {
+      return const ImRecoveryPayload.unavailable();
+    }
+    if (record.recoveryMode == ImRecoveryMode.ephemeralUi) {
+      return const ImRecoveryPayload.recovered(null);
+    }
+
+    final recoveryRef = record.recoveryRef.trim();
+    const messagePrefix = 'msgID:';
+    if (recoveryRef.startsWith(messagePrefix)) {
+      final msgID = recoveryRef.substring(messagePrefix.length).trim();
+      if (msgID.isEmpty) return const ImRecoveryPayload.unavailable();
+      final messages = await serviceLocator<MessageService>().findMessages(
+        messageIDList: <String>[msgID],
+      );
+      for (final message in messages ?? const <V2TimMessage>[]) {
+        if (message.msgID?.trim() == msgID) {
+          return ImRecoveryPayload.recovered(message);
+        }
+      }
+      return const ImRecoveryPayload.unavailable();
+    }
+
+    const revokePrefix = 'revoke:';
+    if (recoveryRef.startsWith(revokePrefix)) {
+      final msgID = recoveryRef.substring(revokePrefix.length).trim();
+      if (msgID.isEmpty) return const ImRecoveryPayload.unavailable();
+      return ImRecoveryPayload.recovered(
+        ImMessageRevokedEvent(msgID: msgID),
+      );
+    }
+    return const ImRecoveryPayload.unavailable();
+  }
+
+  void _startMessageRecovery(SessionIdentity identity) {
+    _messageRecoveryTimer?.cancel();
+    _messageRecoveryTimer = Timer.periodic(
+      _messageRecoveryInterval,
+      (_) => unawaited(_runMessageRecovery(identity)),
+    );
+    unawaited(_runMessageRecovery(identity));
+  }
+
+  Future<void> _runMessageRecovery(SessionIdentity identity) async {
+    if (!_isCurrentRealtimeIdentity(identity)) return;
+    final pending = _messageRecoveryInFlight;
+    if (pending != null) {
+      await pending;
+      return;
+    }
+    final lease = _messageCoreLease;
+    if (lease == null) return;
+    late final Future<void> task;
+    task = () async {
+      if (!_isCurrentRealtimeIdentity(identity)) return;
+      final worker = ImRecoveryWorker(
+        gateway: _messageIngress,
+        router: _messageMailbox,
+        lease: lease,
+        ownerUserId: identity.ownerUserId,
+        accountGeneration: identity.generation,
+        domainGeneration: _messageDomainGeneration,
+        loadPayload: _loadMessageRecoveryPayload,
+        processingTimeoutMs: _messageRecoveryInterval.inMilliseconds,
+      );
+      _messageRecoveryWorker = worker;
+      try {
+        final activeWorker = _messageRecoveryWorker;
+        if (activeWorker == null) return;
+        final result = await activeWorker.run(limit: _messageRecoveryBatchSize);
+        if (result.scanned > 0) {
+          _log(
+            'message recovery scanned=${result.scanned} '
+            'dispatched=${result.dispatched} deferred=${result.deferred}',
+          );
+        }
+      } catch (error) {
+        _log('message recovery failed: $error');
+      }
+    }();
+    _messageRecoveryInFlight = task;
+    try {
+      await task;
+    } finally {
+      if (identical(_messageRecoveryInFlight, task)) {
+        _messageRecoveryInFlight = null;
+      }
+    }
+  }
+
+  Future<void> _handleMessageIngress(EventEnvelope<dynamic> event) async {
+    final identity = _realtimeIdentity;
+    if (identity == null ||
+        !event.belongsToDomain(
+          ownerUserId: identity.ownerUserId,
+          accountGeneration: identity.generation,
+          domainGeneration: _messageDomainGeneration,
+        )) {
+      return;
+    }
+    if (!await _hasCurrentMessageCoreLease(identity)) {
+      return;
+    }
+    final lease = _messageCoreLease;
+    if (lease == null) return;
+    final claimed = await _messageIngress.claimForWriter(
+      event: event,
+      lease: lease,
+      nowMs: DateTime.now().millisecondsSinceEpoch,
+      allowStaleProcessing: true,
+      processingTimeoutMs: _messageRecoveryInterval.inMilliseconds,
+    );
+    if (claimed == null || claimed.status == ImInboxStatus.completed) {
+      return;
+    }
+    try {
+      if (claimed.status == ImInboxStatus.processing) {
+        await _applyMessageIngressMetadata(event, identity: identity);
+        await _flushPersistEventQueue(reason: 'im_ingress');
+        if (!await _advanceMessageInboxStatus(
+          event: event,
+          identity: identity,
+          expectedStatus: ImInboxStatus.processing,
+          nextStatus: ImInboxStatus.metadataCommitted,
+        )) {
+          return;
+        }
+      }
+      if (claimed.status == ImInboxStatus.processing ||
+          claimed.status == ImInboxStatus.metadataCommitted) {
+        await _publishMessageIngressProjection(
+          event,
+          identity: identity,
+        );
+        if (!await _advanceMessageInboxStatus(
+          event: event,
+          identity: identity,
+          expectedStatus: ImInboxStatus.metadataCommitted,
+          nextStatus: ImInboxStatus.projectionPublished,
+        )) {
+          return;
+        }
+      }
+      await _advanceMessageInboxStatus(
+        event: event,
+        identity: identity,
+        expectedStatus: ImInboxStatus.projectionPublished,
+        nextStatus: ImInboxStatus.completed,
+      );
+    } catch (_) {
+      // Leave PROCESSING durable. Recovery must replay the event rather than
+      // treating a failed compatibility projection as completed.
+    }
+  }
+
+  Future<void> _applyMessageIngressMetadata(
+    EventEnvelope<dynamic> event, {
+    required SessionIdentity identity,
+  }) async {
+    final payload = event.payload;
+    if (event.kind == ImEventKind.realtimeMessage) {
+      if (payload is! V2TimMessage) {
+        throw StateError('formal realtime message payload is unavailable');
+      }
+      await _patchInboundConversationPreview(payload, identity: identity);
+      await _onRecvNewMessageForMembershipBridge(
+        payload,
+        identity: identity,
+      );
+      return;
+    }
+    if (event.kind == ImEventKind.messageMutation) {
+      if (payload is! V2TimMessage) {
+        throw StateError('formal message mutation payload is unavailable');
+      }
+      await _patchInboundConversationPreview(payload, identity: identity);
+      return;
+    }
+    if (payload is ImMessageRevokedEvent) {
+      await markConversationLastMessageRevoked(
+        msgID: payload.msgID,
+        isAdmin: payload.isAdmin,
+        revoker: payload.revoker,
+        identity: identity,
+      );
+      return;
+    }
+    if (event.kind == ImEventKind.readReceipt ||
+        payload is ImMessageProgressEvent ||
+        payload is ImMessageDownloadProgressEvent ||
+        payload is ImRecoveredEphemeralUiEvent) {
+      return;
+    }
+    throw StateError(
+      'unsupported IM metadata payload: ${event.kind.name}/${event.eventId}',
+    );
+  }
+
+  Future<void> _publishMessageIngressProjection(
+    EventEnvelope<dynamic> event, {
+    required SessionIdentity identity,
+  }) async {
+    if (!_isCurrentRealtimeIdentity(identity)) return;
+    final payload = event.payload;
+    if (event.kind == ImEventKind.realtimeMessage) {
+      if (payload is! V2TimMessage) {
+        throw StateError('formal realtime message payload is unavailable');
+      }
+      await serviceLocator<TUIChatGlobalModel>().applyAppRealtimeMessage(
+        payload,
+      );
+      await NotificationSettingsService.instance
+          .handleAppRealtimeMessage(payload);
+      await LiveKitCallSignaling.instance.handleAppMessage(payload);
+      if ((payload.groupID?.trim() ?? '').isEmpty) {
+        ChatImageMessagePrefetch.prefetchThumbnailForMessage(payload);
+      }
+      return;
+    }
+    if (event.kind == ImEventKind.messageMutation) {
+      if (payload is! V2TimMessage) {
+        throw StateError('formal message mutation payload is unavailable');
+      }
+      await serviceLocator<TUIChatGlobalModel>().applyAppMessageModified(
+        payload,
+        conversationID: event.scope?.canonicalConversationId,
+      );
+      return;
+    }
+    if (payload is ImMessageRevokedEvent) {
+      serviceLocator<TUIChatGlobalModel>().applyAppMessageRevoked(
+        payload.msgID,
+        event.scope?.canonicalConversationId,
+      );
+      return;
+    }
+    if (event.kind == ImEventKind.readReceipt) {
+      if (payload is! V2TimMessageReceipt) {
+        throw StateError('message receipt payload is unavailable');
+      }
+      final model = serviceLocator<TUIChatGlobalModel>();
+      if (event.eventId.startsWith('c2c-read:')) {
+        model.applyAppC2CReadReceipts(<V2TimMessageReceipt>[payload]);
+      } else {
+        model.applyAppMessageReadReceipts(<V2TimMessageReceipt>[payload]);
+      }
+      return;
+    }
+    if (payload is ImRecoveredEphemeralUiEvent) return;
+    if (payload is ImMessageProgressEvent) {
+      serviceLocator<TUIChatGlobalModel>().applyAppSendMessageProgress(
+        payload.message,
+        payload.progress,
+      );
+      return;
+    }
+    if (payload is ImMessageDownloadProgressEvent) {
+      await serviceLocator<TUIChatGlobalModel>()
+          .applyAppMessageDownloadProgress(payload.progress);
+      return;
+    }
+    throw StateError(
+      'unsupported IM projection payload: ${event.kind.name}/${event.eventId}',
+    );
+  }
+
+  Future<bool> _advanceMessageInboxStatus({
+    required EventEnvelope<dynamic> event,
+    required SessionIdentity identity,
+    required ImInboxStatus expectedStatus,
+    required ImInboxStatus nextStatus,
+  }) async {
+    if (!_isCurrentRealtimeIdentity(identity)) return false;
+    final lease = _messageCoreLease;
+    if (lease == null) return false;
+    return _messageIngress.advanceForWriter(
+      event: event,
+      expectedStatus: expectedStatus,
+      nextStatus: nextStatus,
+      lease: lease,
+      nowMs: DateTime.now().millisecondsSinceEpoch,
+      committedAtMs: nextStatus == ImInboxStatus.metadataCommitted
+          ? DateTime.now().millisecondsSinceEpoch
+          : null,
+    );
+  }
+
+  ImIngressLane _laneForMessageEvent(EventEnvelope<dynamic> event) {
+    if (event.kind == ImEventKind.messageMutation ||
+        event.payload is ImMessageRevokedEvent) {
+      return ImIngressLane.urgent;
+    }
+    if (event.kind == ImEventKind.historyPage) {
+      return ImIngressLane.history;
+    }
+    return ImIngressLane.realtime;
   }
 
   /// Binds realtime callbacks to the account that has just completed IM login.
@@ -667,9 +1020,26 @@ class ConversationSyncService {
       return;
     }
     _realtimeIdentity = identity;
+    if (!await _acquireMessageCoreLease(identity)) {
+      _scheduleMessageCoreAcquireRetry(identity);
+      return;
+    }
+    await _attachRealtimeSdkListeners(identity);
+  }
+
+  Future<void> _attachRealtimeSdkListeners(SessionIdentity identity) async {
+    if (!await _hasCurrentMessageCoreLease(identity)) {
+      _scheduleMessageCoreAcquireRetry(identity);
+      return;
+    }
     final conversationListener = _createConversationListener(identity);
-    _createMessageListener(identity);
+    _createMessageAdapter(identity);
     try {
+      if (!await _hasCurrentMessageCoreLease(identity)) {
+        await _detachRealtimeSdkListeners();
+        _scheduleMessageCoreAcquireRetry(identity);
+        return;
+      }
       final task = TencentImSDKPlugin.v2TIMManager
           .getConversationManager()
           .addConversationListener(listener: conversationListener);
@@ -691,11 +1061,189 @@ class ConversationSyncService {
 
   bool _isCurrentRealtimeIdentity(SessionIdentity? identity) {
     return identity != null &&
+        identical(_realtimeIdentity, identity) &&
+        _isCurrentSessionIdentity(identity);
+  }
+
+  bool _isCurrentSessionIdentity(SessionIdentity? identity) {
+    return identity != null &&
         SessionIdentityService.instance.isCurrent(identity);
+  }
+
+  Future<bool> _acquireMessageCoreLease(SessionIdentity identity) async {
+    if (!_isCurrentSessionIdentity(identity)) return false;
+    final lease = await _messageWriterLeaseService.acquire(
+      ownerUserId: identity.ownerUserId,
+      leaseOwnerId: _messageCoreLeaseOwnerId,
+      nowMs: DateTime.now().millisecondsSinceEpoch,
+      ttlMs: _messageCoreLeaseTtlMs,
+    );
+    if (!_isCurrentSessionIdentity(identity)) {
+      if (lease != null) await _messageWriterLeaseService.release(lease);
+      return false;
+    }
+    if (lease == null) return false;
+    _realtimeIdentity = identity;
+    _messageCoreLease = lease;
+    _startMessageCoreHeartbeat(identity);
+    return true;
+  }
+
+  Future<bool> _hasCurrentMessageCoreLease(SessionIdentity identity) async {
+    final lease = _messageCoreLease;
+    if (lease == null || !_isCurrentRealtimeIdentity(identity)) return false;
+    final isCurrent = await _messageWriterLeaseService.isCurrent(
+      lease: lease,
+      nowMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    return isCurrent &&
+        identical(_messageCoreLease, lease) &&
+        _isCurrentRealtimeIdentity(identity);
+  }
+
+  Future<ImMessageCoreLeaseContext?> messageCoreLeaseForOutgoingSend() async {
+    final existing = _realtimeIdentity;
+    final identity = existing != null && _isCurrentSessionIdentity(existing)
+        ? existing
+        : SessionIdentityService.instance.capture();
+    if (identity.ownerUserId.isEmpty || !_isCurrentSessionIdentity(identity)) {
+      return null;
+    }
+    if (_messageCoreLease == null || !_isCurrentRealtimeIdentity(identity)) {
+      if (!await _acquireMessageCoreLease(identity)) {
+        return null;
+      }
+    }
+    if (!await _hasCurrentMessageCoreLease(identity)) {
+      return null;
+    }
+    final lease = _messageCoreLease;
+    if (lease == null) return null;
+    return ImMessageCoreLeaseContext(
+      store: _messageIngressStore,
+      lease: lease,
+      ownerUserId: identity.ownerUserId,
+      accountGeneration: identity.generation,
+      domainGeneration: _messageDomainGeneration,
+    );
+  }
+
+  void _startMessageCoreHeartbeat(SessionIdentity identity) {
+    _messageCoreHeartbeatTimer?.cancel();
+    _messageCoreHeartbeatTimer = Timer.periodic(
+      _messageCoreHeartbeatInterval,
+      (_) => unawaited(_renewMessageCoreLease(identity)),
+    );
+  }
+
+  Future<void> _renewMessageCoreLease(SessionIdentity identity) async {
+    if (_messageCoreHeartbeatInFlight != null) return;
+    late final Future<void> task;
+    task = () async {
+      final lease = _messageCoreLease;
+      if (lease == null || !_isCurrentRealtimeIdentity(identity)) return;
+      final renewed = await _messageWriterLeaseService.renew(
+        lease: lease,
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+        ttlMs: _messageCoreLeaseTtlMs,
+      );
+      if (!_isCurrentRealtimeIdentity(identity) ||
+          !identical(_messageCoreLease, lease)) {
+        if (renewed != null) await _messageWriterLeaseService.release(renewed);
+        return;
+      }
+      if (renewed == null) {
+        await _onMessageCoreLeaseLost(identity, lease);
+        return;
+      }
+      _messageCoreLease = renewed;
+    }();
+    _messageCoreHeartbeatInFlight = task;
+    try {
+      await task;
+    } finally {
+      if (identical(_messageCoreHeartbeatInFlight, task)) {
+        _messageCoreHeartbeatInFlight = null;
+      }
+    }
+  }
+
+  Future<void> _onMessageCoreLeaseLost(
+    SessionIdentity identity,
+    ImWriterLease lease,
+  ) async {
+    if (!identical(_messageCoreLease, lease)) return;
+    _messageCoreLease = null;
+    _realtimeIdentity = null;
+    _messageCoreHeartbeatTimer?.cancel();
+    _messageCoreHeartbeatTimer = null;
+    await _messageMailbox.drain();
+    await _detachRealtimeSdkListeners();
+    await _messageMailbox.drain();
+    if (_isCurrentSessionIdentity(identity)) {
+      _scheduleMessageCoreAcquireRetry(identity);
+    }
+  }
+
+  void _scheduleMessageCoreAcquireRetry(SessionIdentity identity) {
+    if (!_isCurrentSessionIdentity(identity) ||
+        _messageCoreAcquireRetryTimer?.isActive == true) {
+      return;
+    }
+    _messageCoreAcquireRetryTimer = Timer(
+      _messageCoreAcquireRetryDelay,
+      () {
+        _messageCoreAcquireRetryTimer = null;
+        unawaited(_retryMessageCoreAcquire(identity));
+      },
+    );
+  }
+
+  Future<void> _retryMessageCoreAcquire(SessionIdentity identity) async {
+    if (!_isCurrentSessionIdentity(identity) || _messageCoreLease != null) {
+      return;
+    }
+    if (!await _acquireMessageCoreLease(identity)) {
+      _scheduleMessageCoreAcquireRetry(identity);
+      return;
+    }
+    await _attachRealtimeSdkListeners(identity);
   }
 
   Future<void> detachRealtimeListeners() async {
     _realtimeIdentity = null;
+    _messageCoreAcquireRetryTimer?.cancel();
+    _messageCoreAcquireRetryTimer = null;
+    _messageCoreHeartbeatTimer?.cancel();
+    _messageCoreHeartbeatTimer = null;
+    final heartbeat = _messageCoreHeartbeatInFlight;
+    if (heartbeat != null) {
+      try {
+        await heartbeat;
+      } catch (_) {}
+    }
+    await _messageMailbox.drain();
+    await _detachRealtimeSdkListeners();
+    await _messageMailbox.drain();
+    final lease = _messageCoreLease;
+    _messageCoreLease = null;
+    if (lease != null) {
+      try {
+        await _messageWriterLeaseService.release(lease);
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _detachRealtimeSdkListeners() async {
+    _messageRecoveryTimer?.cancel();
+    _messageRecoveryTimer = null;
+    final recovery = _messageRecoveryInFlight;
+    if (recovery != null) {
+      try {
+        await recovery;
+      } catch (_) {}
+    }
+    _messageRecoveryWorker = null;
     final conversationListener = _listener;
     _listener = null;
     final conversationAttach = _conversationListenerAttachInFlight;
@@ -717,13 +1265,11 @@ class ConversationSyncService {
         await pending;
       } catch (_) {}
     }
-    final messageListener = _messageListener;
-    _messageListener = null;
-    if (messageListener != null) {
+    final messageAdapter = _messageAdapter;
+    _messageAdapter = null;
+    if (messageAdapter != null) {
       try {
-        await TencentImSDKPlugin.v2TIMManager
-            .getMessageManager()
-            .removeAdvancedMsgListener(listener: messageListener);
+        await messageAdapter.unregister();
       } catch (_) {}
     }
     _messageListenerAttached = false;
@@ -735,9 +1281,11 @@ class ConversationSyncService {
   /// attempted too early.
   Future<void> ensureRealtimeMessageListenerAttached(
       {bool force = false}) async {
-    final listener = _messageListener;
+    final adapter = _messageAdapter;
     final identity = _realtimeIdentity;
-    if (listener == null || !_isCurrentRealtimeIdentity(identity)) {
+    if (adapter == null ||
+        identity == null ||
+        !_isCurrentRealtimeIdentity(identity)) {
       return;
     }
     final pending = _messageListenerAttachInFlight;
@@ -746,25 +1294,26 @@ class ConversationSyncService {
     }
     if (force && _messageListenerAttached) {
       try {
-        await TencentImSDKPlugin.v2TIMManager
-            .getMessageManager()
-            .removeAdvancedMsgListener(listener: listener);
+        await adapter.unregister();
       } catch (_) {}
       _messageListenerAttached = false;
     }
     if (_messageListenerAttached) {
+      if (_messageRecoveryTimer == null) {
+        _startMessageRecovery(identity);
+      }
       return;
     }
     late final Future<void> task;
     task = () async {
-      if (!_isCurrentRealtimeIdentity(identity)) {
+      if (!await _hasCurrentMessageCoreLease(identity)) {
         return;
       }
       try {
-        await TencentImSDKPlugin.v2TIMManager
-            .getMessageManager()
-            .addAdvancedMsgListener(listener: listener);
-        _messageListenerAttached = identical(_messageListener, listener) &&
+        await adapter.register();
+        _messageListenerAttached = identical(_messageAdapter, adapter) &&
+            adapter.isRegistered &&
+            await _hasCurrentMessageCoreLease(identity) &&
             _isCurrentRealtimeIdentity(identity);
       } catch (e) {
         _log('message listener attach failed: $e');
@@ -777,6 +1326,9 @@ class ConversationSyncService {
       if (identical(_messageListenerAttachInFlight, task)) {
         _messageListenerAttachInFlight = null;
       }
+    }
+    if (_messageListenerAttached) {
+      _startMessageRecovery(identity);
     }
   }
 
@@ -842,14 +1394,6 @@ class ConversationSyncService {
       upserted: merged,
       committedBatch: committedBatch,
     );
-  }
-
-  static bool _isAdminRevokeReason(String reason) {
-    final normalized = reason.trim().toLowerCase();
-    if (normalized.isEmpty) {
-      return false;
-    }
-    return normalized.contains('admin') || normalized.contains('groupowner');
   }
 
   String _ownerUserId() => ChatIdFormat.rawUserUid(
@@ -955,7 +1499,6 @@ class ConversationSyncService {
       );
       return;
     }
-
     if (needsFullReset) {
       _log(
         'sync_server_finish cold foregroundLimited awaiting=$_awaitingPostServerSync',
@@ -1207,7 +1750,7 @@ class ConversationSyncService {
     }
     final hasAuthoritativeSdkBatch =
         ConversationPerfFlags.conversationListSdkPrimary &&
-        committedBatch != null;
+            committedBatch != null;
     if (!immediate &&
         _shouldDeferPersistUiApply() &&
         !hasAuthoritativeSdkBatch) {
@@ -2632,8 +3175,7 @@ class ConversationSyncService {
         _idleDrainSessionPages++;
         final refreshEvery =
             ConversationPerfFlags.backgroundUiRefreshEveryPages;
-        if (refreshEvery > 0 &&
-            _idleDrainSessionPages % refreshEvery == 0) {
+        if (refreshEvery > 0 && _idleDrainSessionPages % refreshEvery == 0) {
           await ConversationListNotifier.instance.restoreStoreProjection(
             reason: ConversationStoreProjectionReason.backgroundDrain,
           );
@@ -2775,7 +3317,7 @@ class ConversationSyncService {
           // This is replayed after the current page lock is released. Do not
           // let a successful group page consume the C2C retry opportunity.
           _enqueuePendingSync(
-            reason: '${reason}:c2c_retry',
+            reason: '$reason:c2c_retry',
             conversationType: ConversationType.V2TIM_C2C,
             drainMode: ConversationSdkDrainMode.singlePage,
             reloadUiEachPage: false,
@@ -2803,8 +3345,8 @@ class ConversationSyncService {
         debugPrint('ConversationSync: bootstrapTyped stack: $st');
       }
     } finally {
-      final ownsPageSync = _pageSyncOwner == owner &&
-          _pageSyncOwnerGeneration == generation;
+      final ownsPageSync =
+          _pageSyncOwner == owner && _pageSyncOwnerGeneration == generation;
       if (ownsPageSync) {
         _pageSyncInFlight = false;
         _pageSyncOwner = '';
@@ -2923,8 +3465,8 @@ class ConversationSyncService {
         debugPrint('ConversationSync: typed sync stack: $st');
       }
     } finally {
-      final ownsPageSync = _pageSyncOwner == owner &&
-          _pageSyncOwnerGeneration == generation;
+      final ownsPageSync =
+          _pageSyncOwner == owner && _pageSyncOwnerGeneration == generation;
       if (ownsPageSync) {
         _pageSyncInFlight = false;
         _pageSyncOwner = '';
@@ -3125,9 +3667,7 @@ class ConversationSyncService {
         maybeBackfillC2cFromHistoryPeers(reason: 'typed_c2c_empty:$reason'),
       );
     }
-    return loadedAny
-        ? _TypedPagePullResult.loaded
-        : _TypedPagePullResult.empty;
+    return loadedAny ? _TypedPagePullResult.loaded : _TypedPagePullResult.empty;
   }
 
   bool _isCurrentSync(String owner, int generation) {
@@ -3266,6 +3806,9 @@ class ConversationSyncService {
     SessionIdentity? identity,
   }) async {
     if (identity != null && !_isCurrentRealtimeIdentity(identity)) return;
+    if (identity != null && !await _hasCurrentMessageCoreLease(identity)) {
+      return;
+    }
     final deleted = await _commitConversationDeletes(
       ids,
       ownerUserId: identity?.ownerUserId,
@@ -3941,10 +4484,10 @@ class ConversationSyncService {
     }
   }
 
-  void _onRecvNewMessageForMembershipBridge(
+  Future<void> _onRecvNewMessageForMembershipBridge(
     V2TimMessage message, {
     SessionIdentity? identity,
-  }) {
+  }) async {
     if (identity != null && !_isCurrentRealtimeIdentity(identity)) {
       return;
     }
@@ -3960,12 +4503,10 @@ class ConversationSyncService {
     }
     final convId = groupId.startsWith('group_') ? groupId : 'group_$groupId';
     final pending = _pendingNonMemberGroupConversations[convId];
-    unawaited(
-      GroupMembershipSyncService.instance.admitGroupMembershipFromImHint(
-        groupId: groupId,
-        groupName: pending?.showName?.trim() ?? '',
-        avatarUrl: pending?.faceUrl?.trim() ?? '',
-      ),
+    await GroupMembershipSyncService.instance.admitGroupMembershipFromImHint(
+      groupId: groupId,
+      groupName: pending?.showName?.trim() ?? '',
+      avatarUrl: pending?.faceUrl?.trim() ?? '',
     );
   }
 
@@ -3977,10 +4518,10 @@ class ConversationSyncService {
   /// The conversation listener remains the authoritative SDK snapshot path;
   /// this patch only fills the gap where that snapshot is delayed or still
   /// contains the previous lastMessage.
-  void _patchInboundConversationPreview(
+  Future<void> _patchInboundConversationPreview(
     V2TimMessage message, {
     SessionIdentity? identity,
-  }) {
+  }) async {
     if (identity != null && !_isCurrentRealtimeIdentity(identity)) {
       return;
     }
@@ -3991,12 +4532,10 @@ class ConversationSyncService {
     if (conversationID == null || conversationID.trim().isEmpty) {
       return;
     }
-    unawaited(
-      patchConversationLastMessage(
-        conversationID: conversationID,
-        message: message,
-        identity: identity,
-      ).catchError((_) {}),
+    await patchConversationLastMessage(
+      conversationID: conversationID,
+      message: message,
+      identity: identity,
     );
   }
 
@@ -4907,6 +5446,9 @@ class ConversationSyncService {
     SessionIdentity? identity,
   }) async {
     if (identity != null && !_isCurrentRealtimeIdentity(identity)) return;
+    if (identity != null && !await _hasCurrentMessageCoreLease(identity)) {
+      return;
+    }
     for (final conversation in conversations) {
       _prepareConversationForPersist(conversation);
       ConversationPerfGateLog.markRealtimeConversationCallback(
@@ -5045,6 +5587,7 @@ class ConversationSyncService {
           reason: reason,
           snapshot: conversation,
           fingerprint: fingerprint,
+          identity: identity,
         ),
       );
       final last = conversation.lastMessage;
@@ -5349,6 +5892,11 @@ class ConversationSyncService {
           event.ownerGeneration != _pendingPersistOwnerGeneration) {
         continue;
       }
+      if (event.identity != null &&
+          (!_isCurrentRealtimeIdentity(event.identity) ||
+              !await _hasCurrentMessageCoreLease(event.identity!))) {
+        continue;
+      }
       if (_shouldPersistConversation(event.snapshot)) {
         accepted.add(event);
       } else {
@@ -5360,9 +5908,8 @@ class ConversationSyncService {
       return;
     }
 
-    final finalByCanonical = LinkedHashMap<String, V2TimConversation>();
-    final committedFieldMasks =
-        <String, Set<ConversationMutationField>>{};
+    final finalByCanonical = <String, V2TimConversation>{};
+    final committedFieldMasks = <String, Set<ConversationMutationField>>{};
     final committedUnreadDeltas = <ConversationUiUnreadDelta>[];
     var unreadProjectionComplete = true;
     var committedStructureChanged = false;
@@ -5408,8 +5955,8 @@ class ConversationSyncService {
           committedStructureChanged =
               committedStructureChanged || batchResult!.structureChanged;
           committedUnreadDeltas.addAll(batchResult!.unreadDeltas);
-          unreadProjectionComplete = unreadProjectionComplete &&
-              batchResult!.unreadProjectionComplete;
+          unreadProjectionComplete =
+              unreadProjectionComplete && batchResult!.unreadProjectionComplete;
           for (final entry in batchResult!.changedFieldMasks.entries) {
             committedFieldMasks[entry.key] = <ConversationMutationField>{
               ...(committedFieldMasks[entry.key] ??
@@ -5579,7 +6126,7 @@ class ConversationSyncService {
   }
 
   Future<void> clearSession({String? ownerUserId}) async {
-    _realtimeIdentity = null;
+    await detachRealtimeListeners();
     _syncGeneration++;
     // Invalidate the lock immediately. The old SDK future may still complete,
     // but its owner/generation no longer matches and therefore cannot clear or

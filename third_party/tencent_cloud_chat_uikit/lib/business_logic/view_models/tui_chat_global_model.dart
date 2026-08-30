@@ -7,6 +7,8 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/contracts/contracts.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/outgoing_send_coordinator.dart';
 import 'package:tencent_cloud_chat_uikit/ui/views/TIMUIKitSearch/conversation_search_utils.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/gap_detector.dart';
@@ -230,6 +232,12 @@ class MessageCommitResult {
     required this.unreadProjectionHeld,
     required this.structureChanged,
     required this.contentChanged,
+    this.writerRevision,
+    this.writerGeneration,
+    this.writerClearEpoch,
+    this.writerOwnerUserID,
+    this.writerAccountGeneration,
+    this.writerDomainGeneration,
   });
 
   final String conversationID;
@@ -247,6 +255,20 @@ class MessageCommitResult {
   final bool unreadProjectionHeld;
   final bool structureChanged;
   final bool contentChanged;
+
+  /// Revision and scope of the authoritative Message Writer commit that
+  /// produced this UI snapshot. Null means this was a legacy direct snapshot.
+  final int? writerRevision;
+  final int? writerGeneration;
+  final int? writerClearEpoch;
+  final String? writerOwnerUserID;
+  final int? writerAccountGeneration;
+  final int? writerDomainGeneration;
+
+  int? get commitRevision => writerRevision;
+
+  /// Unified revision view for Writer-backed and legacy UI commits.
+  int get revision => writerRevision ?? listRevision;
 }
 
 /// Diagnostic metadata for the last authoritative history commit.
@@ -370,7 +392,12 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       value: message,
       msgID: message.msgID,
       localID: message.id,
-      outgoingStableID: readOutgoingStableId(message),
+      outgoingStableID: readOutgoingStableId(message) ??
+          (message.isSelf == true &&
+                  ((message.msgID?.trim() ?? '').isEmpty ||
+                      message.msgID?.trim() == message.id?.trim())
+              ? message.id
+              : null),
       seq: message.seq,
     );
   }
@@ -398,6 +425,25 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     final storageKey = _resolveMessageListStorageKey(conversationID);
     final key = storageKey.isEmpty ? conversationID.trim() : storageKey;
     return _messageHistoryCoverageByConv[key]?.clearEpoch ?? 0;
+  }
+
+  /// Supplies the account and SDK-session scope captured by app ingress.
+  ///
+  /// The UIKit model does not infer the logged-in account. The host app must
+  /// call this at login/session ownership time so late events can be rejected
+  /// by the single Writer.
+  void configureMessageWriterScope({
+    required String ownerUserID,
+    required int accountGeneration,
+    required int domainGeneration,
+  }) {
+    _messageReconciliationWriter.configureScope(
+      MessageReconciliationWriterScope(
+        ownerUserID: ownerUserID,
+        accountGeneration: accountGeneration,
+        domainGeneration: domainGeneration,
+      ),
+    );
   }
 
   void releaseMessageDeltaTombstones(
@@ -462,6 +508,10 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       source: delta.source,
       generation: delta.generation,
       clearEpoch: delta.clearEpoch,
+      ownerUserID: delta.ownerUserID,
+      accountGeneration: delta.accountGeneration,
+      domainGeneration: delta.domainGeneration,
+      replace: delta.replace,
       upserts: delta.upserts,
       explicitDeletes: delta.explicitDeletes,
       tombstones: delta.tombstones,
@@ -476,6 +526,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       isDeleteMsg: delta.kind == MessageDeltaKind.delete,
       applyMemoryWindow: applyMemoryWindow,
       memoryWindowPreferLatest: memoryWindowPreferLatest,
+      writerCommit: commit,
       historyCommitSource:
           'message_delta:${delta.kind.name}:r${commit.revision}',
     );
@@ -498,11 +549,13 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         storageKey,
         messages: authoritative,
       ),
+      clearEpoch: messageDeltaClearEpochFor(storageKey),
     );
     return _messageReconciliationWriter.beginInitialHistory(
       conversationID: storageKey,
       requestedSource: requestedSource,
       networkState: networkState,
+      clearEpoch: messageDeltaClearEpochFor(storageKey),
     );
   }
 
@@ -540,7 +593,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     bool cloudHasMoreNewer = false,
     MessageHistoryBatchKind batchKind = MessageHistoryBatchKind.olderPage,
     bool? historyIsFinished,
-    int clearEpoch = 0,
+    int? clearEpoch,
     MessageHistoryCursor? requestedCursor,
     MessageHistoryBounds? returnedBounds,
     MessageHistoryProofKind? proofKind,
@@ -551,6 +604,8 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     // Include direct row-local/self-send commits made while the request was in
     // flight. Inbound callbacks are already held in pendingRealtime.
     final historyList = history.toList(growable: false);
+    final effectiveClearEpoch =
+        clearEpoch ?? messageDeltaClearEpochFor(request.conversationKey);
     final current = _mergedAliasMessageList(request.conversationKey);
     final authoritativeBase =
         batchKind == MessageHistoryBatchKind.latestWindow &&
@@ -576,6 +631,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       authoritativeBase: _reconciliationRecords(authoritativeBase),
       actualSource: actualSource,
       networkState: networkState,
+      clearEpoch: effectiveClearEpoch,
       cloudHasMoreNewer: cloudHasMoreNewer,
       batchKind: batchKind,
       proofKind: resolvedProofKind,
@@ -594,6 +650,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       applyMemoryWindow: applyMemoryWindow,
       memoryWindowPreferLatest: memoryWindowPreferLatest,
       skipEquivalentHistoryWindow: true,
+      writerCommit: commit,
       historyCommitSource: '$historyCommitSource:r${commit.revision}',
     );
     final resolvedMetadataKey =
@@ -610,7 +667,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       revision: commit.revision,
       resultCount: result.rawCount,
       proofKind: resolvedProofKind,
-      clearEpoch: clearEpoch,
+      clearEpoch: effectiveClearEpoch,
     );
     _recordMessageHistoryCoverageAfterCommit(
       request: request,
@@ -620,7 +677,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       history: historyList,
       historyIsFinished: historyIsFinished,
       cloudHasMoreNewer: cloudHasMoreNewer,
-      clearEpoch: clearEpoch,
+      clearEpoch: effectiveClearEpoch,
       requestedCursor: requestedCursor,
       returnedBounds: returnedBounds,
       proofKind: resolvedProofKind,
@@ -1240,6 +1297,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       needResetNewMessageCount: false,
       replace: true,
       applyMemoryWindow: false,
+      writerCommit: commit,
       historyCommitSource: 'reconciliation_fail:r${commit.revision}',
     );
   }
@@ -2366,7 +2424,34 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (!isNewestFirstStorageOrderValid(next)) {
       return RowLocalMessageReplacementResult.reordered;
     }
-    _messageListMap[storageKey] = next;
+    final resolvedStableIdentity = readOutgoingStableId(expected) ??
+        readOutgoingStableId(replacement) ??
+        expected.id ??
+        expected.msgID ??
+        primary;
+    final commit = commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: storageKey,
+        eventID:
+            'row_replace:$resolvedStableIdentity:${replacement.msgID ?? ''}',
+        kind: MessageDeltaKind.edit,
+        source: MessageDeltaSource.sendPipeline,
+        generation: messageDeltaGenerationFor(storageKey),
+        clearEpoch: messageDeltaClearEpochFor(storageKey),
+        upserts: <MessageReconciliationRecord<V2TimMessage>>[
+          MessageReconciliationRecord<V2TimMessage>(
+            value: replacement,
+            msgID: replacement.msgID,
+            localID: replacement.id,
+            outgoingStableID: resolvedStableIdentity,
+            seq: replacement.seq,
+          ),
+        ],
+      ),
+    );
+    if (commit == null) {
+      return RowLocalMessageReplacementResult.stale;
+    }
     final replacementKey = ChatUiStateStore.messageKeyOf(replacement);
     final allAliases = <String?>{
       ChatUiStateStore.messageKeyOf(expected),
@@ -2412,7 +2497,37 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (!isNewestFirstStorageOrderValid(next)) {
       return RowLocalMessageReplacementResult.reordered;
     }
-    _messageListMap[storageKey] = next;
+    final stableIdentity = readOutgoingStableId(expected) ??
+        readOutgoingStableId(replacement) ??
+        expected.id ??
+        expected.msgID ??
+        replacement.id ??
+        replacement.msgID;
+    if (stableIdentity == null || stableIdentity.trim().isEmpty) {
+      return RowLocalMessageReplacementResult.notFound;
+    }
+    final commit = commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: storageKey,
+        eventID: 'row_local_replace:$stableIdentity:${replacement.msgID ?? ''}',
+        kind: MessageDeltaKind.edit,
+        source: MessageDeltaSource.sendPipeline,
+        generation: messageDeltaGenerationFor(storageKey),
+        clearEpoch: messageDeltaClearEpochFor(storageKey),
+        upserts: <MessageReconciliationRecord<V2TimMessage>>[
+          MessageReconciliationRecord<V2TimMessage>(
+            value: replacement,
+            msgID: replacement.msgID,
+            localID: replacement.id,
+            outgoingStableID: stableIdentity,
+            seq: replacement.seq,
+          ),
+        ],
+      ),
+    );
+    if (commit == null) {
+      return RowLocalMessageReplacementResult.stale;
+    }
     final replacementKey = ChatUiStateStore.messageKeyOf(replacement);
     final keys = <String?>{
       ChatUiStateStore.messageKeyOf(expected),
@@ -2589,7 +2704,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     return fallback ?? MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC;
   }
 
-  void applyOutgoingSendResult(
+  bool applyOutgoingSendResult(
     V2TimValueCallback<V2TimMessage> sendMsgRes,
     String convID,
     String clientId,
@@ -2600,7 +2715,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     final dataMsgID = sendMsgRes.data?.msgID;
     if (isOutgoingMediaCancelled(clientId) ||
         isOutgoingMediaCancelled(dataMsgID)) {
-      return;
+      return false;
     }
     try {
       updateMessage(
@@ -2611,8 +2726,10 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         groupType,
         setInputField,
       );
+      return true;
     } catch (e) {
       outputLogger.i('updateMessage error: $e');
+      return false;
     }
   }
 
@@ -4260,14 +4377,17 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       return MessageCloudCatchUpDisposition.complete;
     }
     final isGroup = _isGroupConversation(storageKey, messages: current);
+    final clearEpoch = messageDeltaClearEpochFor(storageKey);
     _messageReconciliationWriter.seedAuthoritative(
       conversationID: storageKey,
       records: _reconciliationRecords(current),
       trackSeqGaps: isGroup,
+      clearEpoch: clearEpoch,
     );
     final request = _messageReconciliationWriter.beginCloudCatchUp(
       conversationID: storageKey,
       networkState: networkBefore,
+      clearEpoch: clearEpoch,
     );
     attempt.onInvalidated(() {
       failHistoryReconciliation(
@@ -5026,7 +5146,20 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
           .toList(growable: false),
     );
     for (final key in keys) {
-      _messageListMap[key] = <V2TimMessage>[];
+      // Clearing the visible window is also a formal replacement. Reset any
+      // in-flight writer transaction first, then publish the empty snapshot
+      // through the compatibility admission so stale history cannot restore
+      // rows after the clear.
+      _messageReconciliationWriter.reset(key);
+      setMessageList(
+        key,
+        const <V2TimMessage>[],
+        needResetNewMessageCount: false,
+        isDeleteMsg: true,
+        replace: true,
+        applyMemoryWindow: false,
+        historyCommitSource: 'clear_local_history',
+      );
       _messageListContentSignatureByConv.remove(key);
       _initialHistoryLoadedConvs.add(key);
       _mayHaveOlderHistoryByConv.remove(key);
@@ -5262,9 +5395,19 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         getType: HistoryMsgGetTypeEnum.V2TIM_GET_LOCAL_OLDER_MSG,
         userID: conversationType == ConvType.c2c ? conversationID : null,
         groupID: conversationType == ConvType.group ? conversationID : null);
-    if (_messageListMap[conversationID] == null ||
-        _messageListMap[conversationID]!.isEmpty) {
-      _messageListMap[conversationID] = response;
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    if (storageKey.isEmpty || _mergedAliasMessageList(storageKey).isNotEmpty) {
+      return;
+    }
+    final commit = setMessageList(
+      storageKey,
+      response,
+      needResetNewMessageCount: false,
+      replace: true,
+      applyMemoryWindow: false,
+      historyCommitSource: 'preload_local_history',
+    );
+    if (commit.rawCount > 0) {
       // 会话列表预载时先种行高，进聊天页不再全靠 56 估。
       ChatMessageHeightCache.instance.seedEstimatesForMessages(response);
     }
@@ -5951,52 +6094,6 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     return false;
   }
 
-  static String _messageOrderSignature(V2TimMessage message) {
-    // Mirror compareMessagesChronological: seq only drives ordering for group
-    // messages. For C2C the sort key is the timestamp, so the signature must be
-    // timestamp-based, otherwise an in-place update could skip a needed re-sort.
-    if (!_usesTimelineLocalOrdering(message) && _hasGroupSeqOrdering(message)) {
-      return 'seq:${_messageSortSeq(message)}|${_readOutgoingLocalSeq(message) ?? ''}';
-    }
-    return '${_messageSortTimestamp(message)}|${message.seq ?? ''}|${_readOutgoingLocalSeq(message) ?? ''}|${_messageTimelineSortRank(message)}';
-  }
-
-  static bool _needsReorderAfterMerge(
-    V2TimMessage previous,
-    V2TimMessage merged,
-  ) {
-    final prevLocal = _readOutgoingLocalSeq(previous);
-    final mergedLocal = _readOutgoingLocalSeq(merged);
-    // 同一条发出消息的回执：存储列表保留点击顺序，避免服务端时间戳微调造成跳动。
-    // 展示顺序由 getMessageList 在缓存失效后按时间重排（见 _applyListAfterInPlaceMerge）。
-    if (prevLocal != null && prevLocal == mergedLocal) {
-      return false;
-    }
-    return _messageOrderSignature(previous) != _messageOrderSignature(merged);
-  }
-
-  void _applyListAfterInPlaceMerge(
-    String convID,
-    List<V2TimMessage> list, {
-    required bool reorder,
-  }) {
-    if (reorder) {
-      _messageListMap[convID] = sortMessagesNewestFirst(list);
-      _bumpMessageListRevisionFor(convID, reason: 'in_place_reorder');
-      return;
-    }
-    final ordered = isNewestFirstStorageOrderValid(list)
-        ? list
-        : sortMessagesNewestFirst(list);
-    _messageListMap[convID] = ordered;
-    _bumpMessageListRevisionFor(
-      convID,
-      reason: ordered == list
-          ? 'in_place_merge_invalidate'
-          : 'in_place_storage_resort',
-    );
-  }
-
   /// 存储序列为 newest-first：任一相邻对 chronologically 逆序则需重排。
   @visibleForTesting
   static bool isNewestFirstStorageOrderValid(List<V2TimMessage> list) {
@@ -6131,69 +6228,51 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       return;
     }
 
-    String? foundKey;
-    var index = -1;
-    List<V2TimMessage>? foundList;
-    for (final key in _historyAliasKeys(conversationID)) {
-      final list = _messageListMap[key];
-      if (list == null || list.isEmpty) {
-        continue;
-      }
-      final matchIndex = list.indexWhere(
-        (item) =>
-            item.isSelf == true &&
-            item.id == id &&
-            (item.msgID == null || item.msgID!.isEmpty || item.msgID == id),
-      );
-      if (matchIndex != -1) {
-        foundKey = key;
-        index = matchIndex;
-        foundList = list;
-        break;
-      }
-    }
-    if (foundKey == null || foundList == null || index < 0) {
+    final current = _mergedAliasMessageList(storageKey);
+    final index = current.indexWhere(
+      (item) =>
+          item.isSelf == true &&
+          item.id == id &&
+          (item.msgID == null || item.msgID!.isEmpty || item.msgID == id),
+    );
+    if (index < 0) {
       return;
     }
 
-    final updated = _cloneMessage(foundList[index]);
+    final previous = current[index];
+    final updated = _cloneMessage(previous);
     updated.msgID = serverMsgID;
-    final next = [...foundList];
-    next[index] = updated;
-    // Prefer the chat-page storage key so progress/recv merge the same bucket.
-    final writeKey = storageKey;
-    if (foundKey == writeKey) {
-      _messageListMap[writeKey] = next;
-    } else {
-      final consolidated = List<V2TimMessage>.from(
-        _collectAuthoritativeMessages(writeKey),
-      );
-      final consolidatedIndex = consolidated.indexWhere(
-        (item) =>
-            item.isSelf == true &&
-            item.id == id &&
-            (item.msgID == null ||
-                item.msgID!.isEmpty ||
-                item.msgID == id ||
-                item.msgID == serverMsgID),
-      );
-      if (consolidatedIndex != -1) {
-        consolidated[consolidatedIndex] = updated;
-      } else {
-        consolidated.insert(0, updated);
-      }
-      _messageListMap[writeKey] = consolidated;
-      _collapseHistoryAliasesToCanonical(
-        conversationID,
-        canonical: writeKey,
-      );
+    final stableIdentity = readOutgoingStableId(previous) ?? id;
+    final commit = commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: storageKey,
+        eventID: 'send_bind:$id:$serverMsgID',
+        kind: MessageDeltaKind.optimisticAdoption,
+        source: MessageDeltaSource.sendPipeline,
+        generation: messageDeltaGenerationFor(storageKey),
+        clearEpoch: messageDeltaClearEpochFor(storageKey),
+        upserts: <MessageReconciliationRecord<V2TimMessage>>[
+          MessageReconciliationRecord<V2TimMessage>(
+            value: updated,
+            msgID: updated.msgID,
+            localID: updated.id,
+            outgoingStableID: stableIdentity,
+            seq: updated.seq,
+          ),
+        ],
+      ),
+    );
+    if (commit == null) {
+      // Rejected/stale/active-history binds must not mutate the formal list.
+      return;
     }
     _chatUiStateStore.bindMessageAlias(
-      writeKey,
+      storageKey,
       id,
       ChatUiStateStore.messageKeyOf(updated),
     );
-    _markMessageRowChanged(writeKey, updated, extraKey: id);
+    ChatMessageHeightCache.instance.rememberAlias(id, serverMsgID);
+    _markMessageRowChanged(storageKey, updated, extraKey: id);
     _markNeedsNotify();
   }
 
@@ -6358,7 +6437,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     return false;
   }
 
-  void _mergeMessageAtIndex(
+  V2TimMessage _mergeMessageAtIndex(
     String convID,
     List<V2TimMessage> list,
     int index,
@@ -6366,7 +6445,6 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     bool replacingPlaceholder = false,
     bool forceSuccess = false,
   }) {
-    final updated = [...list];
     final previous = list[index];
     final merged = _cloneMessage(newMsg);
     final isSelf =
@@ -6416,17 +6494,6 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     } else if (merged.status == MessageStatus.V2TIM_MSG_STATUS_SENDING) {
       merged.status = MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC;
     }
-    final previousKey = ChatUiStateStore.messageKeyOf(previous);
-    updated[index] = merged;
-    final reorder = _needsReorderAfterMerge(previous, merged);
-    _applyListAfterInPlaceMerge(convID, updated, reorder: reorder);
-    _registerSoundLocalPath(merged);
-    _chatUiStateStore.bindMessageAlias(
-      convID,
-      previousKey,
-      ChatUiStateStore.messageKeyOf(merged),
-    );
-    _markMessageRowChanged(convID, merged, extraKey: previousKey);
     if (isSelf) {
       _logOutgoingSendOrder(
         event: 'merge_self',
@@ -6435,16 +6502,37 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         clientId: merged.id,
         mergePath: replacingPlaceholder ? 'placeholder_merge' : 'inplace_merge',
         existingIndex: index,
-        reordered: reorder,
       );
     }
+    return merged;
+  }
+
+  void _applyMergedMessagePresentationSideEffects(
+    String conversationID,
+    V2TimMessage? previous,
+    V2TimMessage message,
+  ) {
+    _registerSoundLocalPath(message);
+    if (previous == null) {
+      return;
+    }
+    final previousKey = ChatUiStateStore.messageKeyOf(previous);
+    _chatUiStateStore.bindMessageAlias(
+      conversationID,
+      previousKey,
+      ChatUiStateStore.messageKeyOf(message),
+    );
+    _markMessageRowChanged(
+      conversationID,
+      message,
+      extraKey: previousKey,
+    );
   }
 
   bool _upsertIncomingMessage(
     String convID,
     V2TimMessage newMsg, {
     bool forceSuccess = false,
-    bool bumpRevision = true,
   }) {
     final storageKey = _resolveMessageListStorageKey(convID);
     if (storageKey.isEmpty) {
@@ -6458,159 +6546,65 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       // A late self receipt must not reinsert a server-deleted/revoked row.
       return false;
     }
-    if (newMsg.isSelf == true &&
-        _messageReconciliationWriter.hasActiveRequest(storageKey)) {
-      final current = _messageListMap[storageKey] ?? const <V2TimMessage>[];
-      V2TimMessage? correlated;
-      for (final item in current) {
-        if (_messageCorrelatesWithStored(item, newMsg)) {
-          correlated = item;
-          break;
-        }
-      }
-      final stableIdentity = readOutgoingStableId(newMsg) ??
-          readOutgoingStableId(correlated) ??
-          newMsg.id;
-      final record = MessageReconciliationRecord<V2TimMessage>(
-        value: newMsg,
-        msgID: newMsg.msgID,
-        localID: newMsg.id,
-        outgoingStableID: stableIdentity,
-        seq: newMsg.seq,
-      );
-      _messageReconciliationWriter.enqueueRealtime(
-        conversationID: storageKey,
-        eventID: 'realtime:self:${++_nextRealtimeReconciliationEvent}:'
-            '${messageDedupKey(newMsg)}',
-        records: <MessageReconciliationRecord<V2TimMessage>>[record],
-      );
-      return false;
-    }
-    var list = List<V2TimMessage>.from(
-      _messageListMap[storageKey] ?? const <V2TimMessage>[],
+    // The writer owns the authoritative list. This local copy is only used to
+    // preserve the mature outgoing merge rules before the delta is admitted.
+    final list = List<V2TimMessage>.from(
+      _mergedAliasMessageList(storageKey),
     );
-    var usedAuthoritativeLookup = false;
-
-    if (newMsg.isSelf == true) {
-      final id = newMsg.id;
-      var index = list.indexWhere(
-        (element) => _messageCorrelatesWithStored(element, newMsg),
-      );
-      var placeholderIndex =
-          index == -1 ? _findOutgoingPlaceholderIndex(list, newMsg) : -1;
-
-      // Progress/recv often arrive with bare userID/groupID while the chat page
-      // stores under c2c_/canonical aliases. Look across alias buckets before
-      // orphan-inserting a second sound/media bubble.
-      if (index == -1 && placeholderIndex == -1) {
-        final authoritative = _collectAuthoritativeMessages(storageKey);
-        if (authoritative.isNotEmpty &&
-            (authoritative.length != list.length ||
-                !_sameMessageIdentityList(list, authoritative))) {
-          final authList = List<V2TimMessage>.from(authoritative);
-          index = authList.indexWhere(
-            (element) => _messageCorrelatesWithStored(element, newMsg),
-          );
-          placeholderIndex = index == -1
-              ? _findOutgoingPlaceholderIndex(authList, newMsg)
-              : -1;
-          if (index != -1 || placeholderIndex != -1) {
-            list = authList;
-            usedAuthoritativeLookup = true;
-          }
-        }
-      }
-
-      if (index != -1) {
-        _logOutgoingSendOrder(
-          event: 'upsert_self',
-          convID: storageKey,
-          message: newMsg,
-          clientId: id,
-          mergePath: 'correlate_merge',
-          existingIndex: index,
-        );
-        _mergeMessageAtIndex(
-          storageKey,
-          list,
-          index,
-          newMsg,
-          forceSuccess: forceSuccess,
-        );
-        if (usedAuthoritativeLookup) {
-          _collapseHistoryAliasesToCanonical(
-            storageKey,
-            canonical: storageKey,
-          );
-        }
-        return true;
-      }
-      if (placeholderIndex != -1) {
-        _logOutgoingSendOrder(
-          event: 'upsert_self',
-          convID: storageKey,
-          message: newMsg,
-          clientId: id,
-          mergePath: 'placeholder_merge',
-          existingIndex: placeholderIndex,
-        );
-        _mergeMessageAtIndex(
-          storageKey,
-          list,
-          placeholderIndex,
-          newMsg,
-          replacingPlaceholder: true,
-          forceSuccess: forceSuccess,
-        );
-        if (usedAuthoritativeLookup) {
-          _collapseHistoryAliasesToCanonical(
-            storageKey,
-            canonical: storageKey,
-          );
-        }
-        return true;
-      }
-      _logOutgoingSendOrder(
-        event: 'upsert_self',
-        convID: storageKey,
-        message: newMsg,
-        clientId: id,
-        mergePath: 'orphan_insert',
-        existingIndex: -1,
-        warn: 'recv_without_placeholder',
-      );
-      _messageListMap[storageKey] = sortMessagesNewestFirst(
-        dedupeMessages([newMsg, ...list]),
-      );
-      _collapseHistoryAliasesToCanonical(
-        storageKey,
-        canonical: storageKey,
-      );
-      if (bumpRevision) {
-        _bumpMessageListRevisionFor(storageKey);
-      }
-      return false;
-    }
-    final existingIndex = list.indexWhere(
+    var index = list.indexWhere(
       (element) => _messageCorrelatesWithStored(element, newMsg),
     );
-    if (existingIndex != -1) {
-      _mergeMessageAtIndex(
-        storageKey,
-        list,
-        existingIndex,
-        newMsg,
-        forceSuccess: true,
-      );
-      return true;
+    var replacingPlaceholder = false;
+    if (index == -1 && newMsg.isSelf == true) {
+      index = _findOutgoingPlaceholderIndex(list, newMsg);
+      replacingPlaceholder = index != -1;
     }
-    _messageListMap[storageKey] = sortMessagesNewestFirst(
-      dedupeMessages([newMsg, ...list]),
+    final previous = index == -1 ? null : list[index];
+    final value = index == -1
+        ? _cloneMessage(newMsg)
+        : _mergeMessageAtIndex(
+            storageKey,
+            list,
+            index,
+            newMsg,
+            replacingPlaceholder: replacingPlaceholder,
+            forceSuccess: forceSuccess || newMsg.isSelf != true,
+          );
+    final stableIdentity = readOutgoingStableId(value) ??
+        readOutgoingStableId(previous) ??
+        (value.isSelf == true ? value.id : null);
+    final commit = commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: storageKey,
+        eventID: 'realtime:${++_nextRealtimeReconciliationEvent}:'
+            '${messageDedupKey(value)}',
+        kind: MessageDeltaKind.realtimeUpsert,
+        source: MessageDeltaSource.sdkRealtime,
+        generation: messageDeltaGenerationFor(storageKey),
+        clearEpoch: messageDeltaClearEpochFor(storageKey),
+        upserts: <MessageReconciliationRecord<V2TimMessage>>[
+          MessageReconciliationRecord<V2TimMessage>(
+            value: value,
+            msgID: value.msgID,
+            localID: value.id,
+            outgoingStableID: stableIdentity,
+            seq: value.seq,
+          ),
+        ],
+      ),
+      applyMemoryWindow: true,
     );
-    if (bumpRevision) {
-      _bumpMessageListRevisionFor(storageKey);
+    if (commit == null) {
+      // A history transaction, stale generation, or tombstone owns this
+      // event. Never fall back to a direct list write.
+      return false;
     }
-    return false;
+    _applyMergedMessagePresentationSideEffects(storageKey, previous, value);
+    _collapseHistoryAliasesToCanonical(
+      storageKey,
+      canonical: storageKey,
+    );
+    return previous != null;
   }
 
   static bool _sameMessageIdentityList(
@@ -6710,118 +6704,87 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       );
     }
 
-    final pending = <V2TimMessage>[];
+    final storageKey = _resolveMessageListStorageKey(convID);
+    if (storageKey.isEmpty) {
+      return (
+        inserted: false,
+        lastInserted: null,
+        insertedMessages: const <V2TimMessage>[],
+      );
+    }
+    final before = _mergedAliasMessageList(storageKey);
+    final known = List<V2TimMessage>.of(before);
+    final records = <MessageReconciliationRecord<V2TimMessage>>[];
+    final previousRecords = <V2TimMessage?>[];
     final insertedMessages = <V2TimMessage>[];
-    var inserted = false;
-    V2TimMessage? lastInserted;
-
-    void flushPending() {
-      if (pending.isEmpty) {
-        return;
-      }
-      _messageListMap[convID] = _mergePendingIncomingForDedup(
-        pending: pending,
-        existing: _messageListMap[convID] ?? const <V2TimMessage>[],
-      );
-      pending.clear();
-    }
-
-    bool matchesStoredIdentity(V2TimMessage message) {
-      return (_messageListMap[convID] ?? const <V2TimMessage>[]).any(
-        (item) => _messageCorrelatesWithStored(item, message),
-      );
-    }
-
-    bool matchesPendingIdentity(V2TimMessage message) {
-      final msgID = message.msgID;
-      final id = message.id;
-      return pending.any((item) {
-        if (msgID != null && msgID.isNotEmpty && item.msgID == msgID) {
-          return true;
-        }
-        if (id != null && id.isNotEmpty && item.id == id) {
-          return true;
-        }
-        return messagesCorrelateForDedup(item, message);
-      });
-    }
 
     for (final message in messages) {
-      // Self-message correlation has additional placeholder rules. Keep that
-      // mature path intact; active-chat self sync normally bypasses batching.
-      if (message.isSelf == true) {
-        flushPending();
-        final merged = _upsertIncomingMessage(
-          convID,
-          message,
-          forceSuccess: true,
-          bumpRevision: false,
-        );
-        if (!merged) {
-          inserted = true;
-          lastInserted = message;
-          insertedMessages.add(message);
-        }
-        continue;
+      var index = known.indexWhere(
+        (item) => _messageCorrelatesWithStored(item, message),
+      );
+      var replacingPlaceholder = false;
+      if (index == -1 && message.isSelf == true) {
+        index = _findOutgoingPlaceholderIndex(known, message);
+        replacingPlaceholder = index != -1;
       }
-
-      if (matchesPendingIdentity(message)) {
-        // Sequential behavior would have inserted the first copy before this
-        // callback arrived, so expose pending rows to the regular merge path.
-        flushPending();
-      }
-      if (matchesStoredIdentity(message)) {
-        _upsertIncomingMessage(
-          convID,
-          message,
-          bumpRevision: false,
-        );
-        continue;
-      }
-
-      pending.add(message);
-      inserted = true;
-      lastInserted = message;
-      insertedMessages.add(message);
-    }
-    flushPending();
-    if (messages.every((message) => message.isSelf == true)) {
-      final current = _messageListMap[convID] ?? const <V2TimMessage>[];
-      final records = <MessageReconciliationRecord<V2TimMessage>>[];
-      for (final message in messages) {
-        V2TimMessage? value;
-        for (final item in current) {
-          if (_messageCorrelatesWithStored(item, message)) {
-            value = item;
-            break;
-          }
-        }
-        final resolved = value ?? message;
-        records.add(
-          MessageReconciliationRecord<V2TimMessage>(
-            value: resolved,
-            msgID: resolved.msgID,
-            localID: resolved.id,
-            outgoingStableID: readOutgoingStableId(resolved) ??
-                readOutgoingStableId(message) ??
-                resolved.id,
-            seq: resolved.seq,
-          ),
-        );
-      }
-      commitMessageDelta(
-        MessageDelta<V2TimMessage>(
-          conversationKey: convID,
-          eventID: 'realtime:self:batch:${++_nextRealtimeReconciliationEvent}:'
-              '${messages.map(messageDedupKey).join(',')}',
-          kind: MessageDeltaKind.optimisticAdoption,
-          source: MessageDeltaSource.sdkRealtime,
-          generation: messageDeltaGenerationFor(convID),
-          clearEpoch: messageDeltaClearEpochFor(convID),
-          upserts: records,
+      final previous = index == -1 ? null : known[index];
+      final value = index == -1
+          ? _cloneMessage(message)
+          : _mergeMessageAtIndex(
+              storageKey,
+              known,
+              index,
+              message,
+              replacingPlaceholder: replacingPlaceholder,
+              forceSuccess: message.isSelf == true || previous != null,
+            );
+      final stableIdentity = readOutgoingStableId(value) ??
+          readOutgoingStableId(previous) ??
+          (value.isSelf == true ? value.id : null);
+      records.add(
+        MessageReconciliationRecord<V2TimMessage>(
+          value: value,
+          msgID: value.msgID,
+          localID: value.id,
+          outgoingStableID: stableIdentity,
+          seq: value.seq,
         ),
       );
+      previousRecords.add(previous);
+      if (previous == null) {
+        insertedMessages.add(value);
+        known.add(value);
+      } else {
+        known[index] = value;
+      }
     }
+
+    final commit = commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: storageKey,
+        eventID: 'realtime:batch:${++_nextRealtimeReconciliationEvent}:'
+            '${messages.map(messageDedupKey).join(',')}',
+        kind: MessageDeltaKind.realtimeUpsert,
+        source: MessageDeltaSource.sdkRealtime,
+        generation: messageDeltaGenerationFor(storageKey),
+        clearEpoch: messageDeltaClearEpochFor(storageKey),
+        upserts: records,
+      ),
+    );
+    if (commit != null) {
+      for (var index = 0; index < records.length; index++) {
+        final value = records[index].value;
+        _applyMergedMessagePresentationSideEffects(
+          storageKey,
+          previousRecords[index],
+          value,
+        );
+      }
+    } else {
+      insertedMessages.clear();
+    }
+    final inserted = insertedMessages.isNotEmpty;
+    final lastInserted = inserted ? insertedMessages.last : null;
     if (ChatJitterDiag.enabled) {
       final groupCount =
           messages.where((message) => _isGroupLikeMessage(message)).length;
@@ -7182,51 +7145,14 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
             isOutgoingMediaCancelled(newMsg.msgID))) {
       return false;
     }
-    final result = _upsertIncomingMessage(
+    // _upsertIncomingMessage constructs and submits the authoritative delta.
+    // Its null/rejected result is terminal for this callback; there is no
+    // direct-list fallback after a Writer decision.
+    return _upsertIncomingMessage(
       convID,
       newMsg,
       forceSuccess: forceSuccess,
     );
-    final storageKey = _resolveMessageListStorageKey(convID);
-    if (storageKey.isEmpty ||
-        _messageReconciliationWriter.hasActiveRequest(storageKey)) {
-      return result;
-    }
-    // The mature self-send merge above preserves local media metadata and row
-    // order. Record its resulting authoritative value in the same writer so
-    // a later history page uses the exact server/stable identity boundary.
-    V2TimMessage? merged;
-    for (final item in _messageListMap[storageKey] ?? const <V2TimMessage>[]) {
-      if (_messageCorrelatesWithStored(item, newMsg)) {
-        merged = item;
-        break;
-      }
-    }
-    final value = merged ?? newMsg;
-    final stableIdentity =
-        readOutgoingStableId(value) ?? readOutgoingStableId(newMsg) ?? value.id;
-    commitMessageDelta(
-      MessageDelta<V2TimMessage>(
-        conversationKey: storageKey,
-        eventID:
-            'realtime:self:authoritative:${++_nextRealtimeReconciliationEvent}:'
-            '${messageDedupKey(value)}',
-        kind: MessageDeltaKind.optimisticAdoption,
-        source: MessageDeltaSource.sdkRealtime,
-        generation: messageDeltaGenerationFor(storageKey),
-        clearEpoch: messageDeltaClearEpochFor(storageKey),
-        upserts: <MessageReconciliationRecord<V2TimMessage>>[
-          MessageReconciliationRecord<V2TimMessage>(
-            value: value,
-            msgID: value.msgID,
-            localID: value.id,
-            outgoingStableID: stableIdentity,
-            seq: value.seq,
-          ),
-        ],
-      ),
-    );
-    return result;
   }
 
   void _syncGroupMemberFromMessage(V2TimMessage message) {
@@ -7443,6 +7369,52 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     }
   }
 
+  void _clearRevokedInboundPresentation(
+    String conversationID,
+    String msgID, {
+    V2TimMessage? revokedMessage,
+  }) {
+    final target = msgID.trim();
+    if (target.isEmpty) {
+      return;
+    }
+    final stateKey = _inboundStateKey(conversationID);
+    final state = _inboundUnreadStateFor(stateKey, create: false);
+    final dedupKeys = <String>{
+      'msg:$target',
+      if (revokedMessage != null) messageDedupKey(revokedMessage),
+    };
+    state.bufferedMessages.removeWhere(
+      (message) =>
+          message.msgID == target ||
+          dedupKeys.contains(messageDedupKey(message)),
+    );
+    bool matchesTarget(String value) {
+      return dedupKeys.contains(value) ||
+          value == target ||
+          value.endsWith(':$target');
+    }
+
+    state.bufferedMessageKeys.removeWhere(matchesTarget);
+    _inboundFastForwardMessageKeys.removeWhere(matchesTarget);
+    final deferredPrefix = '$stateKey|';
+    _authoritativeDeferredIncomingKeys.removeWhere(
+      (value) =>
+          value.startsWith(deferredPrefix) &&
+          matchesTarget(value.substring(deferredPrefix.length)),
+    );
+    if (revokedMessage != null) {
+      _revealDeferredProjectionAcrossAliases(
+        conversationID,
+        <V2TimMessage>[revokedMessage],
+      );
+      _chatUiStateStore.markMessageChanged(
+        conversationID,
+        ChatUiStateStore.messageKeyOf(revokedMessage),
+      );
+    }
+  }
+
   bool markMessageRevokedNow(
     String msgID, {
     String? convID,
@@ -7461,22 +7433,31 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     }
 
     var didUpdate = false;
+    final visitedStorageKeys = <String>{};
     for (final key in keys) {
-      final activeMessageList = _messageListMap[key];
+      final storageKey = _resolveMessageListStorageKey(key);
+      if (storageKey.isEmpty || !visitedStorageKeys.add(storageKey)) {
+        continue;
+      }
+      final activeMessageList = _messageListMap[storageKey];
       if (activeMessageList == null || activeMessageList.isEmpty) {
         // Keep the revoke authority even when the row is outside the current
         // memory window. A later older-page response must not resurrect it.
-        commitMessageDelta(
+        final commit = commitMessageDelta(
           MessageDelta<V2TimMessage>(
-            conversationKey: key,
-            eventID: 'revoke_tombstone:$targetMsgID:$key',
+            conversationKey: storageKey,
+            eventID: 'revoke_tombstone:$targetMsgID:$storageKey',
             kind: MessageDeltaKind.revoke,
             source: MessageDeltaSource.sdkRealtime,
-            generation: messageDeltaGenerationFor(key),
-            clearEpoch: messageDeltaClearEpochFor(key),
+            generation: messageDeltaGenerationFor(storageKey),
+            clearEpoch: messageDeltaClearEpochFor(storageKey),
             tombstones: <String>{targetMsgID},
           ),
         );
+        if (commit != null) {
+          _clearRevokedInboundPresentation(storageKey, targetMsgID);
+          didUpdate = true;
+        }
         continue;
       }
 
@@ -7492,83 +7473,47 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         revoked.id ??= revoked.msgID;
         final commit = commitMessageDelta(
           MessageDelta<V2TimMessage>(
-            conversationKey: key,
+            conversationKey: storageKey,
             eventID:
-                'revoke:$targetMsgID:${DateTime.now().microsecondsSinceEpoch}',
+                'revoke:$targetMsgID:$storageKey:${DateTime.now().microsecondsSinceEpoch}',
             kind: MessageDeltaKind.revoke,
             source: MessageDeltaSource.sdkRealtime,
-            generation: messageDeltaGenerationFor(key),
-            clearEpoch: messageDeltaClearEpochFor(key),
+            generation: messageDeltaGenerationFor(storageKey),
+            clearEpoch: messageDeltaClearEpochFor(storageKey),
             upserts: [messageDeltaRecord(revoked)],
             tombstones: <String>{targetMsgID},
           ),
         );
         if (commit != null) {
+          _clearRevokedInboundPresentation(
+            storageKey,
+            targetMsgID,
+            revokedMessage: revoked,
+          );
           didUpdate = true;
           continue;
         }
-        if (_messageReconciliationWriter.hasActiveRequest(key)) {
-          // The revoke is queued in the active history generation; do not
-          // mutate the projection outside that transaction.
-          continue;
-        }
       }
 
-      var changed = false;
-      final changedMessageKeys = <String>{};
-      final updated = activeMessageList.map((item) {
-        if (item.msgID != targetMsgID) {
-          return item;
-        }
-
-        item.status = MessageStatus.V2TIM_MSG_STATUS_LOCAL_REVOKED;
-        item.cloudCustomData =
-            _revokedCloudCustomData(item.cloudCustomData, isAdmin);
-        // Keep the stable msgID for future SDK callbacks; only refresh the local id
-        // when it is empty so the list can rebuild without breaking later matching.
-        item.id ??=
-            item.msgID ?? DateTime.now().millisecondsSinceEpoch.toString();
-        changedMessageKeys.add(ChatUiStateStore.messageKeyOf(item));
-        changed = true;
-        return item;
-      }).toList(growable: true);
-
-      if (!changed) {
-        continue;
-      }
-
-      final state = _inboundUnreadStateFor(key, create: false);
-      state.bufferedMessages
-          .removeWhere((element) => element.msgID == targetMsgID);
-      final revokedMessages = updated
-          .where((element) => element.msgID == targetMsgID)
-          .toList(growable: false);
-      for (final message in revokedMessages) {
-        final dedupKey = messageDedupKey(message);
-        state.bufferedMessageKeys.remove(dedupKey);
-        _inboundFastForwardMessageKeys.remove(dedupKey);
-        _authoritativeDeferredIncomingKeys.remove(
-          _authoritativeDeferredKey(key, message),
-        );
-      }
-      _revealDeferredProjectionAcrossAliases(key, revokedMessages);
-      _messageListMap[key] = updated;
-      for (final messageKey in changedMessageKeys) {
-        _chatUiStateStore.markMessageChanged(key, messageKey);
-      }
-      final stage = _messageCommitCoordinator.stage(
-        MessageMutation(
-          conversationID: key,
-          type: MessageMutationType.removeOrRevoke,
-          generation: (_messageCommitGenerationByConv[key] ?? 0) + 1,
-          source: 'revoke',
-          stableIdentity: targetMsgID,
+      // A row may be outside this memory window or may already have been
+      // projected away. The tombstone is still authoritative and is the only
+      // accepted fallback; never mutate the formal list directly here.
+      final commit = commitMessageDelta(
+        MessageDelta<V2TimMessage>(
+          conversationKey: storageKey,
+          eventID:
+              'revoke_tombstone:$targetMsgID:$storageKey:${DateTime.now().microsecondsSinceEpoch}',
+          kind: MessageDeltaKind.revoke,
+          source: MessageDeltaSource.sdkRealtime,
+          generation: messageDeltaGenerationFor(storageKey),
+          clearEpoch: messageDeltaClearEpochFor(storageKey),
+          tombstones: <String>{targetMsgID},
         ),
       );
-      if (stage.shouldAdvanceListRevision) {
-        _bumpMessageListRevisionFor(key);
+      if (commit != null) {
+        _clearRevokedInboundPresentation(storageKey, targetMsgID);
+        didUpdate = true;
       }
-      didUpdate = true;
     }
 
     // The recalled row may already be outside the in-memory chat window while
@@ -7791,43 +7736,22 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       // deleted row could be reintroduced outside the authoritative state.
       return;
     }
-    final activeMessageList = _messageListMap[resolvedConvID];
-    if (activeMessageList == null || activeMessageList.isEmpty) {
-      return;
-    }
-    final msgID = newMsg.msgID;
-    final clientId = newMsg.id;
-    var changed = false;
-    final changedKeys = <String>{};
-    _messageListMap[resolvedConvID] = activeMessageList.map((item) {
-      final itemKey = ChatUiStateStore.messageKeyOf(item);
-      if (msgID != null && msgID.isNotEmpty && item.msgID == msgID) {
-        changed = true;
-        changedKeys.add(itemKey);
-        changedKeys.add(msgID);
-        return newMsg;
+    if (newMsg.isSelf == true) {
+      // A lifecycle hook may turn an inbound model into a self message. It
+      // still follows the same send/adoption Writer boundary as the normal
+      // self branch above.
+      final applied = _syncSelfSentMessage(
+        resolvedConvID,
+        newMsg,
+        forceSuccess: newMsg.status == MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC,
+      );
+      if (applied) {
+        _chatUiStateStore.markMessageChangedByMessage(
+          resolvedConvID,
+          newMsg,
+        );
+        _markNeedsNotify();
       }
-      if (clientId != null &&
-          clientId.isNotEmpty &&
-          item.id != null &&
-          item.id == clientId) {
-        changed = true;
-        changedKeys.add(itemKey);
-        changedKeys.add(clientId);
-        return newMsg;
-      }
-      return item;
-    }).toList();
-    if (changed) {
-      changedKeys.add(ChatUiStateStore.messageKeyOf(newMsg));
-      if (msgID != null && msgID.isNotEmpty) {
-        changedKeys.add(msgID);
-      }
-      if (clientId != null && clientId.isNotEmpty) {
-        changedKeys.add(clientId);
-      }
-      _chatUiStateStore.markMessagesChanged(resolvedConvID, changedKeys);
-      _markNeedsNotify();
     }
   }
 
@@ -7851,15 +7775,18 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         peerReadConvIds['c2c_$normalizedPeer'] = readAt;
       }
 
+      final visitedConversationKeys = <String>{};
       for (final entry in _messageListMap.entries.toList()) {
         if (!_isC2CConversationForPeer(entry.key, peerID)) {
           continue;
         }
-        peerReadConvIds[entry.key] = readAt;
-        final list = entry.value;
-        if (list == null || list.isEmpty) {
+        final storageKey = _resolveMessageListStorageKey(entry.key);
+        if (storageKey.isEmpty || !visitedConversationKeys.add(storageKey)) {
           continue;
         }
+        peerReadConvIds[storageKey] = readAt;
+        final list = _mergedAliasMessageList(storageKey);
+        if (list.isEmpty) continue;
         var convChanged = false;
         final changedKeys = <String>{};
         final updated = list.map((element) {
@@ -7869,28 +7796,47 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
               element.isPeerRead != true &&
               (readAt <= 0 || timestamp <= 0 || timestamp <= readAt);
           if (shouldMarkRead) {
-            element.isPeerRead = true;
             final msgID = element.msgID;
-            if (msgID != null && msgID.isNotEmpty) {
-              _messageReadReceiptMap[msgID] = V2TimMessageReceipt(
-                userID: peerID,
-                timestamp: readAt,
-                msgID: msgID,
-                isPeerRead: true,
-              );
-            }
-            changedKeys.add(ChatUiStateStore.messageKeyOf(element));
             if (msgID != null && msgID.isNotEmpty) {
               changedKeys.add(msgID);
             }
+            changedKeys.add(ChatUiStateStore.messageKeyOf(element));
             convChanged = true;
+            final next = _cloneMessage(element);
+            next.isPeerRead = true;
+            return next;
           }
           return element;
         }).toList();
         if (convChanged) {
-          _messageListMap[entry.key] = updated;
-          _chatUiStateStore.markMessagesChanged(entry.key, changedKeys);
-          changed = true;
+          final commit = commitMessageDelta(
+            MessageDelta<V2TimMessage>(
+              conversationKey: storageKey,
+              eventID: 'read_receipt:c2c:$peerID:$readAt',
+              kind: MessageDeltaKind.readReceipt,
+              source: MessageDeltaSource.sdkRealtime,
+              generation: messageDeltaGenerationFor(storageKey),
+              clearEpoch: messageDeltaClearEpochFor(storageKey),
+              upserts: _reconciliationRecords(updated),
+            ),
+          );
+          if (commit != null) {
+            for (final element in updated) {
+              if (element.isSelf == true && element.isPeerRead == true) {
+                final msgID = element.msgID?.trim() ?? '';
+                if (msgID.isNotEmpty) {
+                  _messageReadReceiptMap[msgID] = V2TimMessageReceipt(
+                    userID: peerID,
+                    timestamp: readAt,
+                    msgID: msgID,
+                    isPeerRead: true,
+                  );
+                }
+              }
+            }
+            _chatUiStateStore.markMessagesChanged(storageKey, changedKeys);
+            changed = true;
+          }
         }
       }
     }
@@ -8031,51 +7977,18 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     }
     if (progressClamped >= 100 ||
         message.status == MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC) {
-      if (_syncSelfSentMessage(
+      final committed = _syncSelfSentMessage(
         convID,
         message,
         forceSuccess: true,
-      )) {
+      );
+      if (committed) {
         _markNeedsNotify();
-        return;
       }
-    }
-    final list = _messageListMap[convID];
-    if (list == null || list.isEmpty) {
+      // A rejected or queued Writer commit is terminal for this callback. In
+      // particular, do not turn a stale progress event into a formal-list
+      // write after account/history state has moved on.
       return;
-    }
-    var changed = false;
-    final updated = list.map((item) {
-      final sameMsgID = msgID != null &&
-          msgID.isNotEmpty &&
-          item.msgID != null &&
-          item.msgID == msgID;
-      final sameId =
-          id != null && id.isNotEmpty && item.id != null && item.id == id;
-      if (!sameMsgID && !sameId) {
-        return item;
-      }
-      if (item.status == MessageStatus.V2TIM_MSG_STATUS_SENDING &&
-          progressClamped >= 100) {
-        final next = _cloneMessage(message);
-        // Keep client id so list keys / later dedupe stay stable.
-        if ((next.id == null || next.id!.isEmpty) &&
-            item.id != null &&
-            item.id!.isNotEmpty) {
-          next.id = item.id;
-        }
-        _preserveOutgoingLocalOrderData(item, next);
-        _preserveSoundLocalPath(item, next);
-        next.status = MessageStatus.V2TIM_MSG_STATUS_SEND_SUCC;
-        changed = true;
-        return next;
-      }
-      return item;
-    }).toList();
-    if (changed) {
-      _messageListMap[convID] = updated;
-      _markMessageRowChangedByIds(convID, msgID: msgID, clientId: id);
-      _markNeedsNotify();
     }
   }
 
@@ -8179,12 +8092,51 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     }
   }
 
-  void addAdvancedMsgListener() {
-    _messageService.addAdvancedMsgListener(listener: advancedMsgListener);
+  /// Ordinary chat callbacks are owned by the app-level
+  /// [TencentAdvancedMessageAdapter]. Keep the old API source-compatible but
+  /// prevent a view model from registering a second SDK listener.
+  @Deprecated('The app MessageCore owns the only ordinary chat listener.')
+  void addAdvancedMsgListener() {}
+
+  @Deprecated('The app MessageCore owns the only ordinary chat listener.')
+  void removeAdvanceMsgListener() {}
+
+  /// Application-layer compatibility bridge for the single IM ingress.
+  ///
+  /// The SDK listener is owned by the app MessageCore. These methods preserve
+  /// the existing UIKit projection behavior without registering another SDK
+  /// listener inside the view model.
+  Future<void> applyAppRealtimeMessage(V2TimMessage message) async {
+    await _onReceiveNewMsg(message);
   }
 
-  void removeAdvanceMsgListener() {
-    _messageService.removeAdvancedMsgListener(listener: advancedMsgListener);
+  Future<void> applyAppMessageModified(
+    V2TimMessage message, {
+    String? conversationID,
+  }) async {
+    await onMessageModified(message, conversationID);
+  }
+
+  void applyAppMessageRevoked(String msgID, [String? conversationID]) {
+    onMessageRevoked(msgID, conversationID);
+  }
+
+  void applyAppC2CReadReceipts(List<V2TimMessageReceipt> receipts) {
+    _onReceiveC2CReadReceipt(receipts);
+  }
+
+  void applyAppMessageReadReceipts(List<V2TimMessageReceipt> receipts) {
+    _onReceiveMessageReadReceipts(receipts);
+  }
+
+  void applyAppSendMessageProgress(V2TimMessage message, int progress) {
+    _onSendMessageProgress(message, progress);
+  }
+
+  Future<void> applyAppMessageDownloadProgress(
+    V2TimMessageDownloadProgress progress,
+  ) {
+    return onMessageDownloadProgressCallback(progress);
   }
 
   markMessageAsRead({
@@ -8408,6 +8360,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         localCustomData: localCustomData,
         isExcludedFromContentModeration:
             messageInfo.isExcludedFromContentModeration ?? false,
+        messageInfo: messageInfoWithSender,
         convID: convID,
         setInputField: setInputField,
         id: messageInfo.id as String,
@@ -8506,6 +8459,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         isExcludedFromUnreadCount: isExcludedFromUnreadCount,
         needReadReceipt: needReadReceipt,
         localCustomData: localCustomData,
+        messageInfo: messageInfoWithSender,
         convID: convID,
         setInputField: setInputField,
         convType: ConvType.values[convType.index],
@@ -8518,20 +8472,14 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       String msgID, String localCustomData, String conversationID) async {
     final res = await _messageService.setLocalCustomData(
         msgID: msgID, localCustomData: localCustomData);
-    List<V2TimMessage> messageList = _messageListMap[conversationID] ?? [];
-    if (res.code == 0) {
-      messageList = messageList.map((item) {
-        if (item.msgID == msgID) {
-          item.localCustomData = localCustomData;
-          // item.id = DateTime.now().millisecondsSinceEpoch.toString();
-        }
-        return item;
-      }).toList();
-      setMessageList(conversationID, messageList,
-          needResetNewMessageCount: false);
-      return true;
-    }
-    return false;
+    if (res.code != 0) return false;
+    _commitLocalMessageMetadata(
+      conversationID: conversationID,
+      messageID: msgID,
+      localCustomData: localCustomData,
+      eventID: 'local_custom_data:$conversationID:$msgID',
+    );
+    return true;
   }
 
   Future<bool> setLocalCustomInt(
@@ -8541,69 +8489,88 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       return false;
     }
 
-    // 先乐观改内存，再写 SDK。
-    // 1) `_messageListMap[conversationID]` 会漏掉 `c2c_` / 裸 id 别名；
-    // 2) `setMessageList` 内容签名不含 localCustomInt，签名不变时不会 notify，
-    //    语音点播后红点会一直留着。
     final storageKey = _resolveMessageListStorageKey(conversationID);
-    final sourceList =
-        rawMessageList(conversationID) ?? _messageListMap[storageKey];
-    var touched = false;
-    if (sourceList != null && sourceList.isNotEmpty) {
-      for (final item in sourceList) {
-        final itemMsgId = item.msgID?.trim() ?? '';
-        final itemClientId = item.id?.trim() ?? '';
-        if (itemMsgId == targetId || itemClientId == targetId) {
-          if (item.localCustomInt != localCustomInt) {
-            item.localCustomInt = localCustomInt;
-            touched = true;
-          } else {
-            touched = true;
-          }
-        }
-      }
-    }
-
+    final current = storageKey.isEmpty
+        ? const <V2TimMessage>[]
+        : _mergedAliasMessageList(storageKey);
+    final touched = current.any(
+      (item) => item.msgID?.trim() == targetId || item.id?.trim() == targetId,
+    );
     if (touched) {
-      final key = storageKey.isNotEmpty ? storageKey : conversationID.trim();
-      if (sourceList != null) {
-        _messageListMap[key] = List<V2TimMessage>.of(sourceList);
-      }
-      _bumpMessageListRevisionFor(
-        key,
-        reason: 'setLocalCustomInt',
+      _commitLocalMessageMetadata(
+        conversationID: storageKey,
+        messageID: targetId,
+        localCustomInt: localCustomInt,
+        eventID: 'local_custom_int:$storageKey:$targetId',
       );
-      _markNeedsNotify();
     }
 
     final res = await _messageService.setLocalCustomInt(
         msgID: targetId, localCustomInt: localCustomInt);
-    if (res.code != 0) {
-      return touched;
-    }
+    if (res.code != 0) return touched;
 
-    if (!touched) {
-      final fallbackList =
-          rawMessageList(conversationID) ?? const <V2TimMessage>[];
-      for (final item in fallbackList) {
-        final itemMsgId = item.msgID?.trim() ?? '';
-        final itemClientId = item.id?.trim() ?? '';
-        if (itemMsgId == targetId || itemClientId == targetId) {
-          item.localCustomInt = localCustomInt;
-          touched = true;
-        }
-      }
-      if (touched) {
-        final key = _resolveMessageListStorageKey(conversationID);
-        _messageListMap[key] = List<V2TimMessage>.of(fallbackList);
-        _bumpMessageListRevisionFor(
-          key,
-          reason: 'setLocalCustomInt_sdk',
-        );
-        _markNeedsNotify();
-      }
+    if (!touched && storageKey.isNotEmpty) {
+      _commitLocalMessageMetadata(
+        conversationID: storageKey,
+        messageID: targetId,
+        localCustomInt: localCustomInt,
+        eventID: 'local_custom_int_sdk:$storageKey:$targetId',
+      );
     }
     return true;
+  }
+
+  bool _commitLocalMessageMetadata({
+    required String conversationID,
+    required String messageID,
+    String? localCustomData,
+    int? localCustomInt,
+    required String eventID,
+  }) {
+    final storageKey = _resolveMessageListStorageKey(conversationID);
+    final targetID = messageID.trim();
+    if (storageKey.isEmpty || targetID.isEmpty) return false;
+    final current = _mergedAliasMessageList(storageKey);
+    for (final item in current) {
+      if (item.msgID?.trim() != targetID && item.id?.trim() != targetID) {
+        continue;
+      }
+      final next = _cloneMessage(item);
+      if (localCustomData != null) next.localCustomData = localCustomData;
+      if (localCustomInt != null) next.localCustomInt = localCustomInt;
+      if (next.localCustomData == item.localCustomData &&
+          next.localCustomInt == item.localCustomInt) {
+        return true;
+      }
+      final commit = commitMessageDelta(
+        MessageDelta<V2TimMessage>(
+          conversationKey: storageKey,
+          eventID: eventID,
+          kind: MessageDeltaKind.localMetadata,
+          source: MessageDeltaSource.userAction,
+          generation: messageDeltaGenerationFor(storageKey),
+          clearEpoch: messageDeltaClearEpochFor(storageKey),
+          upserts: <MessageReconciliationRecord<V2TimMessage>>[
+            _reconciliationRecord(next),
+          ],
+        ),
+      );
+      if (commit == null) return false;
+      _chatUiStateStore.markMessagesChanged(
+        storageKey,
+        <String>{
+          ChatUiStateStore.messageKeyOf(item),
+          ChatUiStateStore.messageKeyOf(next),
+          targetID,
+        },
+      );
+      _markMessageRowChanged(storageKey, next, extraKey: targetID);
+      if (_isSameConversationID(storageKey, currentSelectedConv)) {
+        _markNeedsNotify();
+      }
+      return true;
+    }
+    return false;
   }
 
   Future<V2TimValueCallback<V2TimMessage>> _sendMessage({
@@ -8620,6 +8587,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     bool? needReadReceipt,
     String? cloudCustomData,
     String? localCustomData,
+    V2TimMessage? messageInfo,
     bool isExcludedFromContentModeration = false,
   }) async {
     String receiver = convType == ConvType.c2c ? convID : '';
@@ -8640,27 +8608,45 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
             (convType != ConvType.group ||
                 _isReadReceiptAllowedGroup(receiptGroupType)) &&
             !_looksLikeCommunityGroupId(groupID);
-    final sendMsgRes = await _messageService.sendMessage(
-        id: id,
-        receiver: receiver,
-        needReadReceipt: useReadReceipt,
-        groupID: groupID,
-        priority: priority,
-        localCustomData: localCustomData,
-        isExcludedFromUnreadCount: isExcludedFromUnreadCount ?? false,
-        offlinePushInfo: offlinePushInfo,
-        isExcludedFromContentModeration: isExcludedFromContentModeration,
-        onlineUserOnly: onlineUserOnly ?? false,
-        cloudCustomData: cloudCustomData ??
-            json.encode({
-              "messageFeature": {
-                "needTyping": 1,
-                "version": 1,
-              }
-            }));
+    final coordinatedSend = await ImOutgoingSendCoordinator.instance.send(
+      messageService: _messageService,
+      sdkLocalId: id,
+      conversationId: convID,
+      conversationType: convType == ConvType.group
+          ? ImConversationType.group
+          : ImConversationType.c2c,
+      receiver: receiver,
+      groupID: groupID,
+      fallbackMessage: messageInfo,
+      needReadReceipt: useReadReceipt,
+      priority: priority,
+      localCustomData: localCustomData,
+      isExcludedFromUnreadCount: isExcludedFromUnreadCount ?? false,
+      offlinePushInfo: offlinePushInfo,
+      isExcludedFromContentModeration: isExcludedFromContentModeration,
+      onlineUserOnly: onlineUserOnly ?? false,
+      businessCloudCustomData: cloudCustomData ??
+          json.encode({
+            "messageFeature": {
+              "needTyping": 1,
+              "version": 1,
+            }
+          }),
+      persistOutbox: isEditStatusMessage != true,
+      onSyncMsgID: (syncMsgID) {
+        bindOutgoingSyncMsgId(convID, id, syncMsgID);
+      },
+    );
+    final sendMsgRes = coordinatedSend.sdkResult;
+    var projectionCommitted = true;
     if (isEditStatusMessage == false) {
-      updateMessage(
+      projectionCommitted = applyOutgoingSendResult(
           sendMsgRes, convID, id, convType, receiptGroupType, setInputField);
+    }
+    if (projectionCommitted && coordinatedSend.canCompleteProjection) {
+      await ImOutgoingSendCoordinator.instance.completeSuccessfulProjection(
+        coordinatedSend,
+      );
     }
     if (_lifeCycle?.messageDidSend != null) {
       _lifeCycle!.messageDidSend(sendMsgRes);
@@ -9149,6 +9135,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     required bool structureChanged,
     required bool contentChanged,
     required bool recordCommit,
+    MessageReconciliationWriterCommit<V2TimMessage>? writerCommit,
   }) {
     if (recordCommit) {
       _messageCommitGenerationByConv[storageKey] =
@@ -9174,6 +9161,12 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
           _deferredUntilUserBottomConversations.contains(projectionKey),
       structureChanged: structureChanged,
       contentChanged: contentChanged,
+      writerRevision: writerCommit?.revision,
+      writerGeneration: writerCommit?.generation,
+      writerClearEpoch: writerCommit?.clearEpoch,
+      writerOwnerUserID: writerCommit?.ownerUserID,
+      writerAccountGeneration: writerCommit?.accountGeneration,
+      writerDomainGeneration: writerCommit?.domainGeneration,
     );
   }
 
@@ -9216,10 +9209,65 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       String? memoryWindowAnchorMsgID,
       String? memoryWindowAnchorSeq,
       bool skipEquivalentHistoryWindow = false,
-      String historyCommitSource = 'unspecified'}) {
+      String historyCommitSource = 'unspecified',
+      MessageReconciliationWriterCommit<V2TimMessage>? writerCommit}) {
     final canonical = canonicalHistoryStorageKey(conversationID);
     final storageKey = canonical.isNotEmpty ? canonical : conversationID.trim();
     final previous = _mergedAliasMessageList(conversationID);
+    if (writerCommit == null &&
+        _messageReconciliationWriter.hasActiveRequest(storageKey)) {
+      // A history transaction owns the next formal publication. Legacy
+      // callers may still invoke setMessageList, but they cannot publish a
+      // competing snapshot while that transaction is active.
+      return _messageCommitSnapshot(
+        conversationID: conversationID,
+        storageKey: storageKey,
+        list: previous,
+        structureChanged: false,
+        contentChanged: false,
+        recordCommit: false,
+      );
+    }
+    if (writerCommit == null) {
+      // Legacy callers remain source-compatible, but their snapshot must be
+      // admitted by the same identity/revision boundary as every other
+      // formal mutation. Seed from the current projection first because the
+      // Writer may be seeing this conversation for the first time.
+      final clearEpoch = messageDeltaClearEpochFor(storageKey);
+      _messageReconciliationWriter.seedAuthoritative(
+        conversationID: storageKey,
+        records: _reconciliationRecords(previous),
+        trackSeqGaps: _isGroupConversation(storageKey, messages: previous),
+        clearEpoch: clearEpoch,
+      );
+      final compatibilityCommit =
+          _messageReconciliationWriter.applyCompatibilitySnapshot(
+        conversationID: storageKey,
+        eventID:
+            'compatibility:set_message_list:$storageKey:${++_nextRealtimeReconciliationEvent}',
+        records: _reconciliationRecords(messageList),
+        generation: messageDeltaGenerationFor(storageKey),
+        clearEpoch: clearEpoch,
+        replace: replace || isDeleteMsg,
+      );
+      if (compatibilityCommit == null) {
+        return _messageCommitSnapshot(
+          conversationID: conversationID,
+          storageKey: storageKey,
+          list: previous,
+          structureChanged: false,
+          contentChanged: false,
+          recordCommit: false,
+        );
+      }
+      writerCommit = compatibilityCommit;
+      messageList = compatibilityCommit.records
+          .map((record) => record.value)
+          .toList(growable: false);
+      // The Writer has already produced a complete authoritative snapshot;
+      // this method now only applies the existing memory-window/UI projection.
+      replace = true;
+    }
     if (replace) {
       // Do this before the equivalent-window fast path as well. A replace can
       // carry no content delta while still superseding a pending presentation
@@ -9227,6 +9275,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       cancelInboundProjectionRevealForAuthoritativeReplace(conversationID);
     }
     if (skipEquivalentHistoryWindow &&
+        writerCommit != null &&
         replace &&
         !isDeleteMsg &&
         previous.length == messageList.length) {
@@ -9246,6 +9295,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
           structureChanged: false,
           contentChanged: false,
           recordCommit: false,
+          writerCommit: writerCommit,
         );
       }
       _historyWindowCommitSignatureByConv[storageKey] = commitSignature;
@@ -9477,43 +9527,48 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     var signatureChanged =
         _messageListContentSignatureByConv[storageKey] != signature;
     final structureChanged = _messageCommitStructureChanged(previous, sorted);
-    if (!signatureChanged && !isDeleteMsg && !_listHasCorrelatingDup(sorted)) {
-      ChatMainThreadPerf.increment('message_list_noop_commit');
-      // 列表语义未变：仍补种行高供短历史估 spacer，但不掀翻 UI。
-      if (OutgoingVisibleProbe.matches(conversationID) ||
-          OutgoingVisibleProbe.matches(storageKey)) {
-        OutgoingVisibleProbe.log(
-          'set_list_signature_unchanged',
-          conversationID: storageKey,
-          extras: <String, Object?>{
-            'replace': replace,
-            'count': sorted.length,
-            ...OutgoingVisibleProbe.trackedInList(sorted),
-          },
+    if (!signatureChanged && !isDeleteMsg) {
+      if (_listHasCorrelatingDup(sorted)) {
+        signatureChanged = true;
+      } else {
+        ChatMainThreadPerf.increment('message_list_noop_commit');
+        // 列表语义未变：仍补种行高供短历史估 spacer，但不掀翻 UI。
+        if (OutgoingVisibleProbe.matches(conversationID) ||
+            OutgoingVisibleProbe.matches(storageKey)) {
+          OutgoingVisibleProbe.log(
+            'set_list_signature_unchanged',
+            conversationID: storageKey,
+            extras: <String, Object?>{
+              'replace': replace,
+              'count': sorted.length,
+              ...OutgoingVisibleProbe.trackedInList(sorted),
+            },
+          );
+        }
+        ChatMessageHeightCache.instance.seedEstimatesForMessages(sorted);
+        _messageListContentSignatureByConv[storageKey] = signature;
+        _messageListMap[storageKey] = sorted;
+        _collapseHistoryAliasesToCanonical(
+          conversationID,
+          canonical: storageKey,
+        );
+        if (needResetNewMessageCount && !holdUntilUserBottom) {
+          unreadState.receivedCount = 0;
+        }
+        // 签名未变但投影显隐变了：仍需通知，否则缓充消息会一直藏着。
+        if (projectionChanged) {
+          _markNeedsNotify();
+        }
+        return _messageCommitSnapshot(
+          conversationID: conversationID,
+          storageKey: storageKey,
+          list: sorted,
+          structureChanged: structureChanged,
+          contentChanged: false,
+          recordCommit: true,
+          writerCommit: writerCommit,
         );
       }
-      ChatMessageHeightCache.instance.seedEstimatesForMessages(sorted);
-      _messageListContentSignatureByConv[storageKey] = signature;
-      _messageListMap[storageKey] = sorted;
-      _collapseHistoryAliasesToCanonical(
-        conversationID,
-        canonical: storageKey,
-      );
-      if (needResetNewMessageCount && !holdUntilUserBottom) {
-        unreadState.receivedCount = 0;
-      }
-      // 签名未变但投影显隐变了：仍需通知，否则缓充消息会一直藏着。
-      if (projectionChanged) {
-        _markNeedsNotify();
-      }
-      return _messageCommitSnapshot(
-        conversationID: conversationID,
-        storageKey: storageKey,
-        list: sorted,
-        structureChanged: structureChanged,
-        contentChanged: false,
-        recordCommit: true,
-      );
     }
 
     _messageListMap[storageKey] = sorted;
@@ -9598,6 +9653,7 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       structureChanged: structureChanged,
       contentChanged: true,
       recordCommit: true,
+      writerCommit: writerCommit,
     );
   }
 
@@ -9782,80 +9838,14 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         upserts: [adoptionRecord],
       ),
     );
-    if (authoritativeSendCommit != null) {
-      ChatMessageHeightCache.instance.rememberAlias(
-        id,
-        resolvedMessage.msgID,
-      );
-      if (resolvedMessage.msgID?.isNotEmpty == true) {
-        _clearUploadProgressSilently(resolvedMessage.msgID!);
-      }
-      _markNeedsNotify();
+    if (authoritativeSendCommit == null) {
+      // A queued, stale, or rejected receipt cannot use the old row-local or
+      // full-list fallback. History completion or a later valid receipt owns
+      // the next formal publication.
+      // `send_done_row_local_fallback` is intentionally retired as a formal
+      // list path; keep the diagnostic term for compatibility with probes.
       return;
     }
-    if (targetIndex != -1 &&
-        !collapsedDuplicate &&
-        stableIdentity.isNotEmpty &&
-        _isRowLocalOutgoingMediaReceipt(
-          previousForMerge,
-          resolvedMessage,
-        )) {
-      final rowResult = replaceMessageRowByStableIdentity(
-        conversationID: storageConvID,
-        stableIdentity: stableIdentity,
-        replacement: resolvedMessage,
-        aliases: <String?>[
-          id,
-          previousForMerge?.id,
-          previousForMerge?.msgID,
-          resolvedMessage.id,
-          resolvedMessage.msgID,
-          previousForMerge?.imageElem?.path,
-          resolvedMessage.imageElem?.path,
-        ],
-      );
-      if (rowResult == RowLocalMessageReplacementResult.replaced) {
-        ChatMessageHeightCache.instance.rememberAlias(
-          id,
-          resolvedMessage.msgID,
-        );
-        final knownHeight =
-            ChatMessageHeightCache.instance.heightFor(resolvedMessage);
-        if (knownHeight != null && knownHeight > 0) {
-          ChatMessageHeightCache.instance.remember(
-            resolvedMessage,
-            knownHeight,
-          );
-        }
-        _logOutgoingSendOrder(
-          event: 'send_done',
-          convID: storageConvID,
-          message: resolvedMessage,
-          clientId: id,
-          mergePath: 'row_local_stable_identity',
-          existingIndex: targetIndex,
-          reordered: false,
-        );
-        return;
-      }
-      OutgoingVisibleProbe.log(
-        'send_done_row_local_fallback',
-        conversationID: storageConvID,
-        message: resolvedMessage,
-        extras: <String, Object?>{'result': rowResult.name},
-      );
-    }
-    // 占位符原位回填：优先保留点击顺序；但必须让展示层按最新时间戳重排。
-    final insertedRow = targetIndex == -1;
-    var reordered = false;
-    if (insertedRow) {
-      currentHistoryMsgList = sortMessagesNewestFirst(currentHistoryMsgList);
-      reordered = true;
-    } else if (!isNewestFirstStorageOrderValid(currentHistoryMsgList)) {
-      currentHistoryMsgList = sortMessagesNewestFirst(currentHistoryMsgList);
-      reordered = true;
-    }
-    _messageListMap[storageConvID] = currentHistoryMsgList;
     _chatUiStateStore.bindMessageAlias(
       storageConvID,
       id,
@@ -9872,6 +9862,12 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       ChatMessageHeightCache.instance.remember(resolvedMessage, knownHeight);
     }
     _markMessageRowChanged(storageConvID, resolvedMessage, extraKey: id);
+    final insertedRow = targetIndex == -1;
+    final reordered = !isNewestFirstStorageOrderValid(currentHistoryMsgList);
+    final isRowLocalMediaReceipt = targetIndex != -1 &&
+        !collapsedDuplicate &&
+        stableIdentity.isNotEmpty &&
+        _isRowLocalOutgoingMediaReceipt(previousForMerge, resolvedMessage);
     final structuralChange = insertedRow || collapsedDuplicate || reordered;
     if (structuralChange) {
       _bumpMessageListRevisionFor(
@@ -9888,7 +9884,11 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
       convID: storageConvID,
       message: resolvedMessage,
       clientId: id,
-      mergePath: targetIndex != -1 ? 'update_replace' : 'update_insert',
+      mergePath: isRowLocalMediaReceipt
+          ? 'row_local_stable_identity'
+          : targetIndex != -1
+              ? 'update_replace'
+              : 'update_insert',
       existingIndex: targetIndex,
       reordered: reordered,
     );
@@ -9907,6 +9907,92 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     }
   }
 
+  bool markOutgoingSendFailedByIdentity({
+    required String conversationID,
+    String? clientId,
+    String? msgID,
+    String? localCustomData,
+    int? sendFailCode,
+    String reason = 'send_failed',
+  }) {
+    final storageConvID = _resolveMessageListStorageKey(conversationID);
+    final cid = clientId?.trim() ?? '';
+    final mid = msgID?.trim() ?? '';
+    if (storageConvID.isEmpty || (cid.isEmpty && mid.isEmpty)) {
+      return false;
+    }
+    final list = _mergedAliasMessageList(storageConvID);
+    if (list.isEmpty) {
+      return false;
+    }
+    final index = list.indexWhere((item) {
+      final stable = readOutgoingStableId(item)?.trim() ?? '';
+      if (cid.isNotEmpty && (item.id == cid || stable == cid)) {
+        return true;
+      }
+      if (mid.isNotEmpty && (item.msgID == mid || stable == mid)) {
+        return true;
+      }
+      return false;
+    });
+    if (index < 0) {
+      return false;
+    }
+    final previous = list[index];
+    final failed = _cloneMessage(previous);
+    failed.status = MessageStatus.V2TIM_MSG_STATUS_SEND_FAIL;
+    if (localCustomData != null) {
+      failed.localCustomData = localCustomData;
+    }
+    if (sendFailCode != null) {
+      ErrorMessageConverter.attachSendFailCode(failed, sendFailCode);
+    }
+    final stableIdentity = readOutgoingStableId(previous) ??
+        readOutgoingStableId(failed) ??
+        (cid.isNotEmpty ? cid : mid);
+    final safeReason = reason.trim().isEmpty
+        ? 'send_failed'
+        : reason.trim().replaceAll(':', '_');
+    final commit = commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: storageConvID,
+        eventID: 'send_fail:$storageConvID:$safeReason:$stableIdentity:$mid',
+        kind: MessageDeltaKind.optimisticAdoption,
+        source: MessageDeltaSource.sendPipeline,
+        generation: messageDeltaGenerationFor(storageConvID),
+        clearEpoch: messageDeltaClearEpochFor(storageConvID),
+        upserts: <MessageReconciliationRecord<V2TimMessage>>[
+          MessageReconciliationRecord<V2TimMessage>(
+            value: failed,
+            msgID: failed.msgID,
+            localID: failed.id,
+            outgoingStableID: stableIdentity,
+            seq: failed.seq,
+          ),
+        ],
+      ),
+    );
+    if (commit == null) {
+      return false;
+    }
+    final failedKey = ChatUiStateStore.messageKeyOf(failed);
+    for (final alias in <String>{cid, mid, stableIdentity}..remove('')) {
+      if (alias != failedKey) {
+        _chatUiStateStore.bindMessageAlias(storageConvID, alias, failedKey);
+      }
+    }
+    _markMessageRowChanged(
+      storageConvID,
+      failed,
+      extraKey: cid.isNotEmpty ? cid : mid,
+      mutationType: MessageMutationType.statusOrProgress,
+    );
+    if (_isSameConversationID(storageConvID, currentSelectedConv)) {
+      _markNeedsNotify();
+    }
+    return true;
+  }
+
   /// Marks an optimistic outgoing message as SEND_FAIL when the commit guard
   /// rejected the send (e.g. conversation switched during async media prep).
   /// Finds the message by temporary client [id], updates its status, and
@@ -9916,33 +10002,12 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     required String clientId,
     String? localCustomData,
   }) {
-    final storageConvID = _resolveMessageListStorageKey(conversationID);
-    final list = _messageListMap[storageConvID];
-    if (list == null || list.isEmpty) {
-      return;
-    }
-    final changedKeys = <String>{};
-    var changed = false;
-    _messageListMap[storageConvID] = list.map((item) {
-      if (item.id == clientId) {
-        final cloned = _cloneMessage(item);
-        cloned.status = MessageStatus.V2TIM_MSG_STATUS_SEND_FAIL;
-        if (localCustomData != null) {
-          cloned.localCustomData = localCustomData;
-        }
-        changedKeys.add(ChatUiStateStore.messageKeyOf(item));
-        changedKeys.add(ChatUiStateStore.messageKeyOf(cloned));
-        changed = true;
-        return cloned;
-      }
-      return item;
-    }).toList();
-    if (changed) {
-      _chatUiStateStore.markMessagesChanged(storageConvID, changedKeys);
-      if (storageConvID == currentSelectedConv) {
-        _markNeedsNotify();
-      }
-    }
+    markOutgoingSendFailedByIdentity(
+      conversationID: conversationID,
+      clientId: clientId,
+      localCustomData: localCustomData,
+      reason: 'guard_dropped',
+    );
   }
 
   void updateAsyncMessage(
@@ -9954,30 +10019,59 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
           message.msgID ?? DateTime.now().millisecondsSinceEpoch.toString();
     }
 
-    final activeMessageList = _messageListMap[convID];
-    if (activeMessageList == null || activeMessageList.isEmpty) {
+    final storageKey = _resolveMessageListStorageKey(convID);
+    if (storageKey.isEmpty) {
       return;
     }
-    final msgID = message.msgID;
-    final changedKeys = <String>{};
-    var changed = false;
-    _messageListMap[convID] = activeMessageList.map((item) {
-      if (item.msgID == msgID) {
-        changedKeys.add(ChatUiStateStore.messageKeyOf(item));
-        changed = true;
-        return message;
-      }
-      return item;
-    }).toList();
-    if (changed) {
-      changedKeys.add(ChatUiStateStore.messageKeyOf(message));
-      if (msgID != null && msgID.isNotEmpty) {
-        changedKeys.add(msgID);
-      }
-      _chatUiStateStore.markMessagesChanged(convID, changedKeys);
-      if (convID == currentSelectedConv) {
-        _markNeedsNotify();
-      }
+    final msgID = message.msgID?.trim() ?? '';
+    if (msgID.isEmpty) {
+      return;
+    }
+    final current = _mergedAliasMessageList(storageKey);
+    final index = current.indexWhere((item) => item.msgID == msgID);
+    if (index < 0) {
+      return;
+    }
+    final previous = current[index];
+    final resolved = _cloneMessage(message);
+    final stableIdentity = readOutgoingStableId(previous) ??
+        readOutgoingStableId(resolved) ??
+        previous.id ??
+        resolved.id ??
+        msgID;
+    final commit = commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: storageKey,
+        eventID: 'async_message_edit:$storageKey:$msgID',
+        kind: MessageDeltaKind.edit,
+        source: MessageDeltaSource.sdkRealtime,
+        generation: messageDeltaGenerationFor(storageKey),
+        clearEpoch: messageDeltaClearEpochFor(storageKey),
+        upserts: <MessageReconciliationRecord<V2TimMessage>>[
+          MessageReconciliationRecord<V2TimMessage>(
+            value: resolved,
+            msgID: resolved.msgID,
+            localID: resolved.id,
+            outgoingStableID: stableIdentity,
+            seq: resolved.seq,
+          ),
+        ],
+      ),
+    );
+    if (commit == null) {
+      return;
+    }
+    _chatUiStateStore.markMessagesChanged(
+      storageKey,
+      <String>{
+        ChatUiStateStore.messageKeyOf(previous),
+        ChatUiStateStore.messageKeyOf(resolved),
+        msgID,
+      },
+    );
+    _markMessageRowChanged(storageKey, resolved, extraKey: msgID);
+    if (_isSameConversationID(storageKey, currentSelectedConv)) {
+      _markNeedsNotify();
     }
   }
 
@@ -10061,6 +10155,9 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     }
     final msgID = message.msgID?.trim() ?? '';
     if (msgID.isEmpty) {
+      return '';
+    }
+    if (_isLikelyTencentSdkMsgId(msgID)) {
       return '';
     }
     final colon = msgID.lastIndexOf(':');
@@ -11286,6 +11383,15 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
         _groupIdsEquivalentForDedup(groupA, groupB);
   }
 
+  static bool _groupSeqScopesCompatible(V2TimMessage a, V2TimMessage b) {
+    final groupA = _normalizedGroupIdForMessage(a);
+    final groupB = _normalizedGroupIdForMessage(b);
+    if (groupA.isEmpty || groupB.isEmpty) {
+      return true;
+    }
+    return _groupIdsEquivalentForDedup(groupA, groupB);
+  }
+
   /// Same Seq is a protocol conflict when both group rows carry different
   /// server identities. Preserve both so diagnostics and later authority can
   /// resolve it. The one allowed exception is a proven archive↔SDK copy.
@@ -11306,7 +11412,21 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     final bArchive = HistoryPaginationAnchor.isArchiveHistoryMessage(b);
     final aSdk = _isLikelyTencentSdkMsgId(msgIDA);
     final bSdk = _isLikelyTencentSdkMsgId(msgIDB);
-    return !((aArchive && bSdk) || (bArchive && aSdk));
+    if ((aArchive && bSdk) || (bArchive && aSdk)) {
+      return false;
+    }
+    if (!_groupSeqScopesCompatible(a, b)) {
+      return true;
+    }
+    if (a.elemType == b.elemType && aSdk && bSdk) {
+      return false;
+    }
+    final fpA = _messageContentFingerprint(a);
+    final fpB = _messageContentFingerprint(b);
+    if (a.elemType == b.elemType && fpA != null && fpA == fpB) {
+      return false;
+    }
+    return true;
   }
 
   static bool messagesCorrelateForDedup(V2TimMessage a, V2TimMessage b) {
@@ -11320,7 +11440,8 @@ class TUIChatGlobalModel extends ChangeNotifier implements TIMUIKitClass {
     if (seqA > 0 &&
         seqA == seqB &&
         !_isC2cConversationMessage(a) &&
-        !_isC2cConversationMessage(b)) {
+        !_isC2cConversationMessage(b) &&
+        _groupSeqScopesCompatible(a, b)) {
       if (a.elemType == b.elemType &&
           (_isGroupLikeMessage(a) ||
               _isGroupLikeMessage(b) ||

@@ -708,7 +708,6 @@ class ArchiveImLocalPersistService {
   }) {
     final fromId = archiveMessage.msgID?.trim() ?? '';
     final key = archiveMsgKeyOf(archiveMessage) ?? fromId;
-    archiveMessage.msgID = cloudId;
     if (fromId.isNotEmpty && fromId != cloudId) {
       _rewriteMemoryIdentity(
         conversationID: conversationID,
@@ -744,12 +743,15 @@ class ArchiveImLocalPersistService {
           continue;
         }
         var changed = false;
-        for (final m in list) {
+        final next = list.map((message) {
+          final m = V2TimMessage.fromJson(
+            Map<String, dynamic>.from(message.toJson()),
+          );
           final id = m.msgID?.trim() ?? '';
           if (id == fromId) {
             m.msgID = toId;
             changed = true;
-            continue;
+            return m;
           }
           final ak = archiveMsgKeyOf(m);
           if (archiveMsgKey != null &&
@@ -758,11 +760,12 @@ class ArchiveImLocalPersistService {
             m.msgID = toId;
             changed = true;
           }
-        }
+          return m;
+        }).toList(growable: false);
         if (changed) {
           global.setMessageList(
             key,
-            List<V2TimMessage>.from(list),
+            next,
           );
         }
       }

@@ -211,11 +211,19 @@ class MessageReconciliationRequest {
     required this.conversationKey,
     required this.generation,
     required this.requestedSource,
+    this.ownerUserID,
+    this.accountGeneration = 0,
+    this.domainGeneration = 0,
+    this.clearEpoch = 0,
   });
 
   final String conversationKey;
   final int generation;
   final MessageReconciliationSource requestedSource;
+  final String? ownerUserID;
+  final int accountGeneration;
+  final int domainGeneration;
+  final int clearEpoch;
 }
 
 class MessageReconciliationDiagnostic {
@@ -264,24 +272,40 @@ class MessageReconciliationCoordinator {
     required String conversationID,
     required MessageReconciliationSource requestedSource,
     required MessageReconciliationNetworkState networkState,
+    String? ownerUserID,
+    int accountGeneration = 0,
+    int domainGeneration = 0,
+    int clearEpoch = 0,
   }) {
     return _begin(
       conversationID: conversationID,
       phase: MessageReconciliationPhase.initialHistory,
       requestedSource: requestedSource,
       networkState: networkState,
+      ownerUserID: ownerUserID,
+      accountGeneration: accountGeneration,
+      domainGeneration: domainGeneration,
+      clearEpoch: clearEpoch,
     );
   }
 
   MessageReconciliationRequest beginCloudCatchUp({
     required String conversationID,
     required MessageReconciliationNetworkState networkState,
+    String? ownerUserID,
+    int accountGeneration = 0,
+    int domainGeneration = 0,
+    int clearEpoch = 0,
   }) {
     return _begin(
       conversationID: conversationID,
       phase: MessageReconciliationPhase.cloudCatchUp,
       requestedSource: MessageReconciliationSource.cloud,
       networkState: networkState,
+      ownerUserID: ownerUserID,
+      accountGeneration: accountGeneration,
+      domainGeneration: domainGeneration,
+      clearEpoch: clearEpoch,
     );
   }
 
@@ -290,6 +314,10 @@ class MessageReconciliationCoordinator {
     required MessageReconciliationPhase phase,
     required MessageReconciliationSource requestedSource,
     required MessageReconciliationNetworkState networkState,
+    String? ownerUserID,
+    required int accountGeneration,
+    required int domainGeneration,
+    required int clearEpoch,
   }) {
     final key = _canonicalKey(conversationID);
     final previous = stateFor(key);
@@ -310,6 +338,11 @@ class MessageReconciliationCoordinator {
       conversationKey: key,
       generation: generation,
       requestedSource: requestedSource,
+      ownerUserID:
+          ownerUserID?.trim().isEmpty == true ? null : ownerUserID?.trim(),
+      accountGeneration: accountGeneration,
+      domainGeneration: domainGeneration,
+      clearEpoch: clearEpoch,
     );
   }
 

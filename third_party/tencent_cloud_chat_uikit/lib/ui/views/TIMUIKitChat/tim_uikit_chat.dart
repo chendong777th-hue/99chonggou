@@ -198,6 +198,14 @@ class TIMUIKitChat extends StatefulWidget {
   /// 进入会话时从列表捕获的未读数，避免 SDK 提前清未读导致入口提示条失效。
   final int? entryUnreadCount;
 
+  /// Optional UI-only projection for local overlay rows. It never changes the
+  /// formal message list used by history, unread, or reconciliation.
+  final List<V2TimMessage?> Function(
+    String conversationID,
+    List<V2TimMessage?> formalMessages,
+  )? messageListProjectionBuilder;
+  final Listenable? messageListProjectionListenable;
+
   /// Custom emoji panel.
   final CustomStickerPanel? customStickerPanel;
 
@@ -266,6 +274,8 @@ class TIMUIKitChat extends StatefulWidget {
       this.onSecondaryTapAvatar,
       this.onLongPressForOthersHeadPortrait,
       this.customMessageHoverBarOnDesktop,
+      this.messageListProjectionBuilder,
+      this.messageListProjectionListenable,
       this.entryUnreadCount})
       : super(key: key);
 
@@ -1009,6 +1019,10 @@ class _TUIChatState extends TIMUIKitState<TIMUIKitChat>
                                       showNickName: widget.showNickName,
                                       messageItemBuilder:
                                           widget.messageItemBuilder,
+                                      messageListProjectionBuilder:
+                                          widget.messageListProjectionBuilder,
+                                      messageListProjectionListenable: widget
+                                          .messageListProjectionListenable,
                                       conversationID: _getConvID(),
                                     ),
                                   ),

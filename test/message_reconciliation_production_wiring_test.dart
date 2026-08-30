@@ -11,6 +11,9 @@ void main() {
     'third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/'
     'tui_chat_history_pagination_load.dart',
   ).readAsStringSync();
+  final authBootstrap = File(
+    'lib/src/services/auth_bootstrap_service.dart',
+  ).readAsStringSync();
 
   test('production model owns one history and realtime reconciliation writer',
       () {
@@ -23,6 +26,36 @@ void main() {
       contains('_messageReconciliationWriter.hasActiveRequest(convID)'),
     );
     expect(globalModel, contains('enqueueRealtime('));
+  });
+
+  test('auth configures the Writer before the SDK login boundary', () {
+    expect(
+      authBootstrap,
+      contains('configureMessageWriterScopeForSession('),
+    );
+    expect(
+      authBootstrap,
+      contains('configureMessageWriterScope('),
+    );
+    expect(authBootstrap, contains('setMessageDomainGeneration(epoch)'));
+    expect(
+      File('lib/src/services/conversation_local/conversation_sync_service.dart')
+          .readAsStringSync(),
+      contains('domainGeneration: _messageDomainGeneration'),
+    );
+    expect(authBootstrap, contains('domainGeneration: _imListenerEpoch'));
+    final configureCall = authBootstrap.indexOf(
+      'configureMessageWriterScopeForSession(',
+      authBootstrap.indexOf('Future<int> _doLoginImStack('),
+    );
+    expect(configureCall, greaterThanOrEqualTo(0));
+    expect(
+      authBootstrap.indexOf(
+        '_loginImWithKickRetry(',
+        configureCall,
+      ),
+      greaterThan(configureCall),
+    );
   });
 
   test('history loader commits or releases every reconciliation generation',

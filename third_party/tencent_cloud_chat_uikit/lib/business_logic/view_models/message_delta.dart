@@ -12,6 +12,9 @@ enum MessageDeltaKind {
   edit,
   revoke,
   delete,
+  readReceipt,
+  localMetadata,
+  compatibilitySnapshot,
   syntheticProjection,
 }
 
@@ -31,6 +34,10 @@ class MessageDelta<T> {
     required this.source,
     required this.generation,
     required this.clearEpoch,
+    this.ownerUserID,
+    this.accountGeneration,
+    this.domainGeneration,
+    this.replace = false,
     Iterable<MessageReconciliationRecord<T>> upserts = const [],
     Iterable<String> explicitDeletes = const <String>[],
     Iterable<String> tombstones = const <String>[],
@@ -55,6 +62,17 @@ class MessageDelta<T> {
   final MessageDeltaSource source;
   final int generation;
   final int clearEpoch;
+
+  /// Account/domain scope captured by the ingress event when available.
+  ///
+  /// These remain optional for the compatibility bridge. A configured Writer
+  /// still rejects an explicitly mismatched value, while omitted values use
+  /// the Writer's current scope so existing UIKit callers remain source
+  /// compatible during the migration.
+  final String? ownerUserID;
+  final int? accountGeneration;
+  final int? domainGeneration;
+  final bool replace;
   final List<MessageReconciliationRecord<T>> upserts;
   final Set<String> explicitDeletes;
   final Set<String> tombstones;
@@ -62,7 +80,10 @@ class MessageDelta<T> {
   bool get isSynthetic => kind == MessageDeltaKind.syntheticProjection;
 
   bool get hasMutation =>
-      upserts.isNotEmpty || explicitDeletes.isNotEmpty || tombstones.isNotEmpty;
+      replace ||
+      upserts.isNotEmpty ||
+      explicitDeletes.isNotEmpty ||
+      tombstones.isNotEmpty;
 
   Map<String, Object?> toMetadataJson() => <String, Object?>{
         'conversationKey': conversationKey,
@@ -71,6 +92,10 @@ class MessageDelta<T> {
         'source': source.name,
         'generation': generation,
         'clearEpoch': clearEpoch,
+        'ownerUserID': ownerUserID,
+        'accountGeneration': accountGeneration,
+        'domainGeneration': domainGeneration,
+        'replace': replace,
         'upsertCount': upserts.length,
         'explicitDeleteCount': explicitDeletes.length,
         'tombstoneCount': tombstones.length,

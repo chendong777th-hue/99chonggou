@@ -294,7 +294,19 @@ class MessageHistoryCoverageStore implements MessageHistoryCoverageRepository {
 
   @override
   Future<MessageHistoryCoverage?> load(String conversationID) async {
-    final owner = _resolveOwner();
+    return loadForOwner(_resolveOwner(), conversationID);
+  }
+
+  /// Explicit account-scoped read for Coordinator/adapter callers.
+  ///
+  /// The legacy [load] API remains current-session based for compatibility;
+  /// production coordination must use this method so a late response cannot
+  /// read another account's coverage.
+  Future<MessageHistoryCoverage?> loadForOwner(
+    String ownerUserId,
+    String conversationID,
+  ) async {
+    final owner = _resolveOwner(ownerUserId);
     final key = _canonicalConversationID(conversationID);
     if (owner.isEmpty || key.isEmpty) return null;
     final memory = _memoryForOwner(owner);
@@ -340,7 +352,19 @@ class MessageHistoryCoverageStore implements MessageHistoryCoverageRepository {
 
   @override
   Future<void> save(MessageHistoryCoverage coverage) async {
-    final owner = _resolveOwner();
+    await saveForOwner(_resolveOwner(), coverage);
+  }
+
+  /// Explicit account-scoped write for Coordinator/adapter callers.
+  ///
+  /// This preserves the existing monotonic clear-epoch and revision checks;
+  /// it only makes the account key an explicit input instead of an ambient
+  /// current-session lookup.
+  Future<void> saveForOwner(
+    String ownerUserId,
+    MessageHistoryCoverage coverage,
+  ) async {
+    final owner = _resolveOwner(ownerUserId);
     final key = _canonicalConversationID(coverage.conversationKey);
     if (owner.isEmpty || key.isEmpty) return;
     final normalized = coverage.copyWith(conversationKey: key);

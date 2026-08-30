@@ -15,6 +15,8 @@ import 'package:tencent_cloud_chat_demo/src/utils/web_chat_open_policy.dart';
 import 'package:tencent_cloud_chat_demo/src/services/chat_open_perf_log.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/mobile_async_commit_guard.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/contracts/contracts.dart';
+import 'package:tencent_cloud_chat_demo/src/services/im/outgoing_send_coordinator.dart';
 import 'package:tencent_cloud_chat_sdk/enum/get_group_message_read_member_list_filter.dart';
 import 'package:tencent_cloud_chat_sdk/enum/group_member_filter_enum.dart';
 import 'package:tencent_cloud_chat_sdk/enum/group_member_role.dart';
@@ -5812,18 +5814,24 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     if (messageInfo != null) {
       setLoadingMessageMap(convID, messageInfo);
     }
-    final sendMsgRes = await _messageService.sendMessage(
+    final coordinatedSend = await ImOutgoingSendCoordinator.instance.send(
+      messageService: _messageService,
+      sdkLocalId: id,
+      conversationId: convType == ConvType.group ? groupID : receiver,
+      conversationType: convType == ConvType.group
+          ? ImConversationType.group
+          : ImConversationType.c2c,
+      receiver: receiver,
+      groupID: groupID,
+      fallbackMessage: messageInfo,
+      needReadReceipt: useReadReceipt,
       priority: priority,
       localCustomData: localCustomData,
       isExcludedFromUnreadCount: isExcludedFromUnreadCount ?? false,
-      id: id,
-      receiver: receiver,
-      needReadReceipt: useReadReceipt,
-      groupID: groupID,
       offlinePushInfo: offlinePushInfo,
       onlineUserOnly: onlineUserOnly ?? false,
       isExcludedFromContentModeration: isExcludedFromContentModeration ?? false,
-      cloudCustomData: cloudCustomData ??
+      businessCloudCustomData: cloudCustomData ??
           (showC2cMessageEditStatus == true
               ? json.encode({
                   "messageFeature": {
@@ -5832,19 +5840,41 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
                   }
                 })
               : ""),
+      persistOutbox: isEditStatusMessage != true,
+      onSyncMsgID: (syncMsgID) {
+        globalModel.bindOutgoingSyncMsgId(convID, id, syncMsgID);
+      },
     );
+    final sendMsgRes = coordinatedSend.sdkResult;
     if (_isOutgoingMediaCancelled(id) ||
-        _isOutgoingMediaCancelled(messageInfo?.msgID)) {
+        _isOutgoingMediaCancelled(messageInfo?.msgID) ||
+        _isOutgoingMediaCancelled(sendMsgRes.data?.msgID)) {
       removeSendingMessageID(id);
-      _markOutgoingMediaSendFailed(
-        convID: convID,
+      final sdkMsgID = TencentUtils.checkString(sendMsgRes.data?.msgID);
+      if (sendMsgRes.code == 0 && sdkMsgID != null) {
+        try {
+          await _messageService.revokeMessage(
+            msgID: sdkMsgID,
+            webMessageInstance: sendMsgRes.data?.messageFromWeb,
+          );
+        } catch (_) {}
+        await _messageService.deleteMessageFromLocalStorage(
+          msgID: sdkMsgID,
+          webMessageInstance: sendMsgRes.data?.messageFromWeb,
+        );
+      }
+      globalModel.markOutgoingSendFailedByIdentity(
+        conversationID: convID,
         clientId: id,
-        msgID: messageInfo?.msgID,
+        msgID: sdkMsgID ?? messageInfo?.msgID,
+        reason: 'cancelled',
       );
       globalModel.clearMessageProgress(id);
       globalModel.clearMessageProgress(messageInfo?.msgID);
+      globalModel.clearMessageProgress(sendMsgRes.data?.msgID);
       _clearOutgoingMediaCancelled(id);
       _clearOutgoingMediaCancelled(messageInfo?.msgID);
+      _clearOutgoingMediaCancelled(sendMsgRes.data?.msgID);
       return V2TimValueCallback<V2TimMessage>(
         code: -1,
         desc: 'cancelled',
@@ -5873,14 +5903,20 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
         message: sendMsgRes.data!,
       );
     }
+    var projectionCommitted = true;
     if (isEditStatusMessage == false) {
-      globalModel.applyOutgoingSendResult(
+      projectionCommitted = globalModel.applyOutgoingSendResult(
         sendMsgRes,
         convID,
         id,
         convType,
         groupType,
         setInputField,
+      );
+    }
+    if (projectionCommitted && coordinatedSend.canCompleteProjection) {
+      await ImOutgoingSendCoordinator.instance.completeSuccessfulProjection(
+        coordinatedSend,
       );
     }
     if (lifeCycle?.messageDidSend != null) {
@@ -7997,25 +8033,12 @@ class TUIChatSeparateViewModel extends ChangeNotifier {
     String? clientId,
     String? msgID,
   }) {
-    final list = List<V2TimMessage>.from(
-      globalModel.rawMessageList(convID) ?? const <V2TimMessage>[],
+    globalModel.markOutgoingSendFailedByIdentity(
+      conversationID: convID,
+      clientId: clientId,
+      msgID: msgID,
+      reason: 'media_failed',
     );
-    var changed = false;
-    for (var index = 0; index < list.length; index++) {
-      final item = list[index];
-      final matchesClient =
-          clientId != null && clientId.isNotEmpty && item.id == clientId;
-      final matchesMsgID =
-          msgID != null && msgID.isNotEmpty && item.msgID == msgID;
-      if (!matchesClient && !matchesMsgID) {
-        continue;
-      }
-      item.status = MessageStatus.V2TIM_MSG_STATUS_SEND_FAIL;
-      changed = true;
-    }
-    if (changed) {
-      globalModel.setMessageList(convID, list);
-    }
   }
 
   String _nextOptimisticClientId() {

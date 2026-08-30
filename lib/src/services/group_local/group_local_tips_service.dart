@@ -8,10 +8,10 @@ import 'package:tencent_cloud_chat_demo/src/utils/group_local_tips_dedupe.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/group_profile_local_tip_preview.dart';
 import 'package:tencent_cloud_chat_demo/src/services/contact_social_cache_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_local_store.dart';
-import 'package:tencent_cloud_chat_demo/src/services/conversation_local/conversation_sync_service.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_member_local_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_member_role_pending.dart';
 import 'package:tencent_cloud_chat_demo/src/services/group_local/group_sync_service.dart';
+import 'package:tencent_cloud_chat_demo/src/services/local_message_overlay_store.dart';
 import 'package:tencent_cloud_chat_demo/src/services/user_profile_local/user_profile_local_service.dart';
 import 'package:tencent_cloud_chat_demo/utils/chat_id_format.dart';
 import 'package:tencent_cloud_chat_demo/utils/group_tips_message_helper.dart';
@@ -188,6 +188,7 @@ class GroupLocalTipsService {
       await prefs.remove('$_prefsPrefix${scope}_$storageId');
     }
     _removeTipsFromActiveChat(id, _isLocalGroupTipsMessage);
+    LocalMessageOverlayStore.instance.clearConversation('group_$id');
   }
 
   Future<void> _publish({
@@ -403,14 +404,6 @@ class GroupLocalTipsService {
       }
       final message = await _recordToMessage(record);
       _insertIntoActiveChat(id, message);
-
-      final conversationId = 'group_$id';
-      unawaited(
-        ConversationSyncService.instance.patchConversationLastMessage(
-          conversationID: conversationId,
-          message: message,
-        ),
-      );
       unawaited(syncVisibleTipsForGroup(id));
       return;
     }
@@ -457,14 +450,6 @@ class GroupLocalTipsService {
     }
     final message = await _recordToMessage(record);
     _insertIntoActiveChat(id, message);
-
-    final conversationId = 'group_$id';
-    unawaited(
-      ConversationSyncService.instance.patchConversationLastMessage(
-        conversationID: conversationId,
-        message: message,
-      ),
-    );
     unawaited(syncVisibleTipsForGroup(id));
   }
 
@@ -844,8 +829,14 @@ class GroupLocalTipsService {
 
   /// 将已持久化的本地群灰字合并进当前打开中的聊天列表（旁观者补全历史）。
   Future<void> syncVisibleTipsForGroup(String groupId) async {
-    // 聊天灰字改由 App Custom；不再把本地 tip merge/setMessageList。
-    return;
+    final id = _normalizeGroupId(groupId);
+    if (id.isEmpty) {
+      return;
+    }
+    final records = await _readDedupedRecords(id);
+    for (final record in records) {
+      _insertIntoActiveChat(id, await _recordToMessage(record));
+    }
   }
 
   List<String> _storageLookupIds(String groupId) {
@@ -1068,14 +1059,7 @@ class GroupLocalTipsService {
       if (tipId != null && existing.any((item) => _tipId(item) == tipId)) {
         continue;
       }
-      existing.insert(0, message);
-      final sorted = TUIChatGlobalModel.sortMessagesNewestFirst(existing);
-      globalModel.setMessageList(
-        key,
-        sorted,
-        needResetNewMessageCount: false,
-        replace: true,
-      );
+      LocalMessageOverlayStore.instance.upsert('group_$groupId', message);
     }
   }
 
@@ -1083,21 +1067,10 @@ class GroupLocalTipsService {
     String groupId,
     bool Function(V2TimMessage message) shouldRemove,
   ) {
-    final globalModel = serviceLocator<TUIChatGlobalModel>();
-    for (final key in _messageListKeys(groupId)) {
-      final existing = List<V2TimMessage>.from(
-        globalModel.messageListMap[key] ?? const <V2TimMessage>[],
-      );
-      final next = existing.where((item) => !shouldRemove(item)).toList();
-      if (next.length == existing.length) {
-        continue;
-      }
-      globalModel.setMessageList(
-        key,
-        next,
-        needResetNewMessageCount: false,
-      );
-    }
+    LocalMessageOverlayStore.instance.removeWhere(
+      'group_${_normalizeGroupId(groupId)}',
+      shouldRemove,
+    );
   }
 
   List<V2TimMessage> _mergeMessageLists(

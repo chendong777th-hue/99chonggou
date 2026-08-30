@@ -1,0 +1,1862 @@
+{
+  "generatedAt": "2026-08-29T09:18:19.1285500Z",
+  "repoRoot": "D:\\99chat\\zuixin\\9925banben\\9925banben",
+  "summary": [
+    {
+      "category": "advancedListener",
+      "count": 23
+    },
+    {
+      "category": "history",
+      "count": 36
+    },
+    {
+      "category": "messageListMap",
+      "count": 158
+    },
+    {
+      "category": "sendMessage",
+      "count": 11
+    },
+    {
+      "category": "setMessageList",
+      "count": 34
+    }
+  ],
+  "entries": [
+    {
+      "category": "advancedListener",
+      "file": "lib/src/services/im/tencent_advanced_message_adapter.dart",
+      "line": 75,
+      "text": "await messageService.addAdvancedMsgListener(listener: listener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "lib/src/services/im/tencent_advanced_message_adapter.dart",
+      "line": 79,
+      "text": "await messageService.removeAdvancedMsgListener(listener: listener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "lib/src/services/im/tencent_advanced_message_adapter.dart",
+      "line": 103,
+      "text": "await messageService.removeAdvancedMsgListener(listener: listener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "lib/src/services/livekit_call_signaling.dart",
+      "line": 57,
+      "text": ".addAdvancedMsgListener(listener: _listener!);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "lib/src/services/livekit_call_signaling.dart",
+      "line": 72,
+      "text": ".removeAdvancedMsgListener(listener: listener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "lib/src/services/notification_settings_service.dart",
+      "line": 252,
+      "text": ".removeAdvancedMsgListener(listener: _msgListener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "lib/src/services/notification_settings_service.dart",
+      "line": 272,
+      "text": ".addAdvancedMsgListener(listener: _msgListener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "lib/src/services/notification_settings_service.dart",
+      "line": 1280,
+      "text": ".removeAdvancedMsgListener(listener: _msgListener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 8182,
+      "text": "void addAdvancedMsgListener() {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 8183,
+      "text": "_messageService.addAdvancedMsgListener(listener: advancedMsgListener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 8187,
+      "text": "_messageService.removeAdvancedMsgListener(listener: advancedMsgListener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/core/core_services_implements.dart",
+      "line": 195,
+      "text": "tuiChatViewModel.addAdvancedMsgListener();",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 458,
+      "text": "Future<void> addAdvancedMsgListener({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 1117,
+      "text": "Future<void> removeAdvancedMsgListener(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 1143,
+      "text": ".addAdvancedMsgListener(listener: listener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 1149,
+      "text": ".removeAdvancedMsgListener(listener: listener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 1182,
+      "text": ".removeAdvancedMsgListener(listener: listener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_services.dart",
+      "line": 81,
+      "text": "Future addAdvancedMsgListener({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_services.dart",
+      "line": 186,
+      "text": "Future<void> removeAdvancedMsgListener({V2TimAdvancedMsgListener? listener});",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/ui/views/TIMUIKitChat/TIMUIKitMessageItem/tim_uikit_chat_file_elem.dart",
+      "line": 77,
+      "text": "TencentImSDKPlugin.v2TIMManager.getMessageManager().removeAdvancedMsgListener(listener: advancedMsgListener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/ui/views/TIMUIKitChat/TIMUIKitMessageItem/tim_uikit_chat_file_elem.dart",
+      "line": 116,
+      "text": ".removeAdvancedMsgListener(listener: advancedMsgListener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/ui/views/TIMUIKitChat/TIMUIKitMessageItem/tim_uikit_chat_file_elem.dart",
+      "line": 131,
+      "text": "await TencentImSDKPlugin.v2TIMManager.getMessageManager().addAdvancedMsgListener(listener: advancedMsgListener!);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "advancedListener",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/ui/views/TIMUIKitChat/TIMUIKitMessageItem/tim_uikit_chat_file_elem.dart",
+      "line": 164,
+      "text": "TencentImSDKPlugin.v2TIMManager.getMessageManager().removeAdvancedMsgListener(listener: advancedMsgListener);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "lib/src/services/archive_im_local_persist_service.dart",
+      "line": 363,
+      "text": "? await mgr.getHistoryMessageListV2(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "lib/src/services/archive_im_local_persist_service.dart",
+      "line": 369,
+      "text": ": await mgr.getHistoryMessageListV2(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "lib/src/services/archive_im_local_persist_service.dart",
+      "line": 632,
+      "text": "final res = await mgr.getHistoryMessageListV2(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "lib/src/services/archive_im_local_persist_service.dart",
+      "line": 661,
+      "text": "final res = await mgr.getHistoryMessageListV2(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "lib/src/services/conversation_local/conversation_sync_service.dart",
+      "line": 3756,
+      "text": "var history = await messageService.getHistoryMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "lib/src/services/conversation_local/conversation_sync_service.dart",
+      "line": 3762,
+      "text": "history = await messageService.getHistoryMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "lib/src/services/im/tencent_message_adapter.dart",
+      "line": 40,
+      "text": "Future<ImSdkHistoryResponse?> getHistoryMessageListWithComplete({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "lib/src/services/im/tencent_message_adapter.dart",
+      "line": 96,
+      "text": "Future<ImSdkHistoryResponse?> getHistoryMessageListWithComplete({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "lib/src/services/im/tencent_message_adapter.dart",
+      "line": 108,
+      "text": "final result = await service.getHistoryMessageListWithComplete(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "lib/src/services/im/tencent_message_adapter.dart",
+      "line": 309,
+      "text": "final sdkResponse = await port.getHistoryMessageListWithComplete(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "lib/src/services/platform_official_account_service.dart",
+      "line": 464,
+      "text": ".getHistoryMessageListV2(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "lib/src/services/web_message_loader.dart",
+      "line": 275,
+      "text": "final res = await manager.getHistoryMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_history_pagination_load.dart",
+      "line": 385,
+      "text": "await model._messageService.getHistoryMessageListWithComplete(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_history_pagination_load.dart",
+      "line": 398,
+      "text": "await model._messageService.getHistoryMessageListWithComplete(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_history_pagination_load.dart",
+      "line": 500,
+      "text": "await model._messageService.getHistoryMessageListWithComplete(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 1098,
+      "text": "return _messageService.getHistoryMessageListWithComplete(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 2743,
+      "text": "final response = await _messageService.getHistoryMessageListWithComplete(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 2790,
+      "text": "await _messageService.getHistoryMessageListWithComplete(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 5914,
+      "text": "return _messageService.getHistoryMessageListWithComplete(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 4306,
+      "text": "final response = await _messageService.getHistoryMessageListWithComplete(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 5260,
+      "text": "final response = await _messageService.getHistoryMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_search_view_model.dart",
+      "line": 621,
+      "text": "final localBatch = await _messageService.getHistoryMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_search_view_model.dart",
+      "line": 631,
+      "text": "return _messageService.getHistoryMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_search_view_model.dart",
+      "line": 1614,
+      "text": "final batch = await _messageService.getHistoryMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_history_peek_loader.dart",
+      "line": 104,
+      "text": "final response = await messageService.getHistoryMessageListWithComplete(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_history_peek_loader.dart",
+      "line": 407,
+      "text": "final localResponse = await messageService.getHistoryMessageListWithComplete(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_history_peek_loader.dart",
+      "line": 423,
+      "text": "await messageService.getHistoryMessageListWithComplete(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 184,
+      "text": "Future<MessageListResponse> getHistoryMessageListV2({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 238,
+      "text": ".getHistoryMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 296,
+      "text": "Future<List<V2TimMessage>> getHistoryMessageList({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 324,
+      "text": ".getHistoryMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 366,
+      "text": "Future<V2TimMessageListResult?> getHistoryMessageListWithComplete({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 398,
+      "text": ".getHistoryMessageListV2(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_services.dart",
+      "line": 39,
+      "text": "Future<List<V2TimMessage>> getHistoryMessageList({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_services.dart",
+      "line": 51,
+      "text": "Future<V2TimMessageListResult?> getHistoryMessageListWithComplete({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "history",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_services.dart",
+      "line": 66,
+      "text": "Future<MessageListResponse> getHistoryMessageListV2({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 1498,
+      "text": "serviceLocator<TUIChatGlobalModel>().messageListMap[convKey];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 1523,
+      "text": ": (serviceLocator<TUIChatGlobalModel>().messageListMap[convKey] ??",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 3120,
+      "text": "final messages = globalModel.messageListMap[convKey];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 3216,
+      "text": "serviceLocator<TUIChatGlobalModel>().messageListMap[convKey];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 3848,
+      "text": "final existing = globalModel.messageListMap[userId];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 4467,
+      "text": "final messages = globalModel.messageListMap[convKey];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 4688,
+      "text": "final messages = globalModel.messageListMap[convKey];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 7664,
+      "text": "if (globalModel.messageListMap[key]?.isNotEmpty == true) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 7674,
+      "text": "final list = globalModel.messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 8003,
+      "text": "globalModel.messageListMap[convKey] ?? const <V2TimMessage>[];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 8412,
+      "text": "final messages = globalModel.messageListMap[convKey] ??",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 8413,
+      "text": "globalModel.messageListMap[_resolvedConversationID()] ??",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 8490,
+      "text": ": (openGlobal.messageListMap[openConvKey] ?? const <V2TimMessage>[]);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 8839,
+      "text": "convKey.isNotEmpty ? globalModel.messageListMap[convKey] : null;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 8841,
+      "text": "globalModel.messageListMap[_resolvedConversationID()] ??",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/chat.dart",
+      "line": 9834,
+      "text": "globalModel.messageListMap[convKey] ?? const [],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/archive_im_local_persist_service.dart",
+      "line": 305,
+      "text": "final list = global.messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/archive_im_local_persist_service.dart",
+      "line": 334,
+      "text": "final list = global.messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/archive_im_local_persist_service.dart",
+      "line": 742,
+      "text": "final list = global.messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/call_bubble_insert_service.dart",
+      "line": 44,
+      "text": "final existing = globalModel.messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/call_bubble_insert_service.dart",
+      "line": 105,
+      "text": "final existing = globalModel.messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/chat_failed_message_retry_service.dart",
+      "line": 28,
+      "text": "for (final entry in globalModel.messageListMap.entries) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/chat_history_peek_bootstrap.dart",
+      "line": 203,
+      "text": "final beforeWarm = globalModel.messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/chat_history_peek_bootstrap.dart",
+      "line": 290,
+      "text": "globalModel.messageListMap[key] ?? const <V2TimMessage>[];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/chat_history_peek_bootstrap.dart",
+      "line": 632,
+      "text": "globalModel.messageListMap[key],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/chat_history_peek_bootstrap.dart",
+      "line": 878,
+      "text": "globalModel.messageListMap[key],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/chat_history_peek_bootstrap.dart",
+      "line": 885,
+      "text": "globalModel.messageListMap[key],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/conversation_history_warm_scheduler.dart",
+      "line": 99,
+      "text": "/// 孤儿 / 超容 messageListMap 对账淘汰总开关。",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/conversation_history_warm_scheduler.dart",
+      "line": 1382,
+      "text": "final mapKeys = globalModel.messageListMap.keys.toList(growable: false);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/conversation_history_warm_scheduler.dart",
+      "line": 1394,
+      "text": "if (!globalModel.messageListMap.containsKey(key)) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/conversation_history_warm_scheduler.dart",
+      "line": 1406,
+      "text": "'mapSizeAfter': globalModel.messageListMap.length,",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/group_local/group_change_event_sync_service.dart",
+      "line": 274,
+      "text": "final list = globalModel.messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/group_local/group_local_tips_service.dart",
+      "line": 1004,
+      "text": "final list = globalModel.messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/group_local/group_local_tips_service.dart",
+      "line": 1043,
+      "text": "globalModel.messageListMap[key] ?? const <V2TimMessage>[],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/group_local/group_local_tips_service.dart",
+      "line": 1089,
+      "text": "globalModel.messageListMap[key] ?? const <V2TimMessage>[],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/group_local/group_tips_operator_patch_service.dart",
+      "line": 193,
+      "text": "final current = globalModel.messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/group_local/group_tips_operator_patch_service.dart",
+      "line": 222,
+      "text": "final current = globalModel.messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/im_recovery_service.dart",
+      "line": 196,
+      "text": "final cached = globalModel.messageListMap[conversationKey] ??",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/im_recovery_service.dart",
+      "line": 197,
+      "text": "globalModel.messageListMap[conversationId] ??",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/silent_archive_service.dart",
+      "line": 96,
+      "text": "var existing = globalModel.messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/silent_archive_service.dart",
+      "line": 208,
+      "text": "existing = globalModel.messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/web_message_loader.dart",
+      "line": 83,
+      "text": "final existing = globalModel.messageListMap[convKey];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/services/web_message_loader.dart",
+      "line": 178,
+      "text": "globalModel.messageListMap[convKey] ?? const <V2TimMessage>[];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/utils/c2c_blocked_outgoing_message_sync.dart",
+      "line": 54,
+      "text": "final list = globalModel.messageListMap[convID];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/src/utils/call_bubble_dedupe.dart",
+      "line": 244,
+      "text": "final existing = globalModel.messageListMap[convKey];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "lib/utils/chat_image_message_prefetch.dart",
+      "line": 381,
+      "text": "final cached = globalModel.messageListMap[key] ?? const <V2TimMessage>[];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_model_tools.dart",
+      "line": 153,
+      "text": "final currentHistoryMsgList = globalModel.messageListMap[conversationID] ?? [];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 1374,
+      "text": "/// 去掉 `group_` / `c2c_` 前缀，供 SDK / 归档 API / messageListMap 共用。",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 1472,
+      "text": "final list = globalModel.messageListMap[conversationID];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 1933,
+      "text": "final warm = globalModel.messageListMap[conversationID] ??",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 1934,
+      "text": "globalModel.messageListMap[storageId];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 2050,
+      "text": "final existing = globalModel.messageListMap[convId] ??",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 2610,
+      "text": "globalModel.messageListMap[convId] ?? ascending,",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 2654,
+      "text": "globalModel.messageListMap[convId] ?? const <V2TimMessage>[],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 2674,
+      "text": "globalModel.messageListMap[convId] ??",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 2951,
+      "text": "globalModel.messageListMap[convId] ?? const <V2TimMessage>[],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 3066,
+      "text": "globalModel.messageListMap[convId] ?? current,",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 3169,
+      "text": "globalModel.messageListMap[convId] ?? current,",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 3208,
+      "text": "globalModel.messageListMap[convId] ?? current,",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 3330,
+      "text": "globalModel.messageListMap[conversationID] ??",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 3331,
+      "text": "globalModel.messageListMap[storageId],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 3384,
+      "text": "// 必须用 alias-aware rawMessageList：messageListMap[字面 key] 为空时",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 3489,
+      "text": "globalModel.messageListMap[conversationID] ?? const <V2TimMessage>[];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 3575,
+      "text": "final existingWarm = globalModel.messageListMap[conversationID];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 3666,
+      "text": "final remainingWarm = globalModel.messageListMap[conversationID];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 3709,
+      "text": "final remaining = globalModel.messageListMap[conversationID];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 7517,
+      "text": "globalModel.messageListMap[conversationID] ?? const <V2TimMessage>[];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 7652,
+      "text": "globalModel.messageListMap[conversationID] ?? const <V2TimMessage>[];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 306,
+      "text": "final Map<String, List<V2TimMessage>?> _messageListMap = {};",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 1650,
+      "text": "_messageListMap[_resolveMessageListStorageKey(convId)]?.length,",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 2250,
+      "text": "final list = _messageListMap[storageKey];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 2336,
+      "text": "final current = _messageListMap[storageKey];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 2369,
+      "text": "_messageListMap[storageKey] = next;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 2403,
+      "text": "final current = _messageListMap[storageKey];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 2415,
+      "text": "_messageListMap[storageKey] = next;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 2524,
+      "text": "for (final entry in _messageListMap.entries.toList()) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 2804,
+      "text": "Map<String, List<V2TimMessage>?> get messageListMap {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 2805,
+      "text": "return _messageListMap;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 3277,
+      "text": "'listLen': _messageListMap[storageKey]?.length,",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 3287,
+      "text": "'listLen': _messageListMap[storageKey]?.length,",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 3392,
+      "text": "_messageListMap.keys.where(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 3402,
+      "text": "final list = _messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 3437,
+      "text": "_messageListMap.remove(key);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 3680,
+      "text": "for (final mapKey in _messageListMap.keys) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 3906,
+      "text": "final list = _messageListMap[storageKey] ?? _messageListMap[trimmed];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 4591,
+      "text": "final direct = _messageListMap[trimmed];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 4600,
+      "text": "final byNorm = _messageListMap[normalized];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 4606,
+      "text": "for (final entry in _messageListMap.entries) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 4984,
+      "text": "_messageListMap.keys",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 4997,
+      "text": "_messageListMap.remove(key);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 5022,
+      "text": "_messageListMap.keys",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 5029,
+      "text": "_messageListMap[key] = <V2TimMessage>[];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 5244,
+      "text": "if (messageListMap[conversationID] == null ||",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 5245,
+      "text": "messageListMap[conversationID]!.isEmpty) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 5265,
+      "text": "if (_messageListMap[conversationID] == null ||",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 5266,
+      "text": "_messageListMap[conversationID]!.isEmpty) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 5267,
+      "text": "_messageListMap[conversationID] = response;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 5305,
+      "text": "// push messages that haven't been committed to messageListMap are",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 5337,
+      "text": "_messageListMap.clear();",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 5819,
+      "text": "final list = _messageListMap[convID] ?? const <V2TimMessage>[];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 5984,
+      "text": "_messageListMap[convID] = sortMessagesNewestFirst(list);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 5991,
+      "text": "_messageListMap[convID] = ordered;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 6138,
+      "text": "final list = _messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 6166,
+      "text": "_messageListMap[writeKey] = next;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 6185,
+      "text": "_messageListMap[writeKey] = consolidated;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 6227,
+      "text": "final list = listOverride ?? _messageListMap[convID] ?? [];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 6463,
+      "text": "final current = _messageListMap[storageKey] ?? const <V2TimMessage>[];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 6490,
+      "text": "_messageListMap[storageKey] ?? const <V2TimMessage>[],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 6582,
+      "text": "_messageListMap[storageKey] = sortMessagesNewestFirst(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 6607,
+      "text": "_messageListMap[storageKey] = sortMessagesNewestFirst(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 6722,
+      "text": "_messageListMap[convID] = _mergePendingIncomingForDedup(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 6724,
+      "text": "existing: _messageListMap[convID] ?? const <V2TimMessage>[],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 6730,
+      "text": "return (_messageListMap[convID] ?? const <V2TimMessage>[]).any(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 6789,
+      "text": "final current = _messageListMap[convID] ?? const <V2TimMessage>[];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 7199,
+      "text": "for (final item in _messageListMap[storageKey] ?? const <V2TimMessage>[]) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 7459,
+      "text": "for (final key in _messageListMap.keys) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 7465,
+      "text": "final activeMessageList = _messageListMap[key];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 7555,
+      "text": "_messageListMap[key] = updated;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 7637,
+      "text": "final allEntries = _messageListMap.entries.toList(growable: true);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 7664,
+      "text": "final current = _messageListMap[storageKey];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 7794,
+      "text": "final activeMessageList = _messageListMap[resolvedConvID];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 7802,
+      "text": "_messageListMap[resolvedConvID] = activeMessageList.map((item) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 7854,
+      "text": "for (final entry in _messageListMap.entries.toList()) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 7891,
+      "text": "_messageListMap[entry.key] = updated;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 7979,
+      "text": "for (final entry in _messageListMap.entries) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 8043,
+      "text": "final list = _messageListMap[convID];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 8076,
+      "text": "_messageListMap[convID] = updated;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 8521,
+      "text": "List<V2TimMessage> messageList = _messageListMap[conversationID] ?? [];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 8545,
+      "text": "// 1) `_messageListMap[conversationID]` 会漏掉 `c2c_` / 裸 id 别名；",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 8550,
+      "text": "rawMessageList(conversationID) ?? _messageListMap[storageKey];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 8570,
+      "text": "_messageListMap[key] = List<V2TimMessage>.of(sourceList);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 8598,
+      "text": "_messageListMap[key] = List<V2TimMessage>.of(fallbackList);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 8929,
+      "text": "/// 内存窗口闸门：只裁 `_messageListMap`，绝不删 DB/SDK 存储。",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 9108,
+      "text": "final list = _messageListMap[convID] ??",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 9109,
+      "text": "_messageListMap[_resolveMessageListStorageKey(convID)];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 9497,
+      "text": "_messageListMap[storageKey] = sorted;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 9519,
+      "text": "_messageListMap[storageKey] = sorted;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 9654,
+      "text": "_messageListMap[storageConvID] ?? _collectAuthoritativeMessages(convID);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 9858,
+      "text": "_messageListMap[storageConvID] = currentHistoryMsgList;",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 9920,
+      "text": "final list = _messageListMap[storageConvID];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 9926,
+      "text": "_messageListMap[storageConvID] = list.map((item) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 9957,
+      "text": "final activeMessageList = _messageListMap[convID];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 9964,
+      "text": "_messageListMap[convID] = activeMessageList.map((item) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 12660,
+      "text": "/// 入站/展示共用的 messageListMap 存储键。",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 12674,
+      "text": "_messageListMap.containsKey(selected)) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 12679,
+      "text": "for (final entry in _messageListMap.entries) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 12706,
+      "text": "for (final entry in _messageListMap.entries) {",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 80,
+      "text": "final Map<String, List<V2TimMessage>> messageListMap = {};",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 209,
+      "text": "final cachedMessageList = messageListMap[conversationID];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 248,
+      "text": "final cachedMessageList = messageListMap[conversationID];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 288,
+      "text": "data: messageListMap[conversationID] ?? const [],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/ui/utils/history_pagination_anchor.dart",
+      "line": 177,
+      "text": "/// messageListMap 最新在前：找时间最老且可用于 SDK 翻页的一条。",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/ui/views/TIMUIKitChat/tim_uikit_chat.dart",
+      "line": 1840,
+      "text": "globalModel.messageListMap[conversationID] ??",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/ui/views/TIMUIKitChat/tim_uikit_chat.dart",
+      "line": 1841,
+      "text": "globalModel.messageListMap[model!.conversationID],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/ui/views/TIMUIKitChat/tim_uikit_chat.dart",
+      "line": 1863,
+      "text": "globalModel.messageListMap[conversationID] ??",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/ui/views/TIMUIKitChat/tim_uikit_chat.dart",
+      "line": 1864,
+      "text": "globalModel.messageListMap[model!.conversationID],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/ui/views/TIMUIKitChat/tim_uikit_chat.dart",
+      "line": 2054,
+      "text": "existing: globalModel.messageListMap[conversationID],",
+      "classification": "app-entry"
+    },
+    {
+      "category": "messageListMap",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/ui/views/TIMUIKitChat/TIMUIKItMessageList/tim_uikit_chat_message_tooltip.dart",
+      "line": 890,
+      "text": "final list = globalModal.messageListMap[model.conversationID];",
+      "classification": "app-entry"
+    },
+    {
+      "category": "sendMessage",
+      "file": "lib/src/services/im/tencent_message_adapter.dart",
+      "line": 25,
+      "text": "Future<V2TimValueCallback<V2TimMessage>> sendMessage({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "sendMessage",
+      "file": "lib/src/services/im/tencent_message_adapter.dart",
+      "line": 65,
+      "text": "Future<V2TimValueCallback<V2TimMessage>> sendMessage({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "sendMessage",
+      "file": "lib/src/services/im/tencent_message_adapter.dart",
+      "line": 79,
+      "text": "return service.sendMessage(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "sendMessage",
+      "file": "lib/src/services/im/tencent_message_adapter.dart",
+      "line": 223,
+      "text": "final result = await port.sendMessage(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "sendMessage",
+      "file": "lib/src/services/tencent_voice_to_text_service.dart",
+      "line": 141,
+      "text": "final sendResult = await messageService.sendMessage(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "sendMessage",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 5815,
+      "text": "final sendMsgRes = await _messageService.sendMessage(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "sendMessage",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 8643,
+      "text": "final sendMsgRes = await _messageService.sendMessage(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "sendMessage",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 671,
+      "text": "Future<V2TimValueCallback<V2TimMessage>> sendMessage({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "sendMessage",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_service_implement.dart",
+      "line": 739,
+      "text": "await TencentImSDKPlugin.v2TIMManager.getMessageManager().sendMessage(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "sendMessage",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/data_services/message/message_services.dart",
+      "line": 97,
+      "text": "Future<V2TimValueCallback<V2TimMessage>> sendMessage(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "sendMessage",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/ui/controller/tim_uikit_chat_controller.dart",
+      "line": 102,
+      "text": "Future<V2TimValueCallback<V2TimMessage>?>? sendMessage({",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/chat.dart",
+      "line": 3852,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/chat.dart",
+      "line": 3861,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/chat.dart",
+      "line": 8052,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/chat.dart",
+      "line": 8421,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/chat.dart",
+      "line": 9863,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/services/archive_im_local_persist_service.dart",
+      "line": 344,
+      "text": "global.setMessageList(key, next, replace: true);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/services/archive_im_local_persist_service.dart",
+      "line": 763,
+      "text": "global.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/services/call_bubble_insert_service.dart",
+      "line": 65,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/services/call_bubble_insert_service.dart",
+      "line": 117,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/services/chat_failed_message_retry_service.dart",
+      "line": 55,
+      "text": "globalModel.setMessageList(convID, next);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/services/group_local/group_local_tips_service.dart",
+      "line": 1073,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/services/group_local/group_local_tips_service.dart",
+      "line": 1095,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/services/group_local/group_tips_operator_patch_service.dart",
+      "line": 207,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/services/group_local/group_tips_operator_patch_service.dart",
+      "line": 255,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/services/silent_archive_service.dart",
+      "line": 235,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "lib/src/utils/call_bubble_dedupe.dart",
+      "line": 283,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_history_pagination_load.dart",
+      "line": 1251,
+      "text": "model.globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 741,
+      "text": "final commit = globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 1330,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 1564,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 3494,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 3669,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 3990,
+      "text": "globalModel.setMessageList(conversationID, messageList);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 7266,
+      "text": "globalModel.setMessageList(conversationID, currentHistoryMsgList);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 8017,
+      "text": "globalModel.setMessageList(convID, list);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 8316,
+      "text": "final commit = globalModel.setMessageList(convID, next, replace: true);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/separate_models/tui_chat_separate_view_model.dart",
+      "line": 8341,
+      "text": "globalModel.setMessageList(convID, list, replace: true);",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 471,
+      "text": "return setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 589,
+      "text": "final result = setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 1237,
+      "text": "return setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 4927,
+      "text": "setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 8530,
+      "text": "setMessageList(conversationID, messageList,",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/business_logic/view_models/tui_chat_global_model.dart",
+      "line": 9198,
+      "text": "MessageCommitResult setMessageList(",
+      "classification": "app-entry"
+    },
+    {
+      "category": "setMessageList",
+      "file": "third_party/tencent_cloud_chat_uikit/lib/ui/views/TIMUIKitChat/tim_uikit_chat.dart",
+      "line": 2051,
+      "text": "globalModel.setMessageList(",
+      "classification": "app-entry"
+    }
+  ]
+}

@@ -37,7 +37,6 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_value_callback.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_value_callback.dart';
 import 'package:tencent_cloud_chat_sdk/tencent_im_sdk_plugin.dart';
 import 'package:tencent_cloud_chat_uikit/base_widgets/tim_callback.dart';
-import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
 import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_conversation_view_model.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/core/core_services_implements.dart';
 import 'package:tencent_cloud_chat_uikit/data_services/message/conversation_notify_bridge.dart';
@@ -77,8 +76,10 @@ class _MessageDownloadFlight {
 
 class MessageServiceImpl extends MessageService {
   final CoreServicesImpl _coreService = serviceLocator<CoreServicesImpl>();
-  final Map<String, List<V2TimMessage>> messageListMap = {};
-  final Map<String, List<V2TimMessage>> sendingMessage = {};
+  final Set<V2TimAdvancedMsgListener> _advancedListeners =
+      <V2TimAdvancedMsgListener>{};
+  V2TimAdvancedMsgListener? _sdkAdvancedListener;
+  Future<void>? _advancedListenerAttachInFlight;
 
   static const Duration _groupReadMinInterval = Duration(seconds: 5);
   static const Duration _groupReadFrequencyBackoff = Duration(seconds: 12);
@@ -200,32 +201,9 @@ class MessageServiceImpl extends MessageService {
           messageTypeList: messageTypeList,
         );
         if (webRes != null) {
-          final conversationID = userID ?? groupID;
-          final responseMessageList = webRes.messageList;
-          final cachedMessageList = messageListMap[conversationID];
-          List<V2TimMessage> combinedMessageList = [];
-          if (lastMsgID != null && cachedMessageList != null) {
-            combinedMessageList = [
-              ...cachedMessageList,
-              ...responseMessageList
-            ];
-          } else {
-            final bool existSendingMessage =
-                sendingMessage[conversationID] != null &&
-                    sendingMessage[conversationID]!.isNotEmpty;
-            if (existSendingMessage) {
-              combinedMessageList = [
-                ...sendingMessage[conversationID]!,
-                ...responseMessageList
-              ];
-            } else {
-              sendingMessage.remove(conversationID);
-              combinedMessageList = responseMessageList;
-            }
-          }
           return MessageListResponse(
             haveMoreData: !webRes.isFinished,
-            data: combinedMessageList,
+            data: webRes.messageList,
           );
         }
       }
@@ -240,25 +218,6 @@ class MessageServiceImpl extends MessageService {
               lastMsgSeq: lastMsgSeq,
               messageTypeList: messageTypeList);
       final List<V2TimMessage> responseMessageList = res.data ?? [];
-      final conversationID = userID ?? groupID;
-      final cachedMessageList = messageListMap[conversationID];
-      List<V2TimMessage> combinedMessageList = [];
-      if (lastMsgID != null && cachedMessageList != null) {
-        combinedMessageList = [...cachedMessageList, ...responseMessageList];
-      } else {
-        final bool existSendingMessage =
-            sendingMessage[conversationID] != null &&
-                sendingMessage[conversationID]!.isNotEmpty;
-        if (existSendingMessage) {
-          combinedMessageList = [
-            ...sendingMessage[conversationID]!,
-            ...responseMessageList
-          ];
-        } else {
-          sendingMessage.remove(conversationID);
-          combinedMessageList = responseMessageList;
-        }
-      }
       if (res.code != 0) {
         _coreService.callOnCallback(TIMCallback(
             type: TIMCallbackType.API_ERROR,
@@ -274,14 +233,13 @@ class MessageServiceImpl extends MessageService {
         haveMoreData = true;
       }
       return MessageListResponse(
-          haveMoreData: haveMoreData, data: combinedMessageList);
+          haveMoreData: haveMoreData, data: responseMessageList);
     } catch (e) {
       if (_isSoftWebSdkError(e)) {
         _printSoftWebSdkError('load messages fallback failed on web', e);
-        final conversationID = userID ?? groupID;
         return MessageListResponse(
           haveMoreData: false,
-          data: messageListMap[conversationID] ?? const [],
+          data: const [],
         );
       }
       rethrow;
@@ -454,17 +412,8 @@ class MessageServiceImpl extends MessageService {
   Future<void> addAdvancedMsgListener({
     required V2TimAdvancedMsgListener listener,
   }) async {
-    try {
-      await TencentImSDKPlugin.v2TIMManager
-          .getMessageManager()
-          .addAdvancedMsgListener(listener: listener);
-    } catch (e) {
-      if (_isSoftWebSdkError(e)) {
-        _printSoftWebSdkError('message listener ignored on web', e);
-        return;
-      }
-      rethrow;
-    }
+    _advancedListeners.add(listener);
+    await _ensureSdkAdvancedListenerAttached();
   }
 
   @override
@@ -685,6 +634,7 @@ class MessageServiceImpl extends MessageService {
     String? cloudCustomData,
     String? localCustomData,
     bool isExcludedFromContentModeration = false,
+    void Function(String syncMsgID)? onSyncMsgID,
   }) async {
     final toOfficialAccount =
         groupID.isEmpty && _isOfficialAccountUserId(receiver);
@@ -715,6 +665,7 @@ class MessageServiceImpl extends MessageService {
         isExcludedFromContentModeration: isExcludedFromContentModeration,
         isExcludedFromUnreadCount: isExcludedFromUnreadCount,
         toOfficialAccount: toOfficialAccount,
+        onSyncMsgID: onSyncMsgID,
       ),
     );
   }
@@ -732,11 +683,11 @@ class MessageServiceImpl extends MessageService {
     OfflinePushInfo? offlinePushInfo,
     String? cloudCustomData,
     String? localCustomData,
+    void Function(String syncMsgID)? onSyncMsgID,
   }) async {
     debugPrint(
       '[IM_SEND] id=$id receiver=$receiver groupID=$groupID onlineOnly=$onlineUserOnly',
     );
-    final convID = groupID.trim().isNotEmpty ? groupID.trim() : receiver.trim();
     final result =
         await TencentImSDKPlugin.v2TIMManager.getMessageManager().sendMessage(
               id: id,
@@ -751,16 +702,10 @@ class MessageServiceImpl extends MessageService {
               isExcludedFromContentModeration: isExcludedFromContentModeration,
               isExcludedFromUnreadCount: isExcludedFromUnreadCount,
               onSyncMsgID: (syncMsgID) {
-                if (convID.isEmpty || syncMsgID.trim().isEmpty) {
+                if (syncMsgID.trim().isEmpty) {
                   return;
                 }
-                try {
-                  serviceLocator<TUIChatGlobalModel>().bindOutgoingSyncMsgId(
-                    convID,
-                    id,
-                    syncMsgID,
-                  );
-                } catch (_) {}
+                onSyncMsgID?.call(syncMsgID);
               },
             );
     if (result.code != 0) {
@@ -1114,16 +1059,157 @@ class MessageServiceImpl extends MessageService {
   @override
   Future<void> removeAdvancedMsgListener(
       {V2TimAdvancedMsgListener? listener}) async {
+    if (listener == null) {
+      _advancedListeners.clear();
+    } else {
+      _advancedListeners.remove(listener);
+    }
+    if (_advancedListeners.isEmpty) {
+      await _detachSdkAdvancedListener();
+    }
+  }
+
+  Future<void> _ensureSdkAdvancedListenerAttached() async {
+    final inFlight = _advancedListenerAttachInFlight;
+    if (inFlight != null) {
+      await inFlight;
+      return;
+    }
+    if (_sdkAdvancedListener != null || _advancedListeners.isEmpty) {
+      return;
+    }
+    final listener = _createSdkAdvancedListener();
+    final task = () async {
+      try {
+        await TencentImSDKPlugin.v2TIMManager
+            .getMessageManager()
+            .addAdvancedMsgListener(listener: listener);
+        if (_advancedListeners.isNotEmpty) {
+          _sdkAdvancedListener = listener;
+        } else {
+          await TencentImSDKPlugin.v2TIMManager
+              .getMessageManager()
+              .removeAdvancedMsgListener(listener: listener);
+        }
+      } catch (e) {
+        if (_isSoftWebSdkError(e)) {
+          _printSoftWebSdkError('message listener ignored on web', e);
+          return;
+        }
+        rethrow;
+      }
+    }();
+    _advancedListenerAttachInFlight = task;
+    try {
+      await task;
+    } finally {
+      if (identical(_advancedListenerAttachInFlight, task)) {
+        _advancedListenerAttachInFlight = null;
+      }
+    }
+  }
+
+  Future<void> _detachSdkAdvancedListener() async {
+    final inFlight = _advancedListenerAttachInFlight;
+    if (inFlight != null) {
+      try {
+        await inFlight;
+      } catch (_) {}
+    }
+    final listener = _sdkAdvancedListener;
+    _sdkAdvancedListener = null;
+    if (listener == null) return;
     try {
       await TencentImSDKPlugin.v2TIMManager
           .getMessageManager()
           .removeAdvancedMsgListener(listener: listener);
     } catch (e) {
-      if (_isSoftWebSdkError(e)) {
-        _printSoftWebSdkError('message listener remove ignored on web', e);
-        return;
+      if (!_isSoftWebSdkError(e)) rethrow;
+    }
+  }
+
+  V2TimAdvancedMsgListener _createSdkAdvancedListener() {
+    return V2TimAdvancedMsgListener(
+      onRecvNewMessage: (message) {
+        _forEachAdvanced((listener) => listener.onRecvNewMessage(message));
+      },
+      onRecvMessageModified: (message) {
+        _forEachAdvanced(
+          (listener) => listener.onRecvMessageModified(message),
+        );
+      },
+      onSendMessageProgress: (message, progress) {
+        _forEachAdvanced(
+          (listener) => listener.onSendMessageProgress(message, progress),
+        );
+      },
+      onRecvC2CReadReceipt: (receipts) {
+        _forEachAdvanced(
+          (listener) => listener.onRecvC2CReadReceipt(receipts),
+        );
+      },
+      onRecvMessageRevoked: (msgID) {
+        _forEachAdvanced((listener) => listener.onRecvMessageRevoked(msgID));
+      },
+      onRecvMessageReadReceipts: (receipts) {
+        _forEachAdvanced(
+          (listener) => listener.onRecvMessageReadReceipts(receipts),
+        );
+      },
+      onRecvMessageExtensionsChanged: (msgID, extensions) {
+        _forEachAdvanced(
+          (listener) =>
+              listener.onRecvMessageExtensionsChanged(msgID, extensions),
+        );
+      },
+      onRecvMessageExtensionsDeleted: (msgID, extensionKeys) {
+        _forEachAdvanced(
+          (listener) =>
+              listener.onRecvMessageExtensionsDeleted(msgID, extensionKeys),
+        );
+      },
+      onMessageDownloadProgressCallback: (progress) {
+        _forEachAdvanced(
+          (listener) => listener.onMessageDownloadProgressCallback(progress),
+        );
+      },
+      onRecvMessageReactionsChanged: (changeInfos) {
+        _forEachAdvanced(
+          (listener) => listener.onRecvMessageReactionsChanged(changeInfos),
+        );
+      },
+      onRecvMessageRevokedWithInfo: (msgID, operateUser, reason) {
+        _forEachAdvanced(
+          (listener) => listener.onRecvMessageRevokedWithInfo(
+            msgID,
+            operateUser,
+            reason,
+          ),
+        );
+      },
+      onGroupMessagePinned: (groupID, message, isPinned, operateUser) {
+        _forEachAdvanced(
+          (listener) => listener.onGroupMessagePinned(
+            groupID,
+            message,
+            isPinned,
+            operateUser,
+          ),
+        );
+      },
+    );
+  }
+
+  void _forEachAdvanced(
+    void Function(V2TimAdvancedMsgListener listener) callback,
+  ) {
+    final listeners = List<V2TimAdvancedMsgListener>.of(_advancedListeners);
+    for (final listener in listeners) {
+      try {
+        callback(listener);
+      } catch (_) {
+        // One compatibility subscriber must not block the SDK event fanout.
       }
-      rethrow;
     }
   }
 

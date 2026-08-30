@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:tencent_cloud_chat_demo/src/services/call_result_record.dart';
 import 'package:tencent_cloud_chat_demo/src/services/call_result_repository.dart';
+import 'package:tencent_cloud_chat_demo/src/services/local_message_overlay_store.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/call_bubble_dedupe.dart';
 import 'package:tencent_cloud_chat_demo/src/utils/call_user_id.dart';
 import 'package:tencent_cloud_chat_demo/utils/custom_message/calling_message/call_bubble_direction.dart';
@@ -12,8 +13,6 @@ import 'package:tencent_cloud_chat_sdk/models/v2_tim_custom_elem.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_custom_elem.dart';
 import 'package:tencent_cloud_chat_sdk/models/v2_tim_message.dart'
     if (dart.library.html) 'package:tencent_cloud_chat_sdk/web/compatible_models/v2_tim_message.dart';
-import 'package:tencent_cloud_chat_uikit/business_logic/view_models/tui_chat_global_model.dart';
-import 'package:tencent_cloud_chat_uikit/data_services/services_locatar.dart';
 import 'package:tencent_cloud_chat_uikit/tencent_cloud_chat_uikit.dart';
 
 /// Inserts ephemeral local call bubbles into the in-memory chat history so
@@ -38,45 +37,10 @@ class CallBubbleInsertService {
       return false;
     }
 
-    final globalModel = serviceLocator<TUIChatGlobalModel>();
-    var changed = false;
-    for (final key in _messageListKeys(conversationId)) {
-      final existing = globalModel.messageListMap[key];
-      if (existing == null || existing.isEmpty) {
-        continue;
-      }
-      final hasTerminal = hasTerminalBubbleForCallId(existing, callId: callId);
-      final merged = hasTerminal
-          ? List<V2TimMessage>.from(existing)
-          : TUIChatGlobalModel.mergeHistoricalWithInMemory(
-              existing: List<V2TimMessage>.from(existing),
-              fetched: <V2TimMessage>[bubble],
-            );
-      // 本地终态和云端 lk_call/hangup 可能在同一帧分别到达。先按
-      // callId/inviteId 做通话专用归一化，再写回列表，避免两条气泡先后
-      // 闪现，等待异步 dedupe 才收敛。
-      final normalized = CallBubbleDedupe.normalizeCallHistoryMessages(
-        merged,
-        preserveTipIdentity: true,
-      );
-      if (listEquals(existing, normalized)) {
-        continue;
-      }
-      globalModel.setMessageList(
-        key,
-        normalized,
-        needResetNewMessageCount: false,
-      );
-      changed = true;
-      if (kDebugMode) {
-        debugPrint(
-          '[CallBubble] terminal converge callId=$callId conv=$key '
-          'hadTerminal=$hasTerminal before=${existing.length} '
-          'after=${normalized.length} '
-          'reason=${reason.isEmpty ? 'call_end' : reason}',
-        );
-      }
-    }
+    final changed = LocalMessageOverlayStore.instance.upsert(
+      conversationId,
+      bubble,
+    );
 
     if (changed) {
       CallBubbleDedupe.scheduleDedupeConversation(
@@ -99,36 +63,10 @@ class CallBubbleInsertService {
     final canonicalRecord = CallResultRepository.instance.get(callId) ?? record;
     final bubble = buildTerminalBubbleMessage(canonicalRecord);
     if (bubble == null) return false;
-    final globalModel = serviceLocator<TUIChatGlobalModel>();
-    var changed = false;
-    for (final key in _messageListKeys(conversationId)) {
-      final existing = globalModel.messageListMap[key];
-      if (existing == null || existing.isEmpty) continue;
-      // Add the canonical projection as another observation, then retain one
-      // strongest row by callId. A real IM terminal row wins over the local
-      // projection, and every older duplicate is removed in the same commit.
-      final normalized = CallBubbleDedupe.normalizeCallHistoryMessages(
-        <V2TimMessage>[...existing, bubble],
-        preserveTipIdentity: true,
-      );
-      if (listEquals(existing, normalized)) {
-        continue;
-      }
-      globalModel.setMessageList(
-        key,
-        normalized,
-        needResetNewMessageCount: false,
-      );
-      changed = true;
-      if (kDebugMode) {
-        debugPrint(
-          '[CallBubble] lifecycle converge callId=$callId conv=$key '
-          'status=${canonicalRecord.effectiveStatus.wireName} '
-          'before=${existing.length} after=${normalized.length} '
-          'reason=${reason.isEmpty ? 'call_lifecycle_upsert' : reason}',
-        );
-      }
-    }
+    final changed = LocalMessageOverlayStore.instance.upsert(
+      conversationId,
+      bubble,
+    );
     if (changed) {
       CallBubbleDedupe.scheduleDedupeConversation(
         conversationId,
@@ -143,10 +81,6 @@ class CallBubbleInsertService {
   void ensureConversationBubbles(String conversationId, {String reason = ''}) {
     final id = conversationId.trim();
     if (id.isEmpty) {
-      return;
-    }
-    // C2C / 群聊历史以 IM SDK 为准，进页不再回灌本地通话气泡。
-    if (_isC2cConversationId(id) || _isGroupConversationId(id)) {
       return;
     }
     final records = CallResultRepository.instance.recordsForConversation(id);
@@ -275,22 +209,6 @@ class CallBubbleInsertService {
     return message;
   }
 
-  static bool _isC2cConversationId(String conversationId) {
-    final id = conversationId.trim();
-    if (id.startsWith('c2c_')) {
-      return true;
-    }
-    if (id.startsWith('group_') || id.toUpperCase().contains('TGS#')) {
-      return false;
-    }
-    return id.isNotEmpty;
-  }
-
-  static bool _isGroupConversationId(String conversationId) {
-    final id = conversationId.trim();
-    return id.startsWith('group_') || id.toUpperCase().contains('TGS#');
-  }
-
   static String _selfUserId() {
     try {
       return CallUserId.normalizeCallUserId(
@@ -338,21 +256,5 @@ class CallBubbleInsertService {
       default:
         return 'hangup';
     }
-  }
-
-  static List<String> _messageListKeys(String conversationId) {
-    final trimmed = conversationId.trim();
-    if (trimmed.isEmpty) {
-      return const <String>[];
-    }
-    final keys = <String>{trimmed};
-    if (trimmed.startsWith('c2c_') && trimmed.length > 4) {
-      keys.add(trimmed.substring(4));
-    } else if (trimmed.startsWith('group_') && trimmed.length > 6) {
-      keys.add(trimmed.substring(6));
-    } else if (!trimmed.contains('_')) {
-      keys.add('c2c_$trimmed');
-    }
-    return keys.toList(growable: false);
   }
 }
