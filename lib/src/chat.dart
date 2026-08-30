@@ -8067,11 +8067,18 @@ class _ChatState extends State<Chat> with WidgetsBindingObserver {
       existing: existing,
       fetched: <V2TimMessage>[preview],
     );
-    globalModel.setMessageList(
-      convKey,
-      merged,
-      needResetNewMessageCount: false,
-      replace: true,
+    globalModel.commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: convKey,
+        eventID:
+            'preview_merge:${DateTime.now().microsecondsSinceEpoch}',
+        kind: MessageDeltaKind.optimisticAdoption,
+        source: MessageDeltaSource.historyEnvelope,
+        generation: globalModel.messageDeltaGenerationFor(convKey),
+        clearEpoch: globalModel.messageDeltaClearEpochFor(convKey),
+        replace: true,
+        upserts: merged.map(globalModel.messageDeltaRecord),
+      ),
     );
     return true;
   }
@@ -8436,11 +8443,18 @@ class _ChatState extends State<Chat> with WidgetsBindingObserver {
         messages.isNotEmpty) {
       final deduped = TUIChatGlobalModel.dedupeMessages(messages);
       if (deduped.length < count) {
-        globalModel.setMessageList(
-          convKey,
-          deduped,
-          needResetNewMessageCount: false,
-          replace: true,
+        globalModel.commitMessageDelta(
+          MessageDelta<V2TimMessage>(
+            conversationKey: convKey,
+            eventID:
+                'global_model_dedupe:${DateTime.now().microsecondsSinceEpoch}',
+            kind: MessageDeltaKind.compatibilitySnapshot,
+            source: MessageDeltaSource.compatibilityProjection,
+            generation: globalModel.messageDeltaGenerationFor(convKey),
+            clearEpoch: globalModel.messageDeltaClearEpochFor(convKey),
+            replace: true,
+            upserts: deduped.map(globalModel.messageDeltaRecord),
+          ),
         );
         return;
       }
@@ -9859,33 +9873,41 @@ class _ChatState extends State<Chat> with WidgetsBindingObserver {
       return;
     }
     final targetCallId = callId?.trim();
-    final retained = <V2TimMessage>[];
-    var removed = false;
+    final removedIds = <String>[];
+    var matchedAny = false;
     for (final item in existing) {
       final marker = _localCallBubbleMarker(item);
       if (marker == null) {
-        retained.add(item);
         continue;
       }
       if (marker.conversationId != _resolvedConversationID()) {
-        retained.add(item);
         continue;
       }
       if (targetCallId != null &&
           targetCallId.isNotEmpty &&
           marker.callId != targetCallId) {
-        retained.add(item);
         continue;
       }
-      removed = true;
+      matchedAny = true;
+      final id = item.msgID?.trim() ?? '';
+      if (id.isNotEmpty) {
+        removedIds.add(id);
+      }
     }
-    if (!removed) {
+    if (!matchedAny) {
       return;
     }
-    globalModel.setMessageList(
-      convKey,
-      retained,
-      needResetNewMessageCount: false,
+    globalModel.commitMessageDelta(
+      MessageDelta<V2TimMessage>(
+        conversationKey: convKey,
+        eventID:
+            'call_bubble_remove_${targetCallId ?? "all"}:${DateTime.now().microsecondsSinceEpoch}',
+        kind: MessageDeltaKind.delete,
+        source: MessageDeltaSource.userAction,
+        generation: globalModel.messageDeltaGenerationFor(convKey),
+        clearEpoch: globalModel.messageDeltaClearEpochFor(convKey),
+        explicitDeletes: removedIds,
+      ),
     );
   }
 

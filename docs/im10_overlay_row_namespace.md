@@ -1,9 +1,9 @@
 # IM-10 Overlay/Row namespace 迁移计划
 
-更新时间：2026-08-30
+更新时间：2026-08-30 (phase C 收口)
 工作包：IM-10（基于 `docs/腾讯IM模式一_专用消息服务架构设计_重梳版.md` 第 18 节 Overlay/Row 命名空间 + 第 29 节 ADR-008）
 状态：`Draft` → 等产品/技术共同验收 → 转 `Adopted`
-前置：IM-04 / IM-07 / IM-08 / IM-09 phase 1+2 已推送（`2555fe9c` / `deae4f3c`）
+前置：IM-04 / IM-07 / IM-08 / IM-09 phase 1+2 / IM-10 phase A/B 已推送（`2555fe9c` / `deae4f3c` / `d3ab34be` / `c8975a30`）
 
 本文是 IM-10 的静态扫描结果 + 迁移策略文档。
 不做实现，不改写代码，只登记现状、目标、约束和后续 PR 顺序。
@@ -22,7 +22,7 @@
 | 群提示 | `LocalMessageOverlayStore.upsert` + `group_local_tips_service.dart` | Overlay（已就位） |
 | 群提示补丁 | `group_tips_operator_patch_service.dart::setMessageList` | 必须改走 Writer（`commitMessageDelta`） |
 | 通话气泡去重 | `utils/call_bubble_dedupe.dart::setMessageList` | 必须改走 Writer（`commitMessageDelta`） |
-| 历史 bootstrap | `chat.dart:8070/8439/9885 (3853/3862 已迁至 writer)` | 必须改走 Writer |
+| 历史 bootstrap | `chat.dart:8070/8439/9885 (已迁至 writer)` | Writer 已就位 |
 | 归档写入 | `archive_im_local_persist_service.dart:344/766` | 必须改走 Writer |
 | 静默归档 | `silent_archive_service.dart:235` | 必须改走 Writer |
 | 时间线 / 未读线 / 加载行 | chat list 内嵌渲染 | Row namespace（待设计） |
@@ -53,9 +53,6 @@
 `lib/src/` 内（11 处）：
 
 ```
-lib/src/chat.dart:8070       _refreshChatHistoryPreviewMerge + setMessageList
-lib/src/chat.dart:8439       unknown bootstrap path
-lib/src/chat.dart:9885       unknown bootstrap path
 lib/src/services/archive_im_local_persist_service.dart:344
 lib/src/services/archive_im_local_persist_service.dart:766
 lib/src/services/group_local/group_tips_operator_patch_service.dart:207
@@ -87,7 +84,7 @@ lib/src/utils/call_bubble_dedupe.dart:283
 | --- | --- | --- | --- |
 | **IM-10 phase A**（本阶段） | ADR + 静态扫描脚本 + 1 个静态门禁测试 | 文档 + 脚本 | `im10: ADR + 静态扫描 + 门禁` |
 | IM-10 phase B | `chat.dart:3853/3862` 历史 bootstrap 改为 `commitMessageDelta` | 生产代码 done | `im10: chat history bootstrap -> writer` |
-| IM-10 phase C | `chat.dart:8070/8439/9885` 预览合并改为 `commitMessageDelta` | 生产代码 | `im10: chat preview merge -> writer` |
+| IM-10 phase C | `chat.dart:8070/8439/9885` 预览合并/全局去重/通话占位删除改为 `commitMessageDelta` | 生产代码 done | `im10: chat preview/dedupe/call placeholder -> writer` |
 | IM-10 phase D | `archive_im_local_persist_service` 归档写改为 `commitMessageDelta` | 生产代码 | `im10: archive write -> writer` |
 | IM-10 phase E | `group_tips_operator_patch_service` 群提示补丁改为 `commitMessageDelta` | 生产代码 | `im10: group tips patch -> writer` |
 | IM-10 phase F | `call_bubble_dedupe` 通话气泡去重视图合并改为 `commitMessageDelta` | 生产代码 | `im10: call bubble dedupe -> writer` |
@@ -135,9 +132,6 @@ rg -n --glob '*.dart' 'messageListMap\s*\[\s*[a-z]' lib third_party
 `lib/src/` 内允许的 `setMessageList` 调用方：
 
 ```
-lib/src/chat.dart:8070
-lib/src/chat.dart:8439
-lib/src/chat.dart:9885
 lib/src/services/archive_im_local_persist_service.dart:344
 lib/src/services/archive_im_local_persist_service.dart:766
 lib/src/services/group_local/group_tips_operator_patch_service.dart:207
@@ -165,6 +159,12 @@ lib/src/utils/call_bubble_dedupe.dart:283
 - `dart analyze lib/src/services/local_message_overlay_store.dart` → 0 errors
 - `LocalMessageOverlayStore` 已绑定 chat page overlay 渲染（`chat.dart:10304/10307`）
 - 通话气泡和群提示 insert 服务已用 `LocalMessageOverlayStore.upsert`（`call_bubble_insert_service.dart:40/66`、`group_local_tips_service.dart:1062/1070/191`）
+- **IM-10 phase B（`c8975a30`）**：`_hydrateOfficialAccountMessageList` 历史 bootstrap（`chat.dart:3853/3862`）→ `commitMessageDelta`（`optimisticAdoption` + `historyEnvelope` + `replace: true`）；白名单 -2 → 9 条；79/79 回归通过（`im05/im08/im09/im10/im_contracts`）。
+- **IM-10 phase C（pending push）**：`_mergePreviewMessageIfMissing` / `_onChatGlobalModelChanged` / `_removeLocalCallBubblePlaceholder`（`chat.dart:8070/8439/9885`）→ `commitMessageDelta`：
+  - 8070：`optimisticAdoption` + `historyEnvelope` + `replace: true`（preview 折进现有列表）
+  - 8439：`compatibilitySnapshot` + `compatibilityProjection` + `replace: true`（dedupe 后合成稳定快照）
+  - 9885：`delete` + `userAction` + `explicitDeletes`（按 `callId` 删除 local call bubble placeholder）
+  - 白名单 -3 → 6 条；ADR §0/§1.2/§2.1/§3.1 已同步；`dart analyze lib/src/chat.dart` 0 新增 issue（37 全部为旧 `use_build_context_synchronously` 等 info/warning，与改动无关）。
 
 ## 5. 未完成
 
